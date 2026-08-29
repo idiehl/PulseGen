@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "demucs.htdemucs",
+  "version": "4-adapter.1",
+  "displayName": "Demucs v4 htdemucs",
+  "family": "MusicStemSeparation",
+  "runtime": "PythonPyTorch",
+  "nativeSampleRate": 44100,
+  "licenseNotice": "Demucs source is MIT licensed. Model-weight licensing and checksums must be reviewed before this adapter can install weights.",
+  "projectUrl": "https://github.com/facebookresearch/demucs",
+  "artifacts": [],
+  "outputs": ["vocals", "drums", "bass", "other", "exactResidual"],
+  "archivedUpstream": true,
+  "requiresExplicitInstall": true,
+  "knownLimitation": "The upstream repository is archived. The adapter remains disabled until an audited immutable weight manifest is added."
+}

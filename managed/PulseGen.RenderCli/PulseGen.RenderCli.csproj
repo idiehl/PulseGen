@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <Description>Headless deterministic PulseGen renderer and project fixture tool.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
+    <ProjectReference Include="..\PulseGen.Engine.Client\PulseGen.Engine.Client.csproj" />
+  </ItemGroup>
+</Project>

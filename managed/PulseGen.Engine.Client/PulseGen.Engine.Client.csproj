@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Managed client for the versioned PulseGen.Engine C ABI.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
+  </ItemGroup>
+</Project>

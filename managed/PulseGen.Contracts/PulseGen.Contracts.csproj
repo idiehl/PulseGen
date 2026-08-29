@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Versioned, transport-neutral PulseGen project contracts.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\contracts\*.schema.json" Link="Schemas\%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

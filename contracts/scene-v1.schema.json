@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulsegen.atlasuniversalis.com/schemas/scene-v1.schema.json",
+  "title": "PulseGen SceneDocument v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "projectId", "name", "units", "defaultSampleRate", "atmosphere", "emitters", "motionPaths", "materials", "geometry", "receiverRigs", "timeline", "renderProfiles", "captureTakes", "assets", "createdAtUtc", "updatedAtUtc"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "projectId": { "$ref": "#/$defs/guid" },
+    "name": { "type": "string", "minLength": 1 },
+    "units": { "const": "SI" },
+    "defaultSampleRate": { "enum": [44100, 48000, 88200, 96000, 192000] },
+    "atmosphere": { "$ref": "#/$defs/atmosphere" },
+    "emitters": { "type": "array", "items": { "$ref": "#/$defs/emitter" } },
+    "motionPaths": { "type": "array", "items": { "$ref": "#/$defs/motionPath" } },
+    "materials": { "type": "array", "items": { "$ref": "#/$defs/material" } },
+    "geometry": { "type": "array", "items": { "$ref": "#/$defs/geometry" } },
+    "receiverRigs": { "type": "array", "items": { "$ref": "#/$defs/receiver" } },
+    "timeline": { "$ref": "#/$defs/timeline" },
+    "renderProfiles": { "type": "array", "items": { "$ref": "#/$defs/renderProfile" } },
+    "captureTakes": { "type": "array" },
+    "assets": { "type": "array" },
+    "createdAtUtc": { "type": "string", "format": "date-time" },
+    "updatedAtUtc": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "guid": { "type": "string", "format": "uuid" },
+    "vec3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "z", "length"],
+      "properties": {
+        "x": { "type": "number" }, "y": { "type": "number" }, "z": { "type": "number" },
+        "length": { "type": "number", "minimum": 0, "readOnly": true }
+      }
+    },
+    "transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positionMetres", "rotationDegrees", "scale"],
+      "properties": {
+        "positionMetres": { "$ref": "#/$defs/vec3" },
+        "rotationDegrees": { "$ref": "#/$defs/vec3" },
+        "scale": { "$ref": "#/$defs/vec3" }
+      }
+    },
+    "windZone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "transform", "dimensionsMetres", "velocityMetresPerSecond", "turbulence", "noiseSeed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string", "minLength": 1 },
+        "transform": { "$ref": "#/$defs/transform" }, "dimensionsMetres": { "$ref": "#/$defs/vec3" },
+        "velocityMetresPerSecond": { "$ref": "#/$defs/vec3" },
+        "turbulence": { "type": "number", "minimum": 0, "maximum": 1 }, "noiseSeed": { "type": "number" }
+      }
+    },
+    "atmosphere": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["temperatureCelsius", "relativeHumidityPercent", "pressureKilopascals", "windZones"],
+      "properties": {
+        "temperatureCelsius": { "type": "number", "minimum": -80, "maximum": 80 },
+        "relativeHumidityPercent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "pressureKilopascals": { "type": "number", "minimum": 20, "maximum": 120 },
+        "windZones": { "type": "array", "items": { "$ref": "#/$defs/windZone" } }
+      }
+    },
+    "signalNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "kind", "numericParameters", "textParameters"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "kind": { "type": "string" },
+        "waveform": { "type": ["string", "null"] },
+        "numericParameters": { "type": "object", "additionalProperties": { "type": "number" } },
+        "textParameters": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "signalConnection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fromNodeId", "fromPort", "toNodeId", "toPort"],
+      "properties": {
+        "fromNodeId": { "$ref": "#/$defs/guid" }, "fromPort": { "type": "string" },
+        "toNodeId": { "$ref": "#/$defs/guid" }, "toPort": { "type": "string" }
+      }
+    },
+    "signalGraph": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "nodes", "connections"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/signalNode" } },
+        "connections": { "type": "array", "items": { "$ref": "#/$defs/signalConnection" } }
+      }
+    },
+    "emitter": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "transform", "signalGraph", "gainLinear", "minDistanceMetres", "directivity", "enabled"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "transform": { "$ref": "#/$defs/transform" },
+        "signalGraph": { "$ref": "#/$defs/signalGraph" }, "motionPathId": { "oneOf": [{ "$ref": "#/$defs/guid" }, { "type": "null" }] },
+        "gainLinear": { "type": "number", "minimum": 0 }, "minDistanceMetres": { "type": "number", "exclusiveMinimum": 0 },
+        "directivity": { "type": "number" }, "enabled": { "type": "boolean" }
+      }
+    },
+    "motionKeyframe": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timeSeconds", "positionMetres"],
+      "properties": {
+        "timeSeconds": { "type": "number", "minimum": 0 }, "positionMetres": { "$ref": "#/$defs/vec3" },
+        "inTangentMetres": { "oneOf": [{ "$ref": "#/$defs/vec3" }, { "type": "null" }] },
+        "outTangentMetres": { "oneOf": [{ "$ref": "#/$defs/vec3" }, { "type": "null" }] }
+      }
+    },
+    "motionPath": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "kind", "keyframes", "rawGesture", "loop"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "kind": { "type": "string" },
+        "keyframes": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/motionKeyframe" } },
+        "rawGesture": { "type": "array", "items": { "$ref": "#/$defs/motionKeyframe" } }, "loop": { "type": "boolean" }
+      }
+    },
+    "bandArray": { "type": "array", "minItems": 1, "items": { "type": "number", "minimum": 0, "maximum": 1 } },
+    "material": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "octaveBandCentresHz", "absorption", "scattering", "transmission", "roughness"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" },
+        "octaveBandCentresHz": { "type": "array", "items": { "type": "number", "exclusiveMinimum": 0 } },
+        "absorption": { "$ref": "#/$defs/bandArray" }, "scattering": { "$ref": "#/$defs/bandArray" },
+        "transmission": { "$ref": "#/$defs/bandArray" }, "roughness": { "type": "number", "minimum": 0, "maximum": 1 },
+        "visualTextureAssetHash": { "type": ["string", "null"] }
+      }
+    },
+    "geometry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "kind", "transform", "dimensionsMetres", "isDynamic", "occludes", "reflects"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "kind": { "type": "string" },
+        "transform": { "$ref": "#/$defs/transform" }, "materialId": { "oneOf": [{ "$ref": "#/$defs/guid" }, { "type": "null" }] },
+        "dimensionsMetres": { "$ref": "#/$defs/vec3" }, "meshAssetHash": { "type": ["string", "null"] },
+        "isDynamic": { "type": "boolean" }, "occludes": { "type": "boolean" }, "reflects": { "type": "boolean" }
+      }
+    },
+    "receiver": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "kind", "transform", "spacingMetres", "angleDegrees", "headRadiusMetres", "hrtfMode", "polarPattern", "sensitivityDb", "selfNoiseDbSpl", "enabled"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "kind": { "type": "string" },
+        "transform": { "$ref": "#/$defs/transform" }, "spacingMetres": { "type": "number", "minimum": 0.01, "maximum": 5 },
+        "angleDegrees": { "type": "number" }, "headRadiusMetres": { "type": "number" }, "hrtfMode": { "type": "string" },
+        "sofaAssetHash": { "type": ["string", "null"] }, "polarPattern": { "type": "string" },
+        "sensitivityDb": { "type": "number" }, "selfNoiseDbSpl": { "type": "number" },
+        "motionPathId": { "oneOf": [{ "$ref": "#/$defs/guid" }, { "type": "null" }] }, "enabled": { "type": "boolean" }
+      }
+    },
+    "timeline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["durationSeconds", "events"],
+      "properties": { "durationSeconds": { "type": "number", "exclusiveMinimum": 0 }, "events": { "type": "array" } }
+    },
+    "renderProfile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "quality", "sampleRate", "bufferFrames", "reflectionOrder", "rayCount", "impulseResponseSeconds", "seed"],
+      "properties": {
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "quality": { "enum": ["Draft", "Interactive", "Final"] },
+        "sampleRate": { "enum": [44100, 48000, 88200, 96000, 192000] }, "bufferFrames": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "reflectionOrder": { "type": "integer", "minimum": 0 }, "rayCount": { "type": "integer", "minimum": 0 },
+        "impulseResponseSeconds": { "type": "number", "minimum": 0 }, "seed": { "type": "integer" }
+      }
+    }
+  }
+}

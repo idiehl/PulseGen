@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "policy": "All production dependencies require an exact version or commit, checksum, license record, and review before enablement.",
+  "managed": {
+    "Avalonia": "11.3.20",
+    "Avalonia.Desktop": "11.3.20",
+    "Avalonia.Themes.Fluent": "11.3.20",
+    "Microsoft.Data.Sqlite": "10.0.11",
+    "xunit": "2.9.3"
+  },
+  "native": {
+    "miniaudio": {
+      "status": "interface-ready-not-vendored",
+      "license": "MIT-0-or-Public-Domain",
+      "purpose": "WASAPI device transport"
+    },
+    "steam-audio": {
+      "version": "4.8.1",
+      "status": "backend-adapter-planned",
+      "license": "Apache-2.0",
+      "purpose": "HRTF, SOFA, geometric reflections and pathing"
+    },
+    "kissfft": {
+      "status": "adapter-planned",
+      "license": "BSD-3-Clause",
+      "purpose": "STFT and convolution"
+    },
+    "libsndfile": {
+      "status": "adapter-planned",
+      "license": "LGPL-2.1-or-later",
+      "purpose": "lossless audio formats"
+    },
+    "assimp": {
+      "status": "adapter-planned",
+      "license": "BSD-3-Clause",
+      "purpose": "glTF, GLB and OBJ mesh import"
+    }
+  },
+  "modelHost": {
+    "python": {
+      "version": "3.11.9-embeddable-amd64",
+      "sha256": "33b448f95fecb7c6f802157dbd5e6b40a2ad9bfc8b95ca634a06ba4073ad1ac0"
+    },
+    "numpy": {
+      "version": "2.0.2-cp311-win_amd64",
+      "sha256": "286cd40ce2b7d652a6f22efdfc6d1edf879440e53e76a75955bc0c826c7e64dc"
+    }
+  }
+}

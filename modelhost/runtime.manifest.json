@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "name": "CPython embeddable x64",
+    "version": "3.11.9",
+    "source": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embeddable-amd64.zip",
+    "sizeBytes": 11243893,
+    "sha256": "33b448f95fecb7c6f802157dbd5e6b40a2ad9bfc8b95ca634a06ba4073ad1ac0"
+  },
+  "packages": [
+    {
+      "name": "numpy",
+      "version": "2.0.2",
+      "fileName": "numpy-2.0.2-cp311-cp311-win_amd64.whl",
+      "source": "https://files.pythonhosted.org/packages/eb/57/3a3f14d3a759dcf9bf6e9eda905794726b758819df4663f217d658a58695/numpy-2.0.2-cp311-cp311-win_amd64.whl",
+      "sizeBytes": 15910230,
+      "sha256": "286cd40ce2b7d652a6f22efdfc6d1edf879440e53e76a75955bc0c826c7e64dc"
+    }
+  ]
+}

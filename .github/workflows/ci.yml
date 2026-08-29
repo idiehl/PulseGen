@@ -1,0 +1,39 @@
+name: pulsegen-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: lukka/get-cmake@latest
+      - name: Restore managed projects
+        run: dotnet restore PulseGen.sln
+      - name: Build managed projects
+        run: dotnet build PulseGen.sln -c Release --no-restore
+      - name: Test managed contracts
+        run: dotnet test PulseGen.sln -c Release --no-build
+      - name: Configure native engine
+        run: cmake --preset windows-release
+      - name: Build native engine
+        run: cmake --build --preset windows-release
+      - name: Test native engine
+        run: ctest --preset windows-release
+      - name: Validate model-host manifests
+        run: |
+          python -m pip install numpy==2.0.2
+          python -m unittest discover -s modelhost/tests -v
+      - name: Verify managed/native render boundary
+        shell: pwsh
+        run: |
+          Copy-Item out/native/release/native/PulseGen.Engine.dll managed/PulseGen.RenderCli/bin/Release/net10.0/PulseGen.Engine.dll
+          dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release --no-build -- --output out/ci-render

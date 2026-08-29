@@ -1,0 +1,54 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Contracts", "managed\PulseGen.Contracts\PulseGen.Contracts.csproj", "{14D703CD-80E7-4D4B-A8D2-9C9CCF4572F2}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Editor", "managed\PulseGen.Editor\PulseGen.Editor.csproj", "{25511471-6430-4B50-9EBE-449E9D2543E1}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Engine.Client", "managed\PulseGen.Engine.Client\PulseGen.Engine.Client.csproj", "{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.RenderCli", "managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj", "{E107E70F-06E6-42BD-861B-3E65D70190FB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Workspace", "managed\PulseGen.Workspace\PulseGen.Workspace.csproj", "{0BE1F348-D8EC-44D3-9430-485627F4AE09}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Workspace.Tests", "managed\PulseGen.Workspace.Tests\PulseGen.Workspace.Tests.csproj", "{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Contracts.Tests", "managed\PulseGen.Contracts.Tests\PulseGen.Contracts.Tests.csproj", "{A4C9781E-D383-48FC-90AD-931D252DD6EB}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{14D703CD-80E7-4D4B-A8D2-9C9CCF4572F2}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{14D703CD-80E7-4D4B-A8D2-9C9CCF4572F2}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{14D703CD-80E7-4D4B-A8D2-9C9CCF4572F2}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{14D703CD-80E7-4D4B-A8D2-9C9CCF4572F2}.Release|Any CPU.Build.0 = Release|Any CPU
+		{25511471-6430-4B50-9EBE-449E9D2543E1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{25511471-6430-4B50-9EBE-449E9D2543E1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{25511471-6430-4B50-9EBE-449E9D2543E1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{25511471-6430-4B50-9EBE-449E9D2543E1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E107E70F-06E6-42BD-861B-3E65D70190FB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E107E70F-06E6-42BD-861B-3E65D70190FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E107E70F-06E6-42BD-861B-3E65D70190FB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E107E70F-06E6-42BD-861B-3E65D70190FB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Release|Any CPU.Build.0 = Release|Any CPU
+		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A4C9781E-D383-48FC-90AD-931D252DD6EB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A4C9781E-D383-48FC-90AD-931D252DD6EB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A4C9781E-D383-48FC-90AD-931D252DD6EB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A4C9781E-D383-48FC-90AD-931D252DD6EB}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

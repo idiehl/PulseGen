@@ -1,0 +1,366 @@
+{
+  "schemaVersion": 1,
+  "projectId": "aaaaaaaa-0000-4000-8000-000000000000",
+  "name": "Physics Flyby",
+  "units": "SI",
+  "defaultSampleRate": 48000,
+  "atmosphere": {
+    "temperatureCelsius": 20,
+    "relativeHumidityPercent": 50,
+    "pressureKilopascals": 101.325,
+    "windZones": [
+      {
+        "id": "aaaaaaaa-0000-4000-8000-000000000010",
+        "name": "Crosswind",
+        "transform": {
+          "positionMetres": {
+            "x": 0,
+            "y": 0,
+            "z": 0,
+            "length": 0
+          },
+          "rotationDegrees": {
+            "x": 0,
+            "y": 0,
+            "z": 0,
+            "length": 0
+          },
+          "scale": {
+            "x": 1,
+            "y": 1,
+            "z": 1,
+            "length": 1.7320508075688772
+          }
+        },
+        "dimensionsMetres": {
+          "x": 80,
+          "y": 20,
+          "z": 40,
+          "length": 91.6515138991168
+        },
+        "velocityMetresPerSecond": {
+          "x": 0,
+          "y": 0,
+          "z": 2,
+          "length": 2
+        },
+        "turbulence": 0.08,
+        "noiseSeed": 42
+      }
+    ]
+  },
+  "emitters": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000002",
+      "name": "440 Hz moving primitive",
+      "transform": {
+        "positionMetres": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 0
+        },
+        "rotationDegrees": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 0
+        },
+        "scale": {
+          "x": 1,
+          "y": 1,
+          "z": 1,
+          "length": 1.7320508075688772
+        }
+      },
+      "signalGraph": {
+        "schemaVersion": 1,
+        "nodes": [
+          {
+            "id": "aaaaaaaa-0000-4000-8000-000000000003",
+            "name": "Sine",
+            "kind": "Oscillator",
+            "waveform": "Sine",
+            "numericParameters": {
+              "frequencyHz": 440,
+              "amplitude": 1
+            },
+            "textParameters": {}
+          },
+          {
+            "id": "aaaaaaaa-0000-4000-8000-000000000004",
+            "name": "Mono emitter output",
+            "kind": "Output",
+            "waveform": null,
+            "numericParameters": {},
+            "textParameters": {}
+          }
+        ],
+        "connections": [
+          {
+            "fromNodeId": "aaaaaaaa-0000-4000-8000-000000000003",
+            "fromPort": "out",
+            "toNodeId": "aaaaaaaa-0000-4000-8000-000000000004",
+            "toPort": "in"
+          }
+        ]
+      },
+      "motionPathId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "gainLinear": 0.8,
+      "minDistanceMetres": 1,
+      "directivity": 0,
+      "enabled": true
+    }
+  ],
+  "motionPaths": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000001",
+      "name": "Fast left-to-right flyby",
+      "kind": "CatmullRom",
+      "keyframes": [
+        {
+          "timeSeconds": 0,
+          "positionMetres": {
+            "x": -28,
+            "y": 1.7,
+            "z": 4,
+            "length": 28.335313656284097
+          },
+          "inTangentMetres": null,
+          "outTangentMetres": null
+        },
+        {
+          "timeSeconds": 2.5,
+          "positionMetres": {
+            "x": -4,
+            "y": 1.7,
+            "z": 1.5,
+            "length": 4.59782557302906
+          },
+          "inTangentMetres": null,
+          "outTangentMetres": null
+        },
+        {
+          "timeSeconds": 3.5,
+          "positionMetres": {
+            "x": 4,
+            "y": 1.7,
+            "z": 1.5,
+            "length": 4.59782557302906
+          },
+          "inTangentMetres": null,
+          "outTangentMetres": null
+        },
+        {
+          "timeSeconds": 6,
+          "positionMetres": {
+            "x": 28,
+            "y": 1.7,
+            "z": 4,
+            "length": 28.335313656284097
+          },
+          "inTangentMetres": null,
+          "outTangentMetres": null
+        }
+      ],
+      "rawGesture": [],
+      "loop": false
+    }
+  ],
+  "materials": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000005",
+      "name": "Dense stone",
+      "octaveBandCentresHz": [
+        125,
+        250,
+        500,
+        1000,
+        2000,
+        4000,
+        8000,
+        16000
+      ],
+      "absorption": [
+        0.02,
+        0.02,
+        0.025,
+        0.03,
+        0.04,
+        0.05,
+        0.07,
+        0.1
+      ],
+      "scattering": [
+        0.08,
+        0.08,
+        0.1,
+        0.12,
+        0.16,
+        0.2,
+        0.28,
+        0.35
+      ],
+      "transmission": [
+        0.01,
+        0.008,
+        0.005,
+        0.003,
+        0.002,
+        0.001,
+        0,
+        0
+      ],
+      "roughness": 0.4,
+      "visualTextureAssetHash": null
+    }
+  ],
+  "geometry": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000006",
+      "name": "Stone simulation hall",
+      "kind": "ParametricRoom",
+      "transform": {
+        "positionMetres": {
+          "x": 0,
+          "y": 4,
+          "z": 0,
+          "length": 4
+        },
+        "rotationDegrees": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 0
+        },
+        "scale": {
+          "x": 1,
+          "y": 1,
+          "z": 1,
+          "length": 1.7320508075688772
+        }
+      },
+      "materialId": "aaaaaaaa-0000-4000-8000-000000000005",
+      "dimensionsMetres": {
+        "x": 64,
+        "y": 8,
+        "z": 18,
+        "length": 66.96267617113283
+      },
+      "meshAssetHash": null,
+      "isDynamic": false,
+      "occludes": true,
+      "reflects": true
+    }
+  ],
+  "receiverRigs": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000007",
+      "name": "Parametric listener",
+      "kind": "BinauralHead",
+      "transform": {
+        "positionMetres": {
+          "x": 0,
+          "y": 1.7,
+          "z": 0,
+          "length": 1.7
+        },
+        "rotationDegrees": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 0
+        },
+        "scale": {
+          "x": 1,
+          "y": 1,
+          "z": 1,
+          "length": 1.7320508075688772
+        }
+      },
+      "spacingMetres": 0.18,
+      "angleDegrees": 0,
+      "headRadiusMetres": 0.09,
+      "hrtfMode": "Parametric",
+      "sofaAssetHash": null,
+      "polarPattern": "Omni",
+      "sensitivityDb": 0,
+      "selfNoiseDbSpl": 0,
+      "motionPathId": null,
+      "enabled": true
+    },
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000008",
+      "name": "ORTF-style microphones",
+      "kind": "StereoMicrophone",
+      "transform": {
+        "positionMetres": {
+          "x": 0,
+          "y": 1.7,
+          "z": -1,
+          "length": 1.972308292331602
+        },
+        "rotationDegrees": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "length": 0
+        },
+        "scale": {
+          "x": 1,
+          "y": 1,
+          "z": 1,
+          "length": 1.7320508075688772
+        }
+      },
+      "spacingMetres": 0.17,
+      "angleDegrees": 110,
+      "headRadiusMetres": 0.09,
+      "hrtfMode": "Parametric",
+      "sofaAssetHash": null,
+      "polarPattern": "Cardioid",
+      "sensitivityDb": -6,
+      "selfNoiseDbSpl": 0,
+      "motionPathId": null,
+      "enabled": true
+    }
+  ],
+  "timeline": {
+    "durationSeconds": 6,
+    "events": [
+      {
+        "id": "aaaaaaaa-0000-4000-8000-000000000011",
+        "kind": "StartEmitter",
+        "timeSeconds": 0,
+        "targetId": "aaaaaaaa-0000-4000-8000-000000000002",
+        "numericParameters": {},
+        "label": null
+      },
+      {
+        "id": "aaaaaaaa-0000-4000-8000-000000000012",
+        "kind": "EndCapture",
+        "timeSeconds": 6,
+        "targetId": null,
+        "numericParameters": {},
+        "label": "End flyby"
+      }
+    ]
+  },
+  "renderProfiles": [
+    {
+      "id": "aaaaaaaa-0000-4000-8000-000000000009",
+      "name": "Interactive 48k",
+      "quality": "Interactive",
+      "sampleRate": 48000,
+      "bufferFrames": 512,
+      "reflectionOrder": 1,
+      "rayCount": 1024,
+      "impulseResponseSeconds": 2,
+      "seed": 42
+    }
+  ],
+  "captureTakes": [],
+  "assets": [],
+  "createdAtUtc": "2026-08-29T04:45:12.7505166+00:00",
+  "updatedAtUtc": "2026-08-29T04:45:12.7505389+00:00"
+}

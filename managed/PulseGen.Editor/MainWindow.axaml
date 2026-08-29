@@ -1,0 +1,173 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:PulseGen.Editor"
+        x:Class="PulseGen.Editor.MainWindow"
+        Title="PulseGen — Physics-First Audio Workstation"
+        Width="1540" Height="940" MinWidth="1120" MinHeight="720"
+        Background="#0B0F14">
+  <Grid RowDefinitions="52,*,250" ColumnDefinitions="270,*,326">
+    <Border Grid.Row="0" Grid.ColumnSpan="3" Background="#111721" BorderBrush="#273244" BorderThickness="0,0,0,1">
+      <Grid ColumnDefinitions="Auto,20,Auto,*,Auto,16,Auto" Margin="14,0">
+        <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="10">
+          <Border Width="28" Height="28" CornerRadius="7" Background="#64D8CB">
+            <TextBlock Text="∿" Foreground="#071311" FontSize="22" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+          <StackPanel>
+            <TextBlock Text="PULSEGEN" FontWeight="Bold" FontSize="13" Foreground="#ECF7F5" LetterSpacing="1.5" />
+            <TextBlock Text="Physics Flyby · scene v1" FontSize="10" Foreground="#8091A7" />
+          </StackPanel>
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
+          <Button x:Name="PlayButton" Content="▶  Preview" Click="OnPlayClicked" />
+          <Button Content="■  Stop" Click="OnStopClicked" />
+          <Button Content="⇥  Render takes" Background="#266A64" Foreground="White" Click="OnRenderClicked" />
+        </StackPanel>
+        <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
+          <TextBlock Text="48 kHz" Foreground="#B8C4D3" VerticalAlignment="Center" />
+          <Border Background="#152E28" CornerRadius="9" Padding="8,3">
+            <TextBlock Text="ENGINE READY" Foreground="#73E6C2" FontSize="10" FontWeight="SemiBold" />
+          </Border>
+        </StackPanel>
+        <TextBlock Grid.Column="6" Text="0.1.0-alpha" Foreground="#64758B" VerticalAlignment="Center" />
+      </Grid>
+    </Border>
+
+    <Border Grid.Row="1" Grid.Column="0" Background="#10151D" BorderBrush="#253042" BorderThickness="0,0,1,0">
+      <Grid RowDefinitions="Auto,*,Auto">
+        <Grid Margin="14,13,14,8" ColumnDefinitions="*,Auto">
+          <TextBlock Classes="sectionTitle" Text="SCENE WORLD" />
+          <Button Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add a simulation entity" />
+        </Grid>
+        <TreeView Grid.Row="1" Margin="7,0" Background="Transparent">
+          <TreeViewItem Header="▾  Physics Flyby" IsExpanded="True">
+            <TreeViewItem Header="◉  440 Hz moving primitive" IsSelected="True" />
+            <TreeViewItem Header="⌁  Fast flyby path" />
+            <TreeViewItem Header="▱  Stone simulation hall" />
+            <TreeViewItem Header="≋  Crosswind field" />
+            <TreeViewItem Header="◌  Parametric listener" />
+            <TreeViewItem Header="⌇  ORTF microphone pair" />
+          </TreeViewItem>
+        </TreeView>
+        <Border Grid.Row="2" Classes="panel" Margin="10" Padding="11">
+          <StackPanel Spacing="8">
+            <TextBlock Classes="sectionTitle" Text="SIMULATION SUMMARY" />
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+              <TextBlock Text="World units" Foreground="#8292A6" /><TextBlock Grid.Column="1" Classes="value" Text="SI / metres" />
+              <TextBlock Grid.Row="1" Text="Emitters" Foreground="#8292A6" /><TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="1 mono" />
+              <TextBlock Grid.Row="2" Text="Receiver takes" Foreground="#8292A6" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="2 stereo" />
+              <TextBlock Grid.Row="3" Text="Duration" Foreground="#8292A6" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="6.000 s" />
+            </Grid>
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
+
+    <Grid Grid.Row="1" Grid.Column="1" Background="#090D12">
+      <local:WorldViewport x:Name="Viewport" />
+      <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#C60E141D" BorderBrush="#314052" BorderThickness="1" CornerRadius="6" Padding="10,7">
+        <StackPanel Orientation="Horizontal" Spacing="12">
+          <TextBlock Text="PERSPECTIVE" Foreground="#AFC0D2" FontSize="10" />
+          <TextBlock Text="Y ↑" Foreground="#66DCCF" FontSize="10" />
+          <TextBlock Text="GRID 1 m" Foreground="#718198" FontSize="10" />
+        </StackPanel>
+      </Border>
+      <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="14" Background="#D00D131B" CornerRadius="6" Padding="11,8">
+        <StackPanel>
+          <TextBlock x:Name="PositionText" Text="t  0.000 s" Classes="value" FontSize="12" />
+          <TextBlock Text="Drag the time ruler or use Preview" Foreground="#718198" FontSize="10" />
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <Border Grid.Row="1" Grid.Column="2" Background="#10151D" BorderBrush="#253042" BorderThickness="1,0,0,0">
+      <ScrollViewer>
+        <StackPanel Margin="12" Spacing="10">
+          <TextBlock Classes="sectionTitle" Text="PHYSICS INSPECTOR" Margin="3,1,0,2" />
+          <Border Classes="panel" Padding="12">
+            <StackPanel Spacing="8">
+              <TextBlock Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" />
+              <Grid ColumnDefinitions="*,94" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="6">
+                <TextBlock Text="Frequency" Foreground="#8192A7" /><TextBox Grid.Column="1" Text="440 Hz" HorizontalContentAlignment="Right" />
+                <TextBlock Grid.Row="1" Text="Gain" Foreground="#8192A7" /><TextBox Grid.Row="1" Grid.Column="1" Text="−1.94 dB" HorizontalContentAlignment="Right" />
+                <TextBlock Grid.Row="2" Text="Emitter mode" Foreground="#8192A7" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="Point / mono" TextAlignment="Right" />
+                <TextBlock Grid.Row="3" Text="Propagation" Foreground="#8192A7" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="Retarded" TextAlignment="Right" />
+              </Grid>
+            </StackPanel>
+          </Border>
+          <Border Classes="panel" Padding="12">
+            <StackPanel Spacing="8">
+              <TextBlock Classes="sectionTitle" Text="MOTION AT PLAYHEAD" />
+              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
+                <TextBlock Text="Position X" Foreground="#8192A7" /><TextBlock x:Name="PositionX" Grid.Column="1" Classes="value" Text="−28.000 m" />
+                <TextBlock Grid.Row="1" Text="Position Y" Foreground="#8192A7" /><TextBlock x:Name="PositionY" Grid.Row="1" Grid.Column="1" Classes="value" Text="1.700 m" />
+                <TextBlock Grid.Row="2" Text="Position Z" Foreground="#8192A7" /><TextBlock x:Name="PositionZ" Grid.Row="2" Grid.Column="1" Classes="value" Text="4.000 m" />
+                <TextBlock Grid.Row="3" Text="Radial velocity" Foreground="#8192A7" /><TextBlock x:Name="VelocityText" Grid.Row="3" Grid.Column="1" Classes="value" Text="9.73 m/s" />
+              </Grid>
+            </StackPanel>
+          </Border>
+          <Border Classes="panel" Padding="12">
+            <StackPanel Spacing="8">
+              <TextBlock Classes="sectionTitle" Text="ATMOSPHERE" />
+              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
+                <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock Grid.Column="1" Classes="value" Text="20.0 °C" />
+                <TextBlock Grid.Row="1" Text="Humidity" Foreground="#8192A7" /><TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="50.0 %" />
+                <TextBlock Grid.Row="2" Text="Crosswind" Foreground="#8192A7" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="2.00 m/s +Z" />
+                <TextBlock Grid.Row="3" Text="Effective c" Foreground="#8192A7" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="343.42 m/s" />
+              </Grid>
+            </StackPanel>
+          </Border>
+          <Border Background="#101F20" BorderBrush="#22544E" BorderThickness="1" CornerRadius="6" Padding="11">
+            <TextBlock TextWrapping="Wrap" Foreground="#83D8CD" FontSize="11" Text="Direct sound uses retarded emission time. First-order image reflections share the same propagation model." />
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+    </Border>
+
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Background="#0E131B" BorderBrush="#273244" BorderThickness="0,1,0,0">
+      <Grid RowDefinitions="36,*">
+        <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Margin="12,0">
+          <Button Grid.Column="0" Content="SIGNAL GRAPH" Background="Transparent" Foreground="#71DCCF" />
+          <Button Grid.Column="1" Content="SPECTRUM" Background="Transparent" Foreground="#8191A6" />
+          <Button Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#8191A6" />
+          <TextBlock Grid.Column="4" x:Name="StatusText" Text="Ready · native renderer awaiting command" Foreground="#7D8DA2" VerticalAlignment="Center" />
+        </Grid>
+        <Grid Grid.Row="1" ColumnDefinitions="340,*,330" Margin="10,0,10,10">
+          <Border Classes="panel" Padding="12">
+            <Canvas Height="175">
+              <Border Canvas.Left="8" Canvas.Top="39" Width="108" Height="68" CornerRadius="6" Background="#172931" BorderBrush="#3A8E86" BorderThickness="1" Padding="9">
+                <StackPanel><TextBlock Text="SINE" Foreground="#72E0D3" FontSize="10" FontWeight="Bold"/><TextBlock Text="440.00 Hz" Classes="value" Margin="0,9,0,0"/><TextBlock Text="phase continuous" Foreground="#6F8295" FontSize="9"/></StackPanel>
+              </Border>
+              <Path Data="M116,73 L193,73" Stroke="#57C8BC" StrokeThickness="2" />
+              <Ellipse Canvas.Left="189" Canvas.Top="69" Width="8" Height="8" Fill="#57C8BC" />
+              <Border Canvas.Left="197" Canvas.Top="39" Width="112" Height="68" CornerRadius="6" Background="#222331" BorderBrush="#625B86" BorderThickness="1" Padding="9">
+                <StackPanel><TextBlock Text="POINT EMITTER" Foreground="#C5BFE8" FontSize="10" FontWeight="Bold"/><TextBlock Text="mono out" Classes="value" Margin="0,9,0,0"/><TextBlock Text="gain 0.800" Foreground="#7D7894" FontSize="9"/></StackPanel>
+              </Border>
+            </Canvas>
+          </Border>
+          <Border Grid.Column="1" Classes="panel" Margin="8,0" Padding="12">
+            <Grid RowDefinitions="*,22">
+              <Canvas ClipToBounds="True">
+                <Rectangle Canvas.Left="0" Canvas.Top="52" Width="900" Height="1" Fill="#283647" />
+                <Path Data="M0,52 C65,25 125,79 190,52 S315,25 380,52 S505,79 570,52 S695,25 760,52 S840,68 900,52" Stroke="#66DACC" StrokeThickness="2" />
+                <Rectangle x:Name="Playhead" Canvas.Left="0" Width="2" Height="145" Fill="#F2B766" />
+                <Border Canvas.Left="8" Canvas.Top="104" Width="520" Height="25" Background="#193831" CornerRadius="3" Padding="7,4"><TextBlock Text="440 Hz flyby · source active" Foreground="#8FE4D3" FontSize="10"/></Border>
+              </Canvas>
+              <Grid Grid.Row="1" ColumnDefinitions="*,*,*,*,*,*,*">
+                <TextBlock Text="0s" Foreground="#617286"/><TextBlock Grid.Column="1" Text="1" Foreground="#617286"/><TextBlock Grid.Column="2" Text="2" Foreground="#617286"/><TextBlock Grid.Column="3" Text="3" Foreground="#617286"/><TextBlock Grid.Column="4" Text="4" Foreground="#617286"/><TextBlock Grid.Column="5" Text="5" Foreground="#617286"/><TextBlock Grid.Column="6" Text="6s" Foreground="#617286" HorizontalAlignment="Right"/>
+              </Grid>
+            </Grid>
+          </Border>
+          <Border Grid.Column="2" Classes="panel" Padding="12">
+            <StackPanel Spacing="9">
+              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="Parametric listener" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#67D9CD"/></Grid>
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="68" Foreground="#4AC7B8"/><ProgressBar Grid.Column="1" Value="57" Foreground="#4AC7B8"/></Grid>
+              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="ORTF microphone pair" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#B1A4E2"/></Grid>
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="51" Foreground="#8073B6"/><ProgressBar Grid.Column="1" Value="64" Foreground="#8073B6"/></Grid>
+              <TextBlock Text="Each rig renders an isolated stereo take." Foreground="#697B90" FontSize="10" Margin="0,4,0,0" />
+            </StackPanel>
+          </Border>
+        </Grid>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

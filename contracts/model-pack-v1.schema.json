@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulsegen.atlasuniversalis.com/schemas/model-pack-v1.schema.json",
+  "title": "PulseGen ModelPackManifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "version", "displayName", "family", "runtime", "nativeSampleRate", "licenseNotice", "projectUrl", "artifacts", "outputs", "archivedUpstream", "requiresExplicitInstall"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9.-]+$" },
+    "version": { "type": "string", "minLength": 1 },
+    "displayName": { "type": "string", "minLength": 1 },
+    "family": { "enum": ["MusicStemSeparation", "EnvironmentalTextQuery"] },
+    "runtime": { "enum": ["PythonPyTorch", "OnnxCpu", "WinMl"] },
+    "nativeSampleRate": { "type": "integer", "minimum": 8000, "maximum": 192000 },
+    "licenseNotice": { "type": "string", "minLength": 1 },
+    "projectUrl": { "type": "string", "format": "uri" },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source", "sha256", "sizeBytes"],
+        "properties": {
+          "source": { "type": "string", "format": "uri", "pattern": "^https://" },
+          "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+          "sizeBytes": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "outputs": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "archivedUpstream": { "type": "boolean" },
+    "requiresExplicitInstall": { "const": true },
+    "knownLimitation": { "type": ["string", "null"] }
+  }
+}

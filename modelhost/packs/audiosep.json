@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "audiosep.text-query",
+  "version": "adapter.1",
+  "displayName": "AudioSep text-query separation",
+  "family": "EnvironmentalTextQuery",
+  "runtime": "PythonPyTorch",
+  "nativeSampleRate": 32000,
+  "licenseNotice": "AudioSep code and weight licenses must be reviewed and shown to the user before installation.",
+  "projectUrl": "https://github.com/Audio-AGI/AudioSep",
+  "artifacts": [],
+  "outputs": ["queryMatch", "exactResidual"],
+  "archivedUpstream": false,
+  "requiresExplicitInstall": true,
+  "knownLimitation": "The 32 kHz native analysis rate limits recovered bandwidth to 16 kHz. The adapter remains disabled until weight checksums are audited."
+}
