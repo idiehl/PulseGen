@@ -15,16 +15,17 @@
           </Border>
           <StackPanel>
             <TextBlock Text="PULSEGEN" FontWeight="Bold" FontSize="13" Foreground="#ECF7F5" LetterSpacing="1.5" />
-            <TextBlock Text="Physics Flyby · scene v1" FontSize="10" Foreground="#8091A7" />
+            <TextBlock x:Name="SceneNameText" Text="Physics Flyby · scene v1" FontSize="10" Foreground="#8091A7" />
           </StackPanel>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
           <Button x:Name="PlayButton" Content="▶  Preview" Click="OnPlayClicked" />
           <Button Content="■  Stop" Click="OnStopClicked" />
-          <Button x:Name="GestureButton" Content="●  Record gesture" Click="OnGestureClicked" ToolTip.Tip="Draw a motion path directly in the world; raw motion is retained beside simplified automation." />
-          <Button Content="⌑  Save project" Click="OnSaveClicked" />
-          <Button x:Name="AnalyzeButton" Content="⌁  Analyze take" Click="OnAnalyzeClicked" ToolTip.Tip="Decompose the most recently rendered receiver take into partial, transient, and stochastic layers." />
-          <Button Content="⇥  Render takes" Background="#266A64" Foreground="White" Click="OnRenderClicked" />
+          <Button x:Name="GestureButton" Content="●  Gesture" Click="OnGestureClicked" ToolTip.Tip="Draw a motion path directly in the world; raw motion is retained beside simplified automation." />
+          <Button Content="↗  Open" Click="OnOpenClicked" ToolTip.Tip="Open a validated .pulseproj directory without discarding the current scene if loading fails." />
+          <Button Content="⌑  Save" Click="OnSaveClicked" ToolTip.Tip="Save the current scene atomically as a .pulseproj directory." />
+          <Button x:Name="AnalyzeButton" Content="⌁  Analyze" Click="OnAnalyzeClicked" ToolTip.Tip="Decompose the most recently rendered receiver take into partial, transient, and stochastic layers." />
+          <Button Content="⇥  Render" Background="#266A64" Foreground="White" Click="OnRenderClicked" ToolTip.Tip="Render an isolated two-channel WAV take for each enabled receiver rig." />
         </StackPanel>
         <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
           <TextBlock Text="48 kHz" Foreground="#B8C4D3" VerticalAlignment="Center" />
@@ -42,24 +43,15 @@
           <TextBlock Classes="sectionTitle" Text="SCENE WORLD" />
           <Button Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add a simulation entity" />
         </Grid>
-        <TreeView Grid.Row="1" Margin="7,0" Background="Transparent">
-          <TreeViewItem Header="▾  Physics Flyby" IsExpanded="True">
-            <TreeViewItem Header="◉  440 Hz moving primitive" IsSelected="True" />
-            <TreeViewItem Header="⌁  Fast flyby path" />
-            <TreeViewItem Header="▱  Stone simulation hall" />
-            <TreeViewItem Header="≋  Crosswind field" />
-            <TreeViewItem Header="◌  Parametric listener" />
-            <TreeViewItem Header="⌇  ORTF microphone pair" />
-          </TreeViewItem>
-        </TreeView>
+        <TreeView x:Name="SceneTree" Grid.Row="1" Margin="7,0" Background="Transparent" />
         <Border Grid.Row="2" Classes="panel" Margin="10" Padding="11">
           <StackPanel Spacing="8">
             <TextBlock Classes="sectionTitle" Text="SIMULATION SUMMARY" />
             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
               <TextBlock Text="World units" Foreground="#8292A6" /><TextBlock Grid.Column="1" Classes="value" Text="SI / metres" />
-              <TextBlock Grid.Row="1" Text="Emitters" Foreground="#8292A6" /><TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="1 mono" />
-              <TextBlock Grid.Row="2" Text="Receiver takes" Foreground="#8292A6" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="2 stereo" />
-              <TextBlock Grid.Row="3" Text="Duration" Foreground="#8292A6" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="6.000 s" />
+              <TextBlock Grid.Row="1" Text="Emitters" Foreground="#8292A6" /><TextBlock x:Name="EmitterCountText" Grid.Row="1" Grid.Column="1" Classes="value" Text="1 mono" />
+              <TextBlock Grid.Row="2" Text="Receiver takes" Foreground="#8292A6" /><TextBlock x:Name="ReceiverCountText" Grid.Row="2" Grid.Column="1" Classes="value" Text="2 stereo" />
+              <TextBlock Grid.Row="3" Text="Duration" Foreground="#8292A6" /><TextBlock x:Name="DurationSummaryText" Grid.Row="3" Grid.Column="1" Classes="value" Text="6.000 s" />
             </Grid>
             <Border Height="1" Background="#2B3748" Margin="0,3" />
             <TextBlock x:Name="AtlasStateText" Classes="sectionTitle" Text="PRIVATE · LOCAL ONLY" />
@@ -95,7 +87,7 @@
           <TextBlock Classes="sectionTitle" Text="PHYSICS INSPECTOR" Margin="3,1,0,2" />
           <Border Classes="panel" Padding="12">
             <StackPanel Spacing="8">
-              <TextBlock Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" />
+              <TextBlock x:Name="EmitterNameText" Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" />
               <Grid ColumnDefinitions="*,120" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
                 <TextBlock Text="Primitive" Foreground="#8192A7" />
                 <ComboBox x:Name="WaveformBox" Grid.Column="1" SelectionChanged="OnWaveformChanged" />
@@ -132,10 +124,10 @@
             <StackPanel Spacing="8">
               <TextBlock Classes="sectionTitle" Text="ATMOSPHERE" />
               <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
-                <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock Grid.Column="1" Classes="value" Text="20.0 °C" />
-                <TextBlock Grid.Row="1" Text="Humidity" Foreground="#8192A7" /><TextBlock Grid.Row="1" Grid.Column="1" Classes="value" Text="50.0 %" />
-                <TextBlock Grid.Row="2" Text="Crosswind" Foreground="#8192A7" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="2.00 m/s +Z" />
-                <TextBlock Grid.Row="3" Text="Effective c" Foreground="#8192A7" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="343.42 m/s" />
+                <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock x:Name="TemperatureText" Grid.Column="1" Classes="value" Text="20.0 °C" />
+                <TextBlock Grid.Row="1" Text="Humidity" Foreground="#8192A7" /><TextBlock x:Name="HumidityText" Grid.Row="1" Grid.Column="1" Classes="value" Text="50.0 %" />
+                <TextBlock Grid.Row="2" Text="Wind" Foreground="#8192A7" /><TextBlock x:Name="WindText" Grid.Row="2" Grid.Column="1" Classes="value" Text="2.00 m/s +Z" />
+                <TextBlock Grid.Row="3" Text="Effective c" Foreground="#8192A7" /><TextBlock x:Name="EffectiveSpeedText" Grid.Row="3" Grid.Column="1" Classes="value" Text="343.42 m/s" />
               </Grid>
             </StackPanel>
           </Border>
@@ -163,7 +155,7 @@
               <Path Data="M116,73 L193,73" Stroke="#57C8BC" StrokeThickness="2" />
               <Ellipse Canvas.Left="189" Canvas.Top="69" Width="8" Height="8" Fill="#57C8BC" />
               <Border Canvas.Left="197" Canvas.Top="39" Width="112" Height="68" CornerRadius="6" Background="#222331" BorderBrush="#625B86" BorderThickness="1" Padding="9">
-                <StackPanel><TextBlock Text="POINT EMITTER" Foreground="#C5BFE8" FontSize="10" FontWeight="Bold"/><TextBlock Text="mono out" Classes="value" Margin="0,9,0,0"/><TextBlock Text="gain 0.800" Foreground="#7D7894" FontSize="9"/></StackPanel>
+                <StackPanel><TextBlock Text="POINT EMITTER" Foreground="#C5BFE8" FontSize="10" FontWeight="Bold"/><TextBlock Text="mono out" Classes="value" Margin="0,9,0,0"/><TextBlock x:Name="SignalGainText" Text="gain 0.800" Foreground="#7D7894" FontSize="9"/></StackPanel>
               </Border>
             </Canvas>
           </Border>
@@ -173,18 +165,18 @@
                 <Rectangle Canvas.Left="0" Canvas.Top="52" Width="900" Height="1" Fill="#283647" />
                 <Path Data="M0,52 C65,25 125,79 190,52 S315,25 380,52 S505,79 570,52 S695,25 760,52 S840,68 900,52" Stroke="#66DACC" StrokeThickness="2" />
                 <Rectangle x:Name="Playhead" Canvas.Left="0" Width="2" Height="145" Fill="#F2B766" />
-                <Border Canvas.Left="8" Canvas.Top="104" Width="520" Height="25" Background="#193831" CornerRadius="3" Padding="7,4"><TextBlock Text="440 Hz flyby · source active" Foreground="#8FE4D3" FontSize="10"/></Border>
+                <Border Canvas.Left="8" Canvas.Top="104" Width="520" Height="25" Background="#193831" CornerRadius="3" Padding="7,4"><TextBlock x:Name="TimelineSourceText" Text="440 Hz flyby · source active" Foreground="#8FE4D3" FontSize="10"/></Border>
               </Canvas>
               <Grid Grid.Row="1" ColumnDefinitions="*,*,*,*,*,*,*">
-                <TextBlock Text="0s" Foreground="#617286"/><TextBlock Grid.Column="1" Text="1" Foreground="#617286"/><TextBlock Grid.Column="2" Text="2" Foreground="#617286"/><TextBlock Grid.Column="3" Text="3" Foreground="#617286"/><TextBlock Grid.Column="4" Text="4" Foreground="#617286"/><TextBlock Grid.Column="5" Text="5" Foreground="#617286"/><TextBlock Grid.Column="6" Text="6s" Foreground="#617286" HorizontalAlignment="Right"/>
+                <TextBlock x:Name="TimelineTick0" Text="0s" Foreground="#617286"/><TextBlock x:Name="TimelineTick1" Grid.Column="1" Text="1" Foreground="#617286"/><TextBlock x:Name="TimelineTick2" Grid.Column="2" Text="2" Foreground="#617286"/><TextBlock x:Name="TimelineTick3" Grid.Column="3" Text="3" Foreground="#617286"/><TextBlock x:Name="TimelineTick4" Grid.Column="4" Text="4" Foreground="#617286"/><TextBlock x:Name="TimelineTick5" Grid.Column="5" Text="5" Foreground="#617286"/><TextBlock x:Name="TimelineTick6" Grid.Column="6" Text="6s" Foreground="#617286" HorizontalAlignment="Right"/>
               </Grid>
             </Grid>
           </Border>
           <Border Grid.Column="2" Classes="panel" Padding="12">
             <StackPanel Spacing="9">
-              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="Parametric listener" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#67D9CD"/></Grid>
+              <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="ReceiverOneText" Text="Parametric listener" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#67D9CD"/></Grid>
               <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="68" Foreground="#4AC7B8"/><ProgressBar Grid.Column="1" Value="57" Foreground="#4AC7B8"/></Grid>
-              <Grid ColumnDefinitions="*,Auto"><TextBlock Text="ORTF microphone pair" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#B1A4E2"/></Grid>
+              <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="ReceiverTwoText" Text="ORTF microphone pair" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#B1A4E2"/></Grid>
               <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="51" Foreground="#8073B6"/><ProgressBar Grid.Column="1" Value="64" Foreground="#8073B6"/></Grid>
               <TextBlock Text="Each rig renders an isolated stereo take." Foreground="#697B90" FontSize="10" Margin="0,4,0,0" />
             </StackPanel>

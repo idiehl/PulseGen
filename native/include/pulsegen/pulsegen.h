@@ -22,6 +22,7 @@ extern "C" {
 
 #define PG_ABI_VERSION 1u
 #define PG_MAX_NAME_BYTES 64u
+#define PG_ACOUSTIC_BAND_COUNT 8u
 
 typedef struct pg_engine pg_engine;
 
@@ -82,6 +83,11 @@ typedef enum pg_motion_path_kind {
     PG_PATH_RECORDED_GESTURE = 4
 } pg_motion_path_kind;
 
+typedef enum pg_geometry_kind {
+    PG_GEOMETRY_PLANE = 0,
+    PG_GEOMETRY_BOX = 1
+} pg_geometry_kind;
+
 typedef struct pg_vec3 {
     double x;
     double y;
@@ -120,6 +126,36 @@ typedef struct pg_room_desc {
     uint32_t enabled;
     uint32_t reserved;
 } pg_room_desc;
+
+typedef struct pg_acoustic_material_desc {
+    uint32_t size;
+    uint32_t version;
+    const char* name_utf8;
+    double octave_band_centres_hz[PG_ACOUSTIC_BAND_COUNT];
+    double absorption[PG_ACOUSTIC_BAND_COUNT];
+    double scattering[PG_ACOUSTIC_BAND_COUNT];
+    double transmission[PG_ACOUSTIC_BAND_COUNT];
+    double roughness;
+} pg_acoustic_material_desc;
+
+/*
+ * Plane geometry is a bounded local XY rectangle whose normal is local +Z.
+ * Box geometry uses all three dimensions. Rotation is applied in X/Y/Z order.
+ */
+typedef struct pg_geometry_desc {
+    uint32_t size;
+    uint32_t version;
+    const char* name_utf8;
+    pg_geometry_kind kind;
+    pg_vec3 centre_metres;
+    pg_vec3 dimensions_metres;
+    pg_vec3 rotation_degrees;
+    uint32_t material_index;
+    uint32_t occludes;
+    uint32_t reflects;
+    uint32_t enabled;
+    uint32_t reserved;
+} pg_geometry_desc;
 
 typedef struct pg_motion_keyframe {
     double time_seconds;
@@ -246,6 +282,8 @@ PG_API void PG_CALL pg_engine_destroy(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmosphere_desc* atmosphere);
 PG_API pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room);
+PG_API pg_status PG_CALL pg_engine_add_acoustic_material(pg_engine* engine, const pg_acoustic_material_desc* material, uint32_t* out_index);
+PG_API pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_desc* geometry, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);

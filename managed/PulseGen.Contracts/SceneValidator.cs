@@ -52,6 +52,10 @@ public static class SceneValidator
             {
                 issues.Add(new($"emitters/{emitter.Id}/gainLinear", "Gain must be finite and non-negative."));
             }
+            if (!double.IsFinite(emitter.Directivity) || emitter.Directivity is < 0 or > 1)
+            {
+                issues.Add(new($"emitters/{emitter.Id}/directivity", "Emitter directivity must be a finite value in 0..1."));
+            }
 
             ValidateSignalGraph(emitter, issues);
             if (emitter.ChannelMapping == SourceChannelMapping.LinkedDualEmitters &&
@@ -128,9 +132,23 @@ public static class SceneValidator
             }
         }
 
+        if (scene.Materials.Count > 256)
+        {
+            issues.Add(new("materials", "The bounded native acoustic world supports at most 256 materials."));
+        }
         foreach (var material in scene.Materials)
         {
             ValidateMaterial(material, issues);
+        }
+
+        if (scene.Geometry.Count(geometry => geometry.Kind is GeometryKind.Plane or GeometryKind.Box) > 256)
+        {
+            issues.Add(new("geometry", "The bounded native acoustic world supports at most 256 plane and box primitives."));
+        }
+        var materialIds = scene.Materials.Select(material => material.Id).ToHashSet();
+        foreach (var geometry in scene.Geometry)
+        {
+            ValidateGeometry(geometry, materialIds, issues);
         }
 
         foreach (var profile in scene.RenderProfiles)
@@ -273,7 +291,59 @@ public static class SceneValidator
         {
             issues.Add(new($"materials/{material.Id}", "Acoustic coefficients must be finite values in 0..1."));
         }
+        if (material.OctaveBandCentresHz.Any(frequency => !double.IsFinite(frequency) || frequency <= 0) ||
+            material.OctaveBandCentresHz.Zip(material.OctaveBandCentresHz.Skip(1), (left, right) => right > left).Any(increasing => !increasing))
+        {
+            issues.Add(new($"materials/{material.Id}/octaveBandCentresHz", "Octave-band centres must be finite, positive, and strictly increasing."));
+        }
+        if (!double.IsFinite(material.Roughness) || material.Roughness is < 0 or > 1)
+        {
+            issues.Add(new($"materials/{material.Id}/roughness", "Material roughness must be a finite value in 0..1."));
+        }
+        if (material.Absorption.Zip(material.Transmission, (absorption, transmission) => absorption + transmission).Any(total => total > 1 + 1e-12))
+        {
+            issues.Add(new($"materials/{material.Id}", "Absorption plus transmission may not exceed the incident energy in any band."));
+        }
     }
+
+    private static void ValidateGeometry(AcousticGeometry geometry, IReadOnlySet<Guid> materialIds, List<ValidationIssue> issues)
+    {
+        if ((geometry.Occludes || geometry.Reflects) && (geometry.MaterialId is null || !materialIds.Contains(geometry.MaterialId.Value)))
+        {
+            issues.Add(new($"geometry/{geometry.Id}/materialId", "Acoustic geometry requires a valid material."));
+        }
+        if (!Finite(geometry.Transform.PositionMetres) || !Finite(geometry.Transform.RotationDegrees) || !Finite(geometry.Transform.Scale) ||
+            geometry.Transform.Scale.X <= 0 || geometry.Transform.Scale.Y <= 0 || geometry.Transform.Scale.Z <= 0)
+        {
+            issues.Add(new($"geometry/{geometry.Id}/transform", "Geometry transforms must be finite and use positive scale."));
+        }
+
+        var dimensions = geometry.DimensionsMetres;
+        var dimensionsValid = Finite(dimensions) && (geometry.Kind switch
+        {
+            GeometryKind.Plane => dimensions.X > 0 && dimensions.Y > 0 && dimensions.Z >= 0,
+            _ => dimensions.X > 0 && dimensions.Y > 0 && dimensions.Z > 0
+        });
+        if (!dimensionsValid)
+        {
+            issues.Add(new($"geometry/{geometry.Id}/dimensionsMetres", "Geometry dimensions must be finite and positive; plane depth may be zero."));
+        }
+        if (geometry.Kind == GeometryKind.ImportedMesh && string.IsNullOrWhiteSpace(geometry.MeshAssetHash))
+        {
+            issues.Add(new($"geometry/{geometry.Id}/meshAssetHash", "Imported mesh geometry requires a content-addressed mesh asset."));
+        }
+        if (geometry.IsDynamic && (geometry.Occludes || geometry.Reflects))
+        {
+            issues.Add(new($"geometry/{geometry.Id}/isDynamic", "Dynamic acoustic geometry is retained in the project but requires a future motion adapter.", ValidationSeverity.Warning));
+        }
+        if (geometry.Kind is not (GeometryKind.Plane or GeometryKind.Box or GeometryKind.ParametricRoom) && (geometry.Occludes || geometry.Reflects))
+        {
+            issues.Add(new($"geometry/{geometry.Id}/kind", $"{geometry.Kind} acoustic behavior requires an adapter that is not active yet.", ValidationSeverity.Warning));
+        }
+    }
+
+    private static bool Finite(Vector3d value) =>
+        double.IsFinite(value.X) && double.IsFinite(value.Y) && double.IsFinite(value.Z);
 
     private static void ValidateCapsule(MicrophoneCapsule? capsule, string path, List<ValidationIssue> issues)
     {

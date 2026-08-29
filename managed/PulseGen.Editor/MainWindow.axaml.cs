@@ -39,7 +39,6 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        Viewport.Scene = scene;
         Viewport.PlayheadChanged += (_, time) => UpdatePlayhead(time);
         Viewport.PathPointSelected += (_, index) => SelectKeyframe(index);
         Viewport.SceneEdited += (_, message) =>
@@ -48,13 +47,81 @@ public sealed partial class MainWindow : Window
             sceneDirty = true;
             SelectKeyframe(Viewport.SelectedKeyframeIndex);
             StatusText.Text = message;
-            GestureButton.Content = "●  Record gesture";
+            GestureButton.Content = "●  Gesture";
         };
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
-        WaveformBox.SelectedItem = "Sine";
+        ApplySceneToControls(scene, projectDirectory: null);
         initializingControls = false;
+    }
+
+    private void ApplySceneToControls(SceneDocument loadedScene, string? projectDirectory)
+    {
+        scene = loadedScene;
+        lastProjectDirectory = projectDirectory;
+        lastRenderDirectory = null;
+        atlasBaseRevisionId = null;
+        atlasBaseETag = null;
+        sceneDirty = false;
+        Viewport.Scene = scene;
+        Viewport.TimeSeconds = 0;
+        Title = $"PulseGen — {scene.Name}";
+        SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion}";
+        EmitterCountText.Text = $"{scene.Emitters.Count} source{(scene.Emitters.Count == 1 ? string.Empty : "s")}";
+        ReceiverCountText.Text = $"{scene.ReceiverRigs.Count} stereo";
+        DurationSummaryText.Text = $"{scene.Timeline.DurationSeconds:0.000} s";
+        AtlasStateText.Text = "PRIVATE · LOCAL ONLY";
+
+        var treeItems = new List<TreeViewItem>();
+        treeItems.AddRange(scene.Emitters.Select((emitter, index) => new TreeViewItem
+        {
+            Header = $"◉  {emitter.Name}",
+            IsSelected = index == 0
+        }));
+        treeItems.AddRange(scene.MotionPaths.Select(path => new TreeViewItem { Header = $"⌁  {path.Name}" }));
+        treeItems.AddRange(scene.Geometry.Select(geometry => new TreeViewItem { Header = $"▱  {geometry.Name}" }));
+        treeItems.AddRange(scene.Atmosphere.WindZones.Select(zone => new TreeViewItem { Header = $"≋  {zone.Name}" }));
+        treeItems.AddRange(scene.ReceiverRigs.Select(rig => new TreeViewItem
+        {
+            Header = $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}"
+        }));
+        SceneTree.ItemsSource = new[]
+        {
+            new TreeViewItem { Header = $"▾  {scene.Name}", IsExpanded = true, ItemsSource = treeItems }
+        };
+
+        var emitter = scene.Emitters[0];
+        var sourceNode = emitter.SignalGraph.Nodes.FirstOrDefault(node => node.Kind == SignalNodeKind.Oscillator);
+        var frequency = sourceNode?.NumericParameters.GetValueOrDefault("frequencyHz", 440) ?? 440;
+        var waveform = sourceNode?.Waveform ?? WaveformKind.Sine;
+        EmitterNameText.Text = emitter.Name;
+        WaveformBox.SelectedItem = waveform.ToString();
+        WaveformBox.IsEnabled = sourceNode is not null;
+        FrequencyBox.IsEnabled = sourceNode is not null;
+        FrequencyBox.Text = frequency.ToString("0.###", CultureInfo.InvariantCulture);
+        GainBox.Text = emitter.GainLinear.ToString("0.###", CultureInfo.InvariantCulture);
+        SignalNodeTitle.Text = waveform.ToString().ToUpperInvariant();
+        SignalFrequencyText.Text = $"{frequency:0.00} Hz";
+        SignalGainText.Text = $"gain {emitter.GainLinear:0.000}";
+        TimelineSourceText.Text = $"{emitter.Name} · source active";
+
+        TemperatureText.Text = $"{scene.Atmosphere.TemperatureCelsius:0.0} °C";
+        HumidityText.Text = $"{scene.Atmosphere.RelativeHumidityPercent:0.0} %";
+        var wind = scene.Atmosphere.WindZones.FirstOrDefault();
+        WindText.Text = wind is null
+            ? "Still"
+            : $"{wind.VelocityMetresPerSecond.Length:0.00} m/s";
+        EffectiveSpeedText.Text = $"{SceneValidator.SpeedOfSound(scene.Atmosphere.TemperatureCelsius):0.00} m/s";
+
+        ReceiverOneText.Text = scene.ReceiverRigs.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
+        ReceiverTwoText.Text = scene.ReceiverRigs.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";
+        var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
+        for (var index = 0; index < tickLabels.Length; index++)
+        {
+            var tick = scene.Timeline.DurationSeconds * index / (tickLabels.Length - 1);
+            tickLabels[index].Text = index is 0 or 6 ? $"{tick:0.##}s" : $"{tick:0.##}";
+        }
         UpdatePlayhead(0);
         SelectKeyframe(0);
     }
@@ -94,17 +161,22 @@ public sealed partial class MainWindow : Window
     {
         StopPreviewTransport();
         Viewport.IsGestureRecording = !Viewport.IsGestureRecording;
-        GestureButton.Content = Viewport.IsGestureRecording ? "●  Draw in world…" : "●  Record gesture";
+        GestureButton.Content = Viewport.IsGestureRecording ? "●  Draw in world…" : "●  Gesture";
         StatusText.Text = Viewport.IsGestureRecording
             ? "Gesture capture armed · drag across the 3D world; raw samples will be retained"
             : "Gesture capture cancelled";
     }
 
-    private async void OnSaveClicked(object? sender, RoutedEventArgs e)
+    private async void OnOpenClicked(object? sender, RoutedEventArgs e)
     {
+        if (sceneDirty)
+        {
+            StatusText.Text = "Save the current scene before opening another project; unsaved work was preserved";
+            return;
+        }
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = "Choose a folder for the PhysicsFlyby.pulseproj project",
+            Title = "Open a PulseGen .pulseproj directory",
             AllowMultiple = false
         });
         if (folders.Count == 0)
@@ -112,7 +184,46 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        var projectDirectory = Path.Combine(folders[0].Path.LocalPath, "PhysicsFlyby.pulseproj");
+        var projectDirectory = folders[0].Path.LocalPath;
+        try
+        {
+            var loaded = await ProjectStore.LoadAsync(projectDirectory);
+            if (loaded.Emitters.Count == 0 || loaded.MotionPaths.Count == 0 || loaded.ReceiverRigs.Count == 0)
+            {
+                throw new InvalidDataException("The current editor surface requires at least one emitter, motion path, and receiver rig.");
+            }
+            StopPreviewTransport();
+            initializingControls = true;
+            ApplySceneToControls(loaded, projectDirectory);
+            StatusText.Text = $"Project opened · {projectDirectory}";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Project open failed without replacing the current scene: {exception.Message}";
+        }
+        finally
+        {
+            initializingControls = false;
+        }
+    }
+
+    private async void OnSaveClicked(object? sender, RoutedEventArgs e)
+    {
+        var projectDirectory = lastProjectDirectory;
+        if (projectDirectory is null)
+        {
+            var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = $"Choose a parent folder for {ProjectFolderName(scene.Name)}",
+                AllowMultiple = false
+            });
+            if (folders.Count == 0)
+            {
+                return;
+            }
+            projectDirectory = Path.Combine(folders[0].Path.LocalPath, ProjectFolderName(scene.Name));
+        }
+
         try
         {
             scene = scene with { UpdatedAtUtc = DateTimeOffset.UtcNow };
@@ -529,7 +640,7 @@ public sealed partial class MainWindow : Window
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
             "PulseGen",
             "Renders",
-            $"Flyby-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+            $"{SafeName(scene.Name)}-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
 
         StatusText.Text = "Rendering isolated receiver takes…";
         try
@@ -593,7 +704,7 @@ public sealed partial class MainWindow : Window
         {
             analysisCancellation.Dispose();
             analysisCancellation = null;
-            AnalyzeButton.Content = "⌁  Analyze take";
+            AnalyzeButton.Content = "⌁  Analyze";
         }
     }
 
@@ -665,5 +776,14 @@ public sealed partial class MainWindow : Window
         KeyframeX.Text = keyframe.PositionMetres.X.ToString("0.000", CultureInfo.InvariantCulture);
         KeyframeY.Text = keyframe.PositionMetres.Y.ToString("0.000", CultureInfo.InvariantCulture);
         KeyframeZ.Text = keyframe.PositionMetres.Z.ToString("0.000", CultureInfo.InvariantCulture);
+    }
+
+    private static string ProjectFolderName(string sceneName) => $"{SafeName(sceneName)}.pulseproj";
+
+    private static string SafeName(string value)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var filtered = new string(value.Where(character => !invalid.Contains(character)).ToArray()).Trim();
+        return string.IsNullOrWhiteSpace(filtered) ? "PulseGen" : filtered.Replace(' ', '-');
     }
 }

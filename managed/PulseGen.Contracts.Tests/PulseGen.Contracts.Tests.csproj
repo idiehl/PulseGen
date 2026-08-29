@@ -14,5 +14,9 @@
   <ItemGroup>
     <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="..\..\samples\SurfaceEcho.pulseproj\project.json"
+          Link="Fixtures\SurfaceEcho.pulseproj\project.json"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
-

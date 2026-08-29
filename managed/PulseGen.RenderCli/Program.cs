@@ -3,9 +3,20 @@ using PulseGen.Contracts;
 using PulseGen.Engine.Client;
 
 var arguments = ParseArguments(args);
+if (arguments.ContainsKey("project") && arguments.ContainsKey("sample"))
+{
+    throw new ArgumentException("Choose either --project or --sample, not both.");
+}
+
+var selectedSample = arguments.GetValueOrDefault("sample", "flyby");
 var scene = arguments.TryGetValue("project", out var projectDirectory)
     ? await ProjectStore.LoadAsync(projectDirectory)
-    : SampleScenes.CreateFlyby();
+    : selectedSample.ToLowerInvariant() switch
+    {
+        "flyby" => SampleScenes.CreateFlyby(),
+        "surface-echo" => SampleScenes.CreateSurfaceEcho(),
+        _ => throw new ArgumentException($"Unknown sample '{selectedSample}'. Expected flyby or surface-echo.")
+    };
 
 if (arguments.TryGetValue("duration", out var durationText))
 {
@@ -47,7 +58,8 @@ if (arguments.TryGetValue("write-project", out var destination))
 
 if (!arguments.ContainsKey("no-render"))
 {
-    var output = arguments.GetValueOrDefault("output", Path.Combine("out", "renders", "flyby"));
+    var defaultOutputName = arguments.ContainsKey("project") ? "project" : selectedSample.ToLowerInvariant();
+    var output = arguments.GetValueOrDefault("output", Path.Combine("out", "renders", defaultOutputName));
     var receipt = NativeSceneRenderer.Render(scene, output);
     Console.WriteLine(JsonSerializer.Serialize(new
     {

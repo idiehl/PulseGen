@@ -31,6 +31,8 @@ public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 1;
     private const string LibraryName = "PulseGen.Engine";
+    private const string AcousticModel = "primitive-geometry-v1";
+    private static readonly double[] NativeBandCentresHz = [125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
     static NativeSceneRenderer()
     {
@@ -125,9 +127,10 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            1,
+            2,
             EngineVersion,
             AbiVersion,
+            AcousticModel,
             scene.ProjectId,
             scene.Name,
             ProjectStore.ComputeSceneRevisionSha256(scene),
@@ -192,6 +195,7 @@ public static unsafe class NativeSceneRenderer
         int ReceiptVersion,
         string EngineVersion,
         uint NativeAbiVersion,
+        string AcousticModel,
         Guid ProjectId,
         string SceneName,
         string SceneRevisionSha256,
@@ -271,7 +275,9 @@ public static unsafe class NativeSceneRenderer
         try
         {
             ConfigureAtmosphere(scene, engine);
+            var materialIndexes = ConfigureMaterials(scene, engine);
             ConfigureRoom(scene, engine);
+            ConfigureGeometry(scene, engine, materialIndexes);
             foreach (var emitter in scene.Emitters.Where(item => item.Enabled))
             {
                 ConfigureEmitter(scene, engine, emitter);
@@ -347,6 +353,113 @@ public static unsafe class NativeSceneRenderer
         Check(Native.pg_engine_set_atmosphere(engine, &descriptor), engine, "set atmosphere");
     }
 
+    private static Dictionary<Guid, uint> ConfigureMaterials(SceneDocument scene, nint engine)
+    {
+        var indexes = new Dictionary<Guid, uint>(scene.Materials.Count);
+        foreach (var material in scene.Materials)
+        {
+            var namePointer = Marshal.StringToCoTaskMemUTF8(material.Name);
+            try
+            {
+                var descriptor = new NativeAcousticMaterial
+                {
+                    Size = (uint)sizeof(NativeAcousticMaterial),
+                    Version = AbiVersion,
+                    NameUtf8 = namePointer,
+                    Roughness = material.Roughness
+                };
+                for (var index = 0; index < NativeBandCentresHz.Length; index++)
+                {
+                    var centre = NativeBandCentresHz[index];
+                    descriptor.OctaveBandCentresHz[index] = centre;
+                    descriptor.Absorption[index] = BandValue(material, material.Absorption, centre);
+                    descriptor.Scattering[index] = BandValue(material, material.Scattering, centre);
+                    descriptor.Transmission[index] = BandValue(material, material.Transmission, centre);
+                }
+                Check(Native.pg_engine_add_acoustic_material(engine, &descriptor, out var nativeIndex), engine, "add acoustic material");
+                indexes.Add(material.Id, nativeIndex);
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(namePointer);
+            }
+        }
+        return indexes;
+    }
+
+    private static void ConfigureGeometry(SceneDocument scene, nint engine, IReadOnlyDictionary<Guid, uint> materialIndexes)
+    {
+        foreach (var geometry in scene.Geometry.Where(item => item.Kind != GeometryKind.ParametricRoom && (item.Occludes || item.Reflects)))
+        {
+            if (geometry.IsDynamic)
+            {
+                throw new NotSupportedException($"Dynamic acoustic geometry '{geometry.Name}' requires the motion adapter that is not active yet.");
+            }
+            var nativeKind = geometry.Kind switch
+            {
+                GeometryKind.Plane => 0,
+                GeometryKind.Box => 1,
+                _ => throw new NotSupportedException($"Acoustic geometry '{geometry.Name}' uses {geometry.Kind}, which requires a mesh or primitive adapter that is not active yet.")
+            };
+            if (geometry.MaterialId is not { } materialId || !materialIndexes.TryGetValue(materialId, out var materialIndex))
+            {
+                throw new InvalidOperationException($"Acoustic geometry '{geometry.Name}' references a missing material.");
+            }
+
+            var dimensions = new Vector3d(
+                geometry.DimensionsMetres.X * geometry.Transform.Scale.X,
+                geometry.DimensionsMetres.Y * geometry.Transform.Scale.Y,
+                geometry.DimensionsMetres.Z * geometry.Transform.Scale.Z);
+            var namePointer = Marshal.StringToCoTaskMemUTF8(geometry.Name);
+            try
+            {
+                var descriptor = new NativeGeometry
+                {
+                    Size = (uint)sizeof(NativeGeometry),
+                    Version = AbiVersion,
+                    NameUtf8 = namePointer,
+                    Kind = nativeKind,
+                    CentreMetres = ToNative(geometry.Transform.PositionMetres),
+                    DimensionsMetres = ToNative(dimensions),
+                    RotationDegrees = ToNative(geometry.Transform.RotationDegrees),
+                    MaterialIndex = materialIndex,
+                    Occludes = geometry.Occludes ? 1U : 0U,
+                    Reflects = geometry.Reflects ? 1U : 0U,
+                    Enabled = 1U
+                };
+                Check(Native.pg_engine_add_geometry(engine, &descriptor, out _), engine, "add acoustic geometry");
+            }
+            finally
+            {
+                Marshal.FreeCoTaskMem(namePointer);
+            }
+        }
+    }
+
+    private static double BandValue(AcousticMaterial material, IReadOnlyList<double> values, double frequencyHz)
+    {
+        if (frequencyHz <= material.OctaveBandCentresHz[0])
+        {
+            return values[0];
+        }
+        var last = material.OctaveBandCentresHz.Length - 1;
+        if (frequencyHz >= material.OctaveBandCentresHz[last])
+        {
+            return values[last];
+        }
+        for (var index = 1; index <= last; index++)
+        {
+            var upper = material.OctaveBandCentresHz[index];
+            if (frequencyHz <= upper)
+            {
+                var lower = material.OctaveBandCentresHz[index - 1];
+                var amount = (Math.Log2(frequencyHz) - Math.Log2(lower)) / (Math.Log2(upper) - Math.Log2(lower));
+                return values[index - 1] + ((values[index] - values[index - 1]) * Math.Clamp(amount, 0, 1));
+            }
+        }
+        return values[last];
+    }
+
     private static void ConfigureRoom(SceneDocument scene, nint engine)
     {
         var room = scene.Geometry.FirstOrDefault(item => item.Kind == GeometryKind.ParametricRoom);
@@ -354,16 +467,27 @@ public static unsafe class NativeSceneRenderer
         {
             return;
         }
+        if (room.IsDynamic || room.Transform.RotationDegrees.Length > 1e-9)
+        {
+            throw new NotSupportedException($"Parametric room '{room.Name}' must remain static and axis-aligned in the current modal-room solver.");
+        }
 
         var material = scene.Materials.FirstOrDefault(item => item.Id == room.MaterialId)
             ?? throw new InvalidOperationException("The room references a missing acoustic material.");
+        var dimensions = new Vector3d(
+            room.DimensionsMetres.X * room.Transform.Scale.X,
+            room.DimensionsMetres.Y * room.Transform.Scale.Y,
+            room.DimensionsMetres.Z * room.Transform.Scale.Z);
+        static double ReflectionGain(AcousticMaterial value, double frequency) => Math.Sqrt(Math.Max(
+            0,
+            1 - BandValue(value, value.Absorption, frequency) - BandValue(value, value.Transmission, frequency)));
         var descriptor = new NativeRoom
         {
             Size = (uint)sizeof(NativeRoom), Version = AbiVersion,
-            CentreMetres = ToNative(room.Transform.PositionMetres), DimensionsMetres = ToNative(room.DimensionsMetres),
-            WallReflectionLow = Math.Sqrt(1 - material.Absorption[1]),
-            WallReflectionMid = Math.Sqrt(1 - material.Absorption[3]),
-            WallReflectionHigh = Math.Sqrt(1 - material.Absorption[6]),
+            CentreMetres = ToNative(room.Transform.PositionMetres), DimensionsMetres = ToNative(dimensions),
+            WallReflectionLow = ReflectionGain(material, 250),
+            WallReflectionMid = ReflectionGain(material, 1000),
+            WallReflectionHigh = ReflectionGain(material, 8000),
             Scattering = material.Scattering.Average(), Enabled = 1
         };
         Check(Native.pg_engine_set_room(engine, &descriptor), engine, "set room");
@@ -513,35 +637,88 @@ public static unsafe class NativeSceneRenderer
         }
 
         var explicitPath = Environment.GetEnvironmentVariable("PULSEGEN_ENGINE_PATH");
-        if (!string.IsNullOrWhiteSpace(explicitPath) && NativeLibrary.TryLoad(explicitPath, out var explicitHandle))
+        if (!string.IsNullOrWhiteSpace(explicitPath))
         {
-            return explicitHandle;
+            if (TryLoadCompatibleEngine(explicitPath, out var explicitHandle))
+            {
+                return explicitHandle;
+            }
+            throw new DllNotFoundException($"PULSEGEN_ENGINE_PATH does not identify a compatible PulseGen native engine: {explicitPath}");
         }
 
+        var incompatibleCandidateFound = false;
         var localPath = Path.Combine(AppContext.BaseDirectory, "PulseGen.Engine.dll");
-        if (NativeLibrary.TryLoad(localPath, out var localHandle))
+        if (TryLoadCompatibleEngine(localPath, out var localHandle))
         {
             return localHandle;
         }
+        incompatibleCandidateFound |= File.Exists(localPath);
 
         var directory = new DirectoryInfo(Environment.CurrentDirectory);
         while (directory is not null)
         {
-            foreach (var configuration in new[] { "debug", "release" })
+#if DEBUG
+            string[] configurations = ["debug", "release"];
+#else
+            string[] configurations = ["release", "debug"];
+#endif
+            foreach (var configuration in configurations)
             {
                 var candidate = Path.Combine(directory.FullName, "out", "native", configuration, "native", "PulseGen.Engine.dll");
-                if (NativeLibrary.TryLoad(candidate, out var candidateHandle))
+                if (TryLoadCompatibleEngine(candidate, out var candidateHandle))
                 {
                     return candidateHandle;
                 }
+                incompatibleCandidateFound |= File.Exists(candidate);
             }
             directory = directory.Parent;
+        }
+
+        if (incompatibleCandidateFound)
+        {
+            throw new DllNotFoundException("PulseGen native engine candidates were found, but none expose the required ABI and primitive-acoustics operations.");
         }
 
         return NativeLibrary.Load(libraryName, assembly, searchPath);
     }
 
+    private static bool TryLoadCompatibleEngine(string path, out nint handle)
+    {
+        handle = 0;
+        if (!File.Exists(path) || !NativeLibrary.TryLoad(path, out var candidate))
+        {
+            return false;
+        }
+        try
+        {
+            if (!NativeLibrary.TryGetExport(candidate, "pg_get_abi_version", out var abiExport) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _))
+            {
+                return false;
+            }
+            var getAbiVersion = Marshal.GetDelegateForFunctionPointer<GetAbiVersionDelegate>(abiExport);
+            if (getAbiVersion() != AbiVersion)
+            {
+                return false;
+            }
+            handle = candidate;
+            candidate = 0;
+            return true;
+        }
+        finally
+        {
+            if (candidate != 0)
+            {
+                NativeLibrary.Free(candidate);
+            }
+        }
+    }
+
     private static NativeVector ToNative(Vector3d vector) => new() { X = vector.X, Y = vector.Y, Z = vector.Z };
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate uint GetAbiVersionDelegate();
 
     private static void Check(int status, nint engine, string operation)
     {
@@ -557,6 +734,8 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeEngineConfig { public uint Size, Version, MaxEmitters, MaxReceivers, MaxKeyframesPerPath, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphere { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeVector UniformWindMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMotionKeyframe { public double TimeSeconds; public NativeVector PositionMetres; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
@@ -574,6 +753,8 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern nint pg_get_last_error(nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_atmosphere(nint engine, NativeAtmosphere* atmosphere);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_room(nint engine, NativeRoom* room);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_acoustic_material(nint engine, NativeAcousticMaterial* material, out uint index);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_geometry(nint engine, NativeGeometry* geometry, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);

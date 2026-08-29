@@ -240,6 +240,124 @@ std::vector<float> render_static_source(const static_render_options& options)
     return output;
 }
 
+struct surface_render_options {
+    bool add_surface{ true };
+    pg_geometry_kind geometry_kind{ PG_GEOMETRY_PLANE };
+    pg_waveform_kind waveform{ PG_WAVE_SINE };
+    double frequency_hz{ 440.0 };
+    pg_vec3 source_position{ 0.0, 0.0, 2.0 };
+    pg_vec3 geometry_centre{ 0.0, 0.0, 1.0 };
+    pg_vec3 geometry_dimensions{ 10.0, 10.0, 0.0 };
+    pg_vec3 geometry_rotation{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> absorption{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> scattering{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> transmission{};
+    double roughness{};
+    bool occludes{ true };
+    bool reflects{};
+    pg_polar_pattern polar_pattern{ PG_POLAR_OMNI };
+    std::uint64_t start_frame{ 24000U };
+    std::uint32_t frame_count{ 4800U };
+};
+
+std::vector<float> render_surface_source(const surface_render_options& options)
+{
+    constexpr std::uint32_t sample_rate = 48000U;
+    constexpr std::array<double, PG_ACOUSTIC_BAND_COUNT> band_centres{ 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0 };
+    pg_engine* engine = create_engine();
+
+    pg_atmosphere_desc atmosphere{};
+    atmosphere.size = sizeof(atmosphere);
+    atmosphere.version = PG_ABI_VERSION;
+    atmosphere.temperature_celsius = 20.0;
+    atmosphere.relative_humidity_percent = 50.0;
+    atmosphere.pressure_kilopascals = 101.325;
+    REQUIRE(pg_engine_set_atmosphere(engine, &atmosphere) == PG_STATUS_OK);
+
+    pg_room_desc room{};
+    room.size = sizeof(room);
+    room.version = PG_ABI_VERSION;
+    room.dimensions_metres = { 20.0, 8.0, 12.0 };
+    room.enabled = 0U;
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+
+    if (options.add_surface) {
+        pg_acoustic_material_desc material{};
+        material.size = sizeof(material);
+        material.version = PG_ABI_VERSION;
+        material.name_utf8 = "Test_Surface";
+        for (std::size_t index = 0U; index < band_centres.size(); ++index) {
+            material.octave_band_centres_hz[index] = band_centres[index];
+            material.absorption[index] = options.absorption[index];
+            material.scattering[index] = options.scattering[index];
+            material.transmission[index] = options.transmission[index];
+        }
+        material.roughness = options.roughness;
+        std::uint32_t material_index = 0U;
+        REQUIRE(pg_engine_add_acoustic_material(engine, &material, &material_index) == PG_STATUS_OK);
+
+        pg_geometry_desc geometry{};
+        geometry.size = sizeof(geometry);
+        geometry.version = PG_ABI_VERSION;
+        geometry.name_utf8 = "Bounded_Surface";
+        geometry.kind = options.geometry_kind;
+        geometry.centre_metres = options.geometry_centre;
+        geometry.dimensions_metres = options.geometry_dimensions;
+        geometry.rotation_degrees = options.geometry_rotation;
+        geometry.material_index = material_index;
+        geometry.occludes = options.occludes ? 1U : 0U;
+        geometry.reflects = options.reflects ? 1U : 0U;
+        geometry.enabled = 1U;
+        REQUIRE(pg_engine_add_geometry(engine, &geometry, nullptr) == PG_STATUS_OK);
+    }
+
+    const double render_end_seconds = static_cast<double>(options.start_frame + options.frame_count) / sample_rate;
+    const std::array<pg_motion_keyframe, 2> keyframes{
+        pg_motion_keyframe{ 0.0, options.source_position },
+        pg_motion_keyframe{ std::max(2.0, render_end_seconds + 1.0), options.source_position }
+    };
+    pg_signal_emitter_desc emitter{};
+    emitter.size = sizeof(emitter);
+    emitter.version = PG_ABI_VERSION;
+    emitter.name_utf8 = "Surface_Source";
+    emitter.waveform = options.waveform;
+    emitter.frequency_hz = options.frequency_hz;
+    emitter.amplitude = 1.0;
+    emitter.pulse_width = 0.5;
+    emitter.gain_linear = 1.0;
+    emitter.min_distance_metres = 0.01;
+    emitter.motion_path_kind = PG_PATH_LINEAR;
+    emitter.keyframes = keyframes.data();
+    emitter.keyframe_count = static_cast<std::uint32_t>(keyframes.size());
+    emitter.noise_seed = 57U;
+    emitter.enabled = 1U;
+    REQUIRE(pg_engine_add_signal_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
+
+    pg_receiver_rig_desc receiver{};
+    receiver.size = sizeof(receiver);
+    receiver.version = PG_ABI_VERSION;
+    receiver.name_utf8 = "Surface_Microphones";
+    receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    receiver.centre_metres = { 0.0, 0.0, 0.0 };
+    receiver.spacing_metres = 0.01;
+    receiver.head_radius_metres = 0.09;
+    receiver.polar_pattern = options.polar_pattern;
+    receiver.enabled = 1U;
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+
+    std::vector<float> output(static_cast<std::size_t>(options.frame_count) * 2U);
+    REQUIRE(pg_engine_render_receiver_block(
+        engine,
+        0U,
+        options.start_frame,
+        options.frame_count,
+        sample_rate,
+        output.data(),
+        output.size()) == PG_STATUS_OK);
+    pg_engine_destroy(engine);
+    return output;
+}
+
 double channel_rms(const std::vector<float>& samples, std::size_t channel)
 {
     long double sum = 0.0;
@@ -345,6 +463,154 @@ int main(int argument_count, char** arguments)
     for (std::size_t frame = 0; frame < symmetry.frame_count; ++frame) {
         REQUIRE(symmetric_pair[frame * 2U] == symmetric_pair[(frame * 2U) + 1U]);
     }
+
+    pg_engine* atmosphere_validation_engine = create_engine();
+    pg_atmosphere_desc invalid_atmosphere{};
+    invalid_atmosphere.size = sizeof(invalid_atmosphere);
+    invalid_atmosphere.version = PG_ABI_VERSION;
+    invalid_atmosphere.temperature_celsius = 20.0;
+    invalid_atmosphere.relative_humidity_percent = std::numeric_limits<double>::quiet_NaN();
+    invalid_atmosphere.pressure_kilopascals = 101.325;
+    REQUIRE(pg_engine_set_atmosphere(atmosphere_validation_engine, &invalid_atmosphere) == PG_STATUS_INVALID_ARGUMENT);
+    invalid_atmosphere.relative_humidity_percent = 50.0;
+    invalid_atmosphere.pressure_kilopascals = 10.0;
+    REQUIRE(pg_engine_set_atmosphere(atmosphere_validation_engine, &invalid_atmosphere) == PG_STATUS_INVALID_ARGUMENT);
+    invalid_atmosphere.pressure_kilopascals = 101.325;
+    invalid_atmosphere.turbulence = std::numeric_limits<double>::quiet_NaN();
+    REQUIRE(pg_engine_set_atmosphere(atmosphere_validation_engine, &invalid_atmosphere) == PG_STATUS_INVALID_ARGUMENT);
+    pg_engine_destroy(atmosphere_validation_engine);
+
+    pg_engine* material_validation_engine = create_engine();
+    pg_acoustic_material_desc invalid_material{};
+    invalid_material.size = sizeof(invalid_material);
+    invalid_material.version = PG_ABI_VERSION;
+    invalid_material.name_utf8 = "Invalid_Energy";
+    constexpr std::array<double, PG_ACOUSTIC_BAND_COUNT> standard_bands{ 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0 };
+    for (std::size_t index = 0U; index < standard_bands.size(); ++index) {
+        invalid_material.octave_band_centres_hz[index] = standard_bands[index];
+        invalid_material.absorption[index] = 0.8;
+        invalid_material.scattering[index] = 0.1;
+        invalid_material.transmission[index] = 0.3;
+    }
+    invalid_material.roughness = 0.2;
+    REQUIRE(pg_engine_add_acoustic_material(material_validation_engine, &invalid_material, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    pg_geometry_desc missing_material_geometry{};
+    missing_material_geometry.size = sizeof(missing_material_geometry);
+    missing_material_geometry.version = PG_ABI_VERSION;
+    missing_material_geometry.kind = PG_GEOMETRY_BOX;
+    missing_material_geometry.dimensions_metres = { 1.0, 1.0, 1.0 };
+    missing_material_geometry.enabled = 1U;
+    REQUIRE(pg_engine_add_geometry(material_validation_engine, &missing_material_geometry, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    pg_engine_destroy(material_validation_engine);
+
+    surface_render_options baseline_surface{};
+    baseline_surface.add_surface = false;
+    const auto unobstructed_surface = render_surface_source(baseline_surface);
+    surface_render_options opaque_surface = baseline_surface;
+    opaque_surface.add_surface = true;
+    opaque_surface.occludes = true;
+    opaque_surface.reflects = false;
+    const auto opaque_output = render_surface_source(opaque_surface);
+    REQUIRE(channel_rms(opaque_output, 0U) < channel_rms(unobstructed_surface, 0U) * 1.0e-6);
+
+    surface_render_options quarter_energy_surface = opaque_surface;
+    quarter_energy_surface.transmission.fill(0.25);
+    const double quarter_energy_ratio = channel_rms(render_surface_source(quarter_energy_surface), 0U) /
+        channel_rms(unobstructed_surface, 0U);
+    REQUIRE(std::abs(quarter_energy_ratio - 0.5) < 0.002);
+
+    surface_render_options off_axis_surface = opaque_surface;
+    off_axis_surface.geometry_centre = { 2.0, 0.0, 1.0 };
+    off_axis_surface.geometry_rotation = { 0.0, 90.0, 0.0 };
+    const double off_axis_ratio = channel_rms(render_surface_source(off_axis_surface), 0U) /
+        channel_rms(unobstructed_surface, 0U);
+    REQUIRE(std::abs(off_axis_ratio - 1.0) < 1.0e-9);
+
+    surface_render_options banded_surface = opaque_surface;
+    banded_surface.transmission = { 0.64, 0.64, 0.64, 0.64, 0.36, 0.16, 0.04, 0.01 };
+    banded_surface.frequency_hz = 250.0;
+    auto low_baseline_options = banded_surface;
+    low_baseline_options.add_surface = false;
+    const double low_band_ratio = channel_rms(render_surface_source(banded_surface), 0U) /
+        channel_rms(render_surface_source(low_baseline_options), 0U);
+    banded_surface.frequency_hz = 8000.0;
+    auto high_baseline_options = banded_surface;
+    high_baseline_options.add_surface = false;
+    const double high_band_ratio = channel_rms(render_surface_source(banded_surface), 0U) /
+        channel_rms(render_surface_source(high_baseline_options), 0U);
+    REQUIRE(std::abs(low_band_ratio - 0.8) < 0.002);
+    REQUIRE(std::abs(high_band_ratio - 0.2) < 0.002);
+
+    surface_render_options reflection_surface_options{};
+    reflection_surface_options.waveform = PG_WAVE_IMPULSE;
+    reflection_surface_options.frequency_hz = 1.0;
+    reflection_surface_options.source_position = { 1.0, 0.0, 0.0 };
+    reflection_surface_options.geometry_centre = { 0.0, 0.0, 3.0 };
+    reflection_surface_options.geometry_dimensions = { 10.0, 10.0, 0.0 };
+    reflection_surface_options.occludes = false;
+    reflection_surface_options.reflects = true;
+    reflection_surface_options.start_frame = 0U;
+    reflection_surface_options.frame_count = 2048U;
+    auto reflection_baseline_options = reflection_surface_options;
+    reflection_baseline_options.add_surface = false;
+    const auto reflected_impulse = render_surface_source(reflection_surface_options);
+    const auto direct_impulse = render_surface_source(reflection_baseline_options);
+    std::vector<float> reflection_residual(reflected_impulse.size());
+    std::transform(
+        reflected_impulse.begin(),
+        reflected_impulse.end(),
+        direct_impulse.begin(),
+        reflection_residual.begin(),
+        [](float reflected, float direct) { return reflected - direct; });
+    const std::size_t reflection_arrival = first_active_frame(reflection_residual, 1.0e-8F);
+    const double reflected_distance = std::sqrt((0.995 * 0.995) + 36.0);
+    const auto expected_reflection_arrival = static_cast<std::size_t>(std::llround(reflected_distance / 343.42 * 48000.0));
+    REQUIRE(reflection_arrival <= expected_reflection_arrival + 2U && expected_reflection_arrival <= reflection_arrival + 2U);
+    REQUIRE(channel_rms(reflection_residual, 0U) > 1.0e-5);
+
+    auto scattered_reflection_options = reflection_surface_options;
+    scattered_reflection_options.scattering.fill(0.75);
+    const auto scattered_impulse = render_surface_source(scattered_reflection_options);
+    std::vector<float> scattered_reflection_residual(scattered_impulse.size());
+    std::transform(
+        scattered_impulse.begin(),
+        scattered_impulse.end(),
+        direct_impulse.begin(),
+        scattered_reflection_residual.begin(),
+        [](float scattered, float direct) { return scattered - direct; });
+    const double scattered_pressure_ratio = channel_rms(scattered_reflection_residual, 0U) /
+        channel_rms(reflection_residual, 0U);
+    REQUIRE(std::abs(scattered_pressure_ratio - 0.5) < 0.002);
+
+    auto solid_box_reflection_options = reflection_surface_options;
+    solid_box_reflection_options.geometry_kind = PG_GEOMETRY_BOX;
+    solid_box_reflection_options.geometry_centre = { 0.0, 0.0, 3.0 };
+    solid_box_reflection_options.geometry_dimensions = { 10.0, 10.0, 1.0 };
+    auto front_plane_reflection_options = reflection_surface_options;
+    front_plane_reflection_options.geometry_centre = { 0.0, 0.0, 2.5 };
+    const auto solid_box_impulse = render_surface_source(solid_box_reflection_options);
+    const auto front_plane_impulse = render_surface_source(front_plane_reflection_options);
+    REQUIRE(solid_box_impulse.size() == front_plane_impulse.size());
+    for (std::size_t index = 0U; index < solid_box_impulse.size(); ++index) {
+        REQUIRE(std::abs(solid_box_impulse[index] - front_plane_impulse[index]) < 1.0e-7F);
+    }
+
+    auto cardioid_reflection_options = reflection_surface_options;
+    cardioid_reflection_options.polar_pattern = PG_POLAR_CARDIOID;
+    auto cardioid_direct_options = reflection_baseline_options;
+    cardioid_direct_options.polar_pattern = PG_POLAR_CARDIOID;
+    const auto cardioid_reflected_impulse = render_surface_source(cardioid_reflection_options);
+    const auto cardioid_direct_impulse = render_surface_source(cardioid_direct_options);
+    std::vector<float> cardioid_reflection_residual(cardioid_reflected_impulse.size());
+    std::transform(
+        cardioid_reflected_impulse.begin(),
+        cardioid_reflected_impulse.end(),
+        cardioid_direct_impulse.begin(),
+        cardioid_reflection_residual.begin(),
+        [](float reflected, float direct) { return reflected - direct; });
+    const double cardioid_reflection_ratio = channel_rms(cardioid_reflection_residual, 0U) /
+        channel_rms(reflection_residual, 0U);
+    REQUIRE(cardioid_reflection_ratio > 0.99 && cardioid_reflection_ratio <= 1.0);
 
     pg_engine* engine = create_engine();
     configure_scene(engine);

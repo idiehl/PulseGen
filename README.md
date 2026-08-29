@@ -18,12 +18,17 @@ commands and reads bounded telemetry.
 - Retarded-time propagation, distance loss, wind-adjusted sound speed, simple
   air absorption, first-order shoebox reflections, bounded modal resonances,
   late-field feedback delays, and receiver-pair modelling.
+- Static, transformed finite planes and oriented boxes with octave-band
+  absorption, scattering, and transmission; geometry-aware direct occlusion;
+  and bounded first-order image-source reflections. The viewport renders the
+  same authored surfaces used by offline and preview audio.
 - WAV render output as 16/24-bit PCM with explicit TPDF dither or unclipped
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
 - Avalonia editor with linked World, Signal, Physics, Timeline, Receiver, and
-  Library views; numerical SI editing; draggable paths; raw gesture retention;
-  audible preview; atomic save; isolated-take rendering; and analysis import.
+  Library views; validated project reopening; numerical SI editing; draggable
+  paths; raw gesture retention; audible preview; atomic save; isolated-take
+  rendering; and analysis import.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.
@@ -56,7 +61,18 @@ Run the editor after a successful build:
 dotnet run --project managed/PulseGen.Editor/PulseGen.Editor.csproj -c Release
 ```
 
-The sample scene is `samples/PhysicsFlyby.pulseproj/project.json`.
+The repository includes two deterministic sample projects:
+
+- `samples/PhysicsFlyby.pulseproj/project.json` exercises motion, Doppler,
+  atmosphere, a shoebox room, and simultaneous receiver rigs.
+- `samples/SurfaceEcho.pulseproj/project.json` compares finite stone, curtain,
+  and timber surfaces with direct transmission and early reflections.
+
+The render CLI can also create or render either built-in scene:
+
+```powershell
+dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample surface-echo --output out/renders/surface-echo
+```
 
 Atlas integration defaults to the production service origins but does not upload
 anything until **Sync project** is pressed. Candidate or local services can be

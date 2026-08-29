@@ -159,4 +159,138 @@ public static class SampleScenes
             ]
         };
     }
+
+    public static SceneDocument CreateSurfaceEcho()
+    {
+        var scene = CreateFlyby();
+        var sourcePosition = new Vector3d(-3, 1.7, 0);
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Name = "Stationary impulse source",
+            Kind = MotionPathKind.Linear,
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = sourcePosition },
+                new MotionKeyframe { TimeSeconds = 3, PositionMetres = sourcePosition }
+            ]
+        };
+        var sourceNodeIndex = scene.Emitters[0].SignalGraph.Nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+        scene.Emitters[0].SignalGraph.Nodes[sourceNodeIndex] = scene.Emitters[0].SignalGraph.Nodes[sourceNodeIndex] with
+        {
+            Name = "One hertz impulse train",
+            Waveform = WaveformKind.Impulse,
+            NumericParameters = new Dictionary<string, double> { ["frequencyHz"] = 1, ["amplitude"] = 1 }
+        };
+        scene.Emitters[0] = scene.Emitters[0] with { Name = "Impulse emitter", GainLinear = 0.9, MinDistanceMetres = 0.25 };
+
+        var stoneId = Guid.Parse("cccccccc-0000-4000-8000-000000000001");
+        var curtainId = Guid.Parse("cccccccc-0000-4000-8000-000000000002");
+        var timberId = Guid.Parse("cccccccc-0000-4000-8000-000000000003");
+        scene.Materials.Clear();
+        scene.Materials.AddRange(
+        [
+            new AcousticMaterial
+            {
+                Id = stoneId,
+                Name = "Polished stone",
+                Absorption = [0.01, 0.015, 0.02, 0.025, 0.035, 0.05, 0.08, 0.12],
+                Scattering = [0.03, 0.03, 0.04, 0.05, 0.08, 0.12, 0.18, 0.24],
+                Transmission = [0.01, 0.008, 0.005, 0.003, 0.002, 0.001, 0, 0],
+                Roughness = 0.18
+            },
+            new AcousticMaterial
+            {
+                Id = curtainId,
+                Name = "Heavy acoustic curtain",
+                Absorption = [0.08, 0.18, 0.42, 0.68, 0.82, 0.9, 0.94, 0.96],
+                Scattering = [0.12, 0.14, 0.18, 0.22, 0.28, 0.34, 0.4, 0.45],
+                Transmission = [0.12, 0.08, 0.04, 0.02, 0.01, 0.005, 0.002, 0.001],
+                Roughness = 0.85
+            },
+            new AcousticMaterial
+            {
+                Id = timberId,
+                Name = "Dense timber baffle",
+                Absorption = [0.12, 0.1, 0.09, 0.08, 0.08, 0.1, 0.14, 0.2],
+                Scattering = [0.18, 0.18, 0.2, 0.24, 0.3, 0.36, 0.42, 0.48],
+                Transmission = [0.18, 0.14, 0.1, 0.08, 0.05, 0.03, 0.015, 0.008],
+                Roughness = 0.52
+            }
+        ]);
+
+        scene.Geometry.Clear();
+        scene.Geometry.AddRange(
+        [
+            new AcousticGeometry
+            {
+                Id = Guid.Parse("cccccccc-0000-4000-8000-000000000004"),
+                Name = "Stone reflector",
+                Kind = GeometryKind.Plane,
+                MaterialId = stoneId,
+                Transform = new Transform { PositionMetres = new(0, 1.7, 4) },
+                DimensionsMetres = new(12, 5, 0),
+                Occludes = true,
+                Reflects = true
+            },
+            new AcousticGeometry
+            {
+                Id = Guid.Parse("cccccccc-0000-4000-8000-000000000005"),
+                Name = "Curtain reflector",
+                Kind = GeometryKind.Plane,
+                MaterialId = curtainId,
+                Transform = new Transform { PositionMetres = new(0, 1.7, -4), RotationDegrees = new(0, 180, 0) },
+                DimensionsMetres = new(12, 5, 0),
+                Occludes = true,
+                Reflects = true
+            },
+            new AcousticGeometry
+            {
+                Id = Guid.Parse("cccccccc-0000-4000-8000-000000000006"),
+                Name = "Timber transmission baffle",
+                Kind = GeometryKind.Box,
+                MaterialId = timberId,
+                Transform = new Transform { PositionMetres = new(-1.5, 1.7, 0), RotationDegrees = new(0, 12, 0) },
+                DimensionsMetres = new(0.24, 3.2, 2.4),
+                Occludes = true,
+                Reflects = true
+            }
+        ]);
+
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with
+        {
+            Name = "Surface comparison listener",
+            Transform = new Transform { PositionMetres = new(0, 1.7, 0) }
+        };
+        scene.ReceiverRigs[1] = scene.ReceiverRigs[1] with
+        {
+            Name = "Surface comparison microphones",
+            Transform = new Transform { PositionMetres = new(0, 1.7, 0) },
+            PolarPattern = PolarPattern.Omni,
+            SensitivityDb = 0
+        };
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            Name = "Final surface comparison 48k",
+            Quality = RenderQuality.Final,
+            ReflectionOrder = 1,
+            RayCount = 4096,
+            Seed = 314159
+        };
+        return scene with
+        {
+            ProjectId = Guid.Parse("cccccccc-0000-4000-8000-000000000000"),
+            Name = "Surface Echo Study",
+            Atmosphere = new AtmosphereField { TemperatureCelsius = 20, RelativeHumidityPercent = 45, PressureKilopascals = 101.325 },
+            Timeline = new EventTimeline
+            {
+                DurationSeconds = 3,
+                Events =
+                [
+                    new TimelineEvent { Id = Guid.Parse("cccccccc-0000-4000-8000-000000000007"), Kind = TimelineEventKind.StartEmitter, TimeSeconds = 0, TargetId = scene.Emitters[0].Id },
+                    new TimelineEvent { Id = Guid.Parse("cccccccc-0000-4000-8000-000000000008"), Kind = TimelineEventKind.EndCapture, TimeSeconds = 3, Label = "End material comparison" }
+                ]
+            },
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
+        };
+    }
 }

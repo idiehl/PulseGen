@@ -21,9 +21,11 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.2";
+constexpr std::string_view engine_version = "0.1.0-alpha.3";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
+constexpr std::size_t maximum_acoustic_materials = 256U;
+constexpr std::size_t maximum_acoustic_geometries = 256U;
 constexpr std::array<double, 4> late_delay_seconds{ 0.0297, 0.0371, 0.0411, 0.0437 };
 
 struct vec3 {
@@ -51,6 +53,43 @@ vec3 rotate_yaw(vec3 value, double yaw_degrees) noexcept
     const double cosine = std::cos(radians);
     const double sine = std::sin(radians);
     return { (value.x * cosine) + (value.z * sine), value.y, (-value.x * sine) + (value.z * cosine) };
+}
+
+vec3 rotate_euler(vec3 value, vec3 rotation_degrees) noexcept
+{
+    const double x_radians = rotation_degrees.x * std::numbers::pi / 180.0;
+    const double y_radians = rotation_degrees.y * std::numbers::pi / 180.0;
+    const double z_radians = rotation_degrees.z * std::numbers::pi / 180.0;
+
+    const double x_cosine = std::cos(x_radians);
+    const double x_sine = std::sin(x_radians);
+    value = { value.x, (value.y * x_cosine) - (value.z * x_sine), (value.y * x_sine) + (value.z * x_cosine) };
+
+    const double y_cosine = std::cos(y_radians);
+    const double y_sine = std::sin(y_radians);
+    value = { (value.x * y_cosine) + (value.z * y_sine), value.y, (-value.x * y_sine) + (value.z * y_cosine) };
+
+    const double z_cosine = std::cos(z_radians);
+    const double z_sine = std::sin(z_radians);
+    return { (value.x * z_cosine) - (value.y * z_sine), (value.x * z_sine) + (value.y * z_cosine), value.z };
+}
+
+vec3 inverse_rotate_euler(vec3 value, vec3 rotation_degrees) noexcept
+{
+    const double z_radians = -rotation_degrees.z * std::numbers::pi / 180.0;
+    const double z_cosine = std::cos(z_radians);
+    const double z_sine = std::sin(z_radians);
+    value = { (value.x * z_cosine) - (value.y * z_sine), (value.x * z_sine) + (value.y * z_cosine), value.z };
+
+    const double y_radians = -rotation_degrees.y * std::numbers::pi / 180.0;
+    const double y_cosine = std::cos(y_radians);
+    const double y_sine = std::sin(y_radians);
+    value = { (value.x * y_cosine) + (value.z * y_sine), value.y, (-value.x * y_sine) + (value.z * y_cosine) };
+
+    const double x_radians = -rotation_degrees.x * std::numbers::pi / 180.0;
+    const double x_cosine = std::cos(x_radians);
+    const double x_sine = std::sin(x_radians);
+    return { value.x, (value.y * x_cosine) - (value.z * x_sine), (value.y * x_sine) + (value.z * x_cosine) };
 }
 
 std::string safe_name(const char* value, std::string_view fallback)
@@ -108,6 +147,27 @@ struct room_state {
     double reflection_mid{ 0.65 };
     double reflection_high{ 0.5 };
     double scattering{ 0.1 };
+    bool enabled{ true };
+};
+
+struct acoustic_material_state {
+    std::string name;
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> octave_band_centres_hz{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> absorption{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> scattering{};
+    std::array<double, PG_ACOUSTIC_BAND_COUNT> transmission{};
+    double roughness{};
+};
+
+struct geometry_state {
+    std::string name;
+    pg_geometry_kind kind{ PG_GEOMETRY_PLANE };
+    vec3 centre{};
+    vec3 dimensions{ 1.0, 1.0, 1.0 };
+    vec3 rotation_degrees{};
+    std::uint32_t material_index{};
+    bool occludes{ true };
+    bool reflects{ true };
     bool enabled{ true };
 };
 
@@ -174,6 +234,8 @@ struct pg_engine {
     pg_engine_config config{};
     atmosphere_state atmosphere{};
     room_state room{};
+    std::vector<acoustic_material_state> acoustic_materials;
+    std::vector<geometry_state> geometries;
     std::vector<emitter_state> emitters;
     std::vector<receiver_state> receivers;
     std::vector<channel_filter_state> receiver_filters;
@@ -231,6 +293,159 @@ double air_absorption_per_metre(const atmosphere_state& atmosphere, double frequ
     const double dryness = 1.0 - (std::clamp(atmosphere.relative_humidity_percent, 0.0, 100.0) / 100.0);
     const double pressure_factor = 101.325 / std::clamp(atmosphere.pressure_kilopascals, 20.0, 120.0);
     return (0.000015 + (0.000018 * dryness)) * normalized_frequency * normalized_frequency * pressure_factor;
+}
+
+double material_band_value(
+    const acoustic_material_state& material,
+    const std::array<double, PG_ACOUSTIC_BAND_COUNT>& values,
+    double frequency_hz) noexcept
+{
+    const double frequency = std::max(frequency_hz, 1.0);
+    if (frequency <= material.octave_band_centres_hz.front()) {
+        return values.front();
+    }
+    if (frequency >= material.octave_band_centres_hz.back()) {
+        return values.back();
+    }
+    for (std::size_t index = 1U; index < material.octave_band_centres_hz.size(); ++index) {
+        const double upper = material.octave_band_centres_hz[index];
+        if (frequency <= upper) {
+            const double lower = material.octave_band_centres_hz[index - 1U];
+            const double amount = (std::log2(frequency) - std::log2(lower)) / (std::log2(upper) - std::log2(lower));
+            return std::lerp(values[index - 1U], values[index], std::clamp(amount, 0.0, 1.0));
+        }
+    }
+    return values.back();
+}
+
+bool segment_intersects_plane(const geometry_state& geometry, vec3 start, vec3 end) noexcept
+{
+    const vec3 local_start = inverse_rotate_euler(start - geometry.centre, geometry.rotation_degrees);
+    const vec3 local_end = inverse_rotate_euler(end - geometry.centre, geometry.rotation_degrees);
+    const vec3 direction = local_end - local_start;
+    if (std::abs(direction.z) <= 1.0e-12) {
+        return false;
+    }
+    const double amount = -local_start.z / direction.z;
+    if (amount <= 1.0e-7 || amount >= 1.0 - 1.0e-7) {
+        return false;
+    }
+    const vec3 point = local_start + (direction * amount);
+    return std::abs(point.x) <= (geometry.dimensions.x * 0.5) + 1.0e-9 &&
+        std::abs(point.y) <= (geometry.dimensions.y * 0.5) + 1.0e-9;
+}
+
+bool segment_intersects_box(const geometry_state& geometry, vec3 start, vec3 end) noexcept
+{
+    const vec3 local_start = inverse_rotate_euler(start - geometry.centre, geometry.rotation_degrees);
+    const vec3 local_end = inverse_rotate_euler(end - geometry.centre, geometry.rotation_degrees);
+    const std::array<double, 3> origin{ local_start.x, local_start.y, local_start.z };
+    const std::array<double, 3> direction{ local_end.x - local_start.x, local_end.y - local_start.y, local_end.z - local_start.z };
+    const std::array<double, 3> half_dimensions{ geometry.dimensions.x * 0.5, geometry.dimensions.y * 0.5, geometry.dimensions.z * 0.5 };
+    double minimum_amount = 1.0e-7;
+    double maximum_amount = 1.0 - 1.0e-7;
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        if (std::abs(direction[axis]) <= 1.0e-12) {
+            if (origin[axis] < -half_dimensions[axis] || origin[axis] > half_dimensions[axis]) {
+                return false;
+            }
+            continue;
+        }
+        double near_amount = (-half_dimensions[axis] - origin[axis]) / direction[axis];
+        double far_amount = (half_dimensions[axis] - origin[axis]) / direction[axis];
+        if (near_amount > far_amount) {
+            std::swap(near_amount, far_amount);
+        }
+        minimum_amount = std::max(minimum_amount, near_amount);
+        maximum_amount = std::min(maximum_amount, far_amount);
+        if (minimum_amount > maximum_amount) {
+            return false;
+        }
+    }
+    return maximum_amount >= minimum_amount;
+}
+
+bool segment_intersects_geometry(const geometry_state& geometry, vec3 start, vec3 end) noexcept
+{
+    return geometry.kind == PG_GEOMETRY_BOX
+        ? segment_intersects_box(geometry, start, end)
+        : segment_intersects_plane(geometry, start, end);
+}
+
+double occlusion_transmission_gain(
+    const pg_engine& engine,
+    vec3 start,
+    vec3 end,
+    double frequency_hz,
+    std::size_t excluded_geometry = std::numeric_limits<std::size_t>::max()) noexcept
+{
+    double gain = 1.0;
+    for (std::size_t index = 0U; index < engine.geometries.size(); ++index) {
+        const geometry_state& geometry = engine.geometries[index];
+        if (index == excluded_geometry || !geometry.enabled || !geometry.occludes ||
+            geometry.material_index >= engine.acoustic_materials.size() || !segment_intersects_geometry(geometry, start, end)) {
+            continue;
+        }
+        const acoustic_material_state& material = engine.acoustic_materials[geometry.material_index];
+        const double transmission = material_band_value(material, material.transmission, frequency_hz);
+        gain *= std::sqrt(std::clamp(transmission, 0.0, 1.0));
+        if (gain <= 1.0e-12) {
+            return 0.0;
+        }
+    }
+    return gain;
+}
+
+struct reflection_surface {
+    vec3 point{};
+    vec3 normal{ 0.0, 0.0, 1.0 };
+    vec3 tangent_u{ 1.0, 0.0, 0.0 };
+    vec3 tangent_v{ 0.0, 1.0, 0.0 };
+    double half_extent_u{ 0.5 };
+    double half_extent_v{ 0.5 };
+};
+
+std::size_t reflection_surface_count(const geometry_state& geometry) noexcept
+{
+    return geometry.kind == PG_GEOMETRY_BOX ? 6U : 1U;
+}
+
+reflection_surface geometry_reflection_surface(const geometry_state& geometry, std::size_t surface_index) noexcept
+{
+    const std::array<vec3, 3> axes{
+        rotate_euler({ 1.0, 0.0, 0.0 }, geometry.rotation_degrees),
+        rotate_euler({ 0.0, 1.0, 0.0 }, geometry.rotation_degrees),
+        rotate_euler({ 0.0, 0.0, 1.0 }, geometry.rotation_degrees)
+    };
+    const std::array<double, 3> half_dimensions{
+        geometry.dimensions.x * 0.5,
+        geometry.dimensions.y * 0.5,
+        geometry.dimensions.z * 0.5
+    };
+    if (geometry.kind == PG_GEOMETRY_PLANE) {
+        return { geometry.centre, axes[2], axes[0], axes[1], half_dimensions[0], half_dimensions[1] };
+    }
+
+    const std::size_t axis = std::min<std::size_t>(surface_index / 2U, 2U);
+    const double side = (surface_index % 2U) == 0U ? -1.0 : 1.0;
+    const vec3 normal = axes[axis] * side;
+    const std::size_t tangent_u_axis = (axis + 1U) % 3U;
+    const std::size_t tangent_v_axis = (axis + 2U) % 3U;
+    return {
+        geometry.centre + (normal * half_dimensions[axis]),
+        normal,
+        axes[tangent_u_axis],
+        axes[tangent_v_axis],
+        half_dimensions[tangent_u_axis],
+        half_dimensions[tangent_v_axis]
+    };
+}
+
+bool point_within_surface(const reflection_surface& surface, vec3 point) noexcept
+{
+    const vec3 offset = point - surface.point;
+    return std::abs(dot(offset, surface.tangent_u)) <= surface.half_extent_u + 1.0e-8 &&
+        std::abs(dot(offset, surface.tangent_v)) <= surface.half_extent_v + 1.0e-8;
 }
 
 vec3 sample_motion(const emitter_state& emitter, double time_seconds) noexcept
@@ -414,6 +629,7 @@ struct delayed_path_sample {
     double value{};
     double distance{};
     vec3 source_position{};
+    vec3 arrival_direction{ 0.0, 0.0, 1.0 };
 };
 
 delayed_path_sample sample_delayed_path(
@@ -458,8 +674,92 @@ delayed_path_sample sample_delayed_path(
         reflection *= 1.0 - (0.35 * engine.room.scattering);
     }
 
-    const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear * absorption * reflection / attenuation_distance;
-    return { sample, distance, source_position };
+    const double transmission = reflected
+        ? 1.0
+        : occlusion_transmission_gain(engine, source_position, receiver_position, emitter.frequency_hz);
+    const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
+        absorption * reflection * transmission / attenuation_distance;
+    return { sample, distance, source_position, apparent_source - receiver_position };
+}
+
+delayed_path_sample sample_geometry_reflection(
+    const pg_engine& engine,
+    const emitter_state& emitter,
+    vec3 receiver_position,
+    double receive_time,
+    std::uint32_t sample_rate,
+    std::size_t geometry_index,
+    const reflection_surface& surface) noexcept
+{
+    if (geometry_index >= engine.geometries.size()) {
+        return {};
+    }
+    const geometry_state& geometry = engine.geometries[geometry_index];
+    if (!geometry.enabled || !geometry.reflects || geometry.material_index >= engine.acoustic_materials.size()) {
+        return {};
+    }
+
+    double emission_time = receive_time;
+    vec3 source_position = sample_motion(emitter, emission_time);
+    vec3 image_source = source_position;
+    for (int iteration = 0; iteration < 6; ++iteration) {
+        source_position = sample_motion(emitter, emission_time);
+        const double source_plane_distance = dot(source_position - surface.point, surface.normal);
+        image_source = source_position - (surface.normal * (2.0 * source_plane_distance));
+        const double distance = length(receiver_position - image_source);
+        const double propagation_speed = effective_sound_speed(engine.atmosphere, image_source, receiver_position);
+        emission_time = receive_time - (distance / propagation_speed);
+    }
+
+    const double source_side = dot(source_position - surface.point, surface.normal);
+    const double receiver_side = dot(receiver_position - surface.point, surface.normal);
+    if (source_side * receiver_side <= 1.0e-10) {
+        return {};
+    }
+    const vec3 image_direction = image_source - receiver_position;
+    const double denominator = dot(image_direction, surface.normal);
+    if (std::abs(denominator) <= 1.0e-12) {
+        return {};
+    }
+    const double amount = dot(surface.point - receiver_position, surface.normal) / denominator;
+    if (amount <= 1.0e-7 || amount >= 1.0 - 1.0e-7) {
+        return {};
+    }
+    const vec3 reflection_point = receiver_position + (image_direction * amount);
+    if (!point_within_surface(surface, reflection_point)) {
+        return {};
+    }
+    if (geometry.kind == PG_GEOMETRY_BOX &&
+        (segment_intersects_box(geometry, source_position, reflection_point) ||
+            segment_intersects_box(geometry, reflection_point, receiver_position))) {
+        return {};
+    }
+
+    const double distance = length(source_position - reflection_point) + length(reflection_point - receiver_position);
+    const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
+    const double absorption = std::exp(-air_absorption_per_metre(engine.atmosphere, emitter.frequency_hz) * distance);
+    const acoustic_material_state& material = engine.acoustic_materials[geometry.material_index];
+    const double material_absorption = material_band_value(material, material.absorption, emitter.frequency_hz);
+    const double material_transmission = material_band_value(material, material.transmission, emitter.frequency_hz);
+    const double material_scattering = material_band_value(material, material.scattering, emitter.frequency_hz);
+    const double reflection_energy = std::max(0.0, 1.0 - material_absorption - material_transmission);
+    const double high_frequency_amount = std::clamp(std::log2(std::max(emitter.frequency_hz, 125.0) / 125.0) / 7.0, 0.0, 1.0);
+    const double specular_gain = std::sqrt(reflection_energy * (1.0 - material_scattering)) *
+        (1.0 - (0.5 * material.roughness * high_frequency_amount));
+    const double visibility = occlusion_transmission_gain(
+        engine,
+        source_position,
+        reflection_point,
+        emitter.frequency_hz,
+        geometry_index) * occlusion_transmission_gain(
+            engine,
+            reflection_point,
+            receiver_position,
+            emitter.frequency_hz,
+            geometry_index);
+    const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
+        absorption * specular_gain * visibility / attenuation_distance;
+    return { sample, distance, source_position, reflection_point - receiver_position };
 }
 
 double microphone_pattern_gain(pg_polar_pattern pattern, vec3 capsule_forward, vec3 source_direction) noexcept
@@ -571,6 +871,13 @@ std::pair<float, float> render_frame(
     const vec3 forward = normalized(rotate_yaw({ 0.0, 0.0, 1.0 }, receiver.yaw_degrees));
     const vec3 left_position = receiver.centre - (right * (receiver.spacing_metres * 0.5));
     const vec3 right_position = receiver.centre + (right * (receiver.spacing_metres * 0.5));
+    const vec3 left_forward = rotate_yaw(forward, -receiver.microphone_angle_degrees * 0.5);
+    const vec3 right_forward = rotate_yaw(forward, receiver.microphone_angle_degrees * 0.5);
+    const auto receiver_path_sample = [&](const delayed_path_sample& path, vec3 capsule_forward) noexcept {
+        return receiver.kind == PG_RECEIVER_STEREO_MICROPHONE
+            ? path.value * microphone_pattern_gain(receiver.polar_pattern, capsule_forward, path.arrival_direction)
+            : path.value;
+    };
 
     double left_total = 0.0;
     double right_total = 0.0;
@@ -582,24 +889,50 @@ std::pair<float, float> render_frame(
 
         const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, false, 0, false);
         const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, false, 0, false);
-        double left_sample = left_direct.value;
-        double right_sample = right_direct.value;
+        double left_sample = receiver_path_sample(left_direct, left_forward);
+        double right_sample = receiver_path_sample(right_direct, right_forward);
         source_lateral += dot(normalized(left_direct.source_position - receiver.centre), right);
 
         if (engine.room.enabled && reflection_order > 0U) {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int side = 0; side < 2; ++side) {
-                    left_sample += sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, true, axis, side != 0).value;
-                    right_sample += sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, true, axis, side != 0).value;
+                    const auto left_reflection = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, true, axis, side != 0);
+                    const auto right_reflection = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, true, axis, side != 0);
+                    left_sample += receiver_path_sample(left_reflection, left_forward);
+                    right_sample += receiver_path_sample(right_reflection, right_forward);
                 }
             }
         }
 
-        if (receiver.kind == PG_RECEIVER_STEREO_MICROPHONE) {
-            const vec3 left_forward = rotate_yaw(forward, -receiver.microphone_angle_degrees * 0.5);
-            const vec3 right_forward = rotate_yaw(forward, receiver.microphone_angle_degrees * 0.5);
-            left_sample *= microphone_pattern_gain(receiver.polar_pattern, left_forward, left_direct.source_position - left_position);
-            right_sample *= microphone_pattern_gain(receiver.polar_pattern, right_forward, right_direct.source_position - right_position);
+        if (reflection_order > 0U) {
+            for (std::size_t geometry_index = 0U; geometry_index < engine.geometries.size(); ++geometry_index) {
+                const geometry_state& geometry = engine.geometries[geometry_index];
+                if (!geometry.enabled || !geometry.reflects) {
+                    continue;
+                }
+                const std::size_t surface_count = reflection_surface_count(geometry);
+                for (std::size_t surface_index = 0U; surface_index < surface_count; ++surface_index) {
+                    const reflection_surface surface = geometry_reflection_surface(geometry, surface_index);
+                    const auto left_reflection = sample_geometry_reflection(
+                        engine,
+                        emitter,
+                        left_position,
+                        receive_time,
+                        sample_rate,
+                        geometry_index,
+                        surface);
+                    const auto right_reflection = sample_geometry_reflection(
+                        engine,
+                        emitter,
+                        right_position,
+                        receive_time,
+                        sample_rate,
+                        geometry_index,
+                        surface);
+                    left_sample += receiver_path_sample(left_reflection, left_forward);
+                    right_sample += receiver_path_sample(right_reflection, right_forward);
+                }
+            }
         }
 
         left_total += left_sample;
@@ -716,6 +1049,8 @@ pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_engine** o
     try {
         auto* engine = new pg_engine{};
         engine->config = *config;
+        engine->acoustic_materials.reserve(maximum_acoustic_materials);
+        engine->geometries.reserve(maximum_acoustic_geometries);
         engine->emitters.reserve(config->max_emitters);
         engine->receivers.reserve(config->max_receivers);
         engine->receiver_filters.reserve(config->max_receivers);
@@ -745,6 +1080,8 @@ pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine)
     if (require_stopped_device(engine, "Clearing the scene") != PG_STATUS_OK) {
         return PG_STATUS_INVALID_ARGUMENT;
     }
+    engine->acoustic_materials.clear();
+    engine->geometries.clear();
     engine->emitters.clear();
     engine->receivers.clear();
     engine->receiver_filters.clear();
@@ -767,7 +1104,9 @@ pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmospher
     }
     const vec3 wind = from_c(atmosphere->uniform_wind_metres_per_second);
     if (!finite(wind) || !std::isfinite(atmosphere->temperature_celsius) || atmosphere->temperature_celsius < -80.0 || atmosphere->temperature_celsius > 80.0 ||
-        atmosphere->relative_humidity_percent < 0.0 || atmosphere->relative_humidity_percent > 100.0 || atmosphere->turbulence < 0.0 || atmosphere->turbulence > 1.0) {
+        !std::isfinite(atmosphere->relative_humidity_percent) || atmosphere->relative_humidity_percent < 0.0 || atmosphere->relative_humidity_percent > 100.0 ||
+        !std::isfinite(atmosphere->pressure_kilopascals) || atmosphere->pressure_kilopascals < 20.0 || atmosphere->pressure_kilopascals > 120.0 ||
+        !std::isfinite(atmosphere->turbulence) || atmosphere->turbulence < 0.0 || atmosphere->turbulence > 1.0) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Atmosphere values are outside bounded acoustic ranges.");
     }
     engine->atmosphere = {
@@ -810,6 +1149,101 @@ pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room
         room->scattering,
         room->enabled != 0U
     };
+    return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_add_acoustic_material(
+    pg_engine* engine,
+    const pg_acoustic_material_desc* material,
+    uint32_t* out_index)
+{
+    if (engine == nullptr || material == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(material)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Acoustic material structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Adding an acoustic material") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (engine->acoustic_materials.size() >= maximum_acoustic_materials) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Acoustic material capacity exceeded.");
+    }
+    if (!std::isfinite(material->roughness) || material->roughness < 0.0 || material->roughness > 1.0) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Acoustic material roughness must be in 0..1.");
+    }
+
+    acoustic_material_state state{};
+    state.name = safe_name(material->name_utf8, "Material");
+    state.roughness = material->roughness;
+    for (std::size_t index = 0U; index < PG_ACOUSTIC_BAND_COUNT; ++index) {
+        const double centre = material->octave_band_centres_hz[index];
+        const double absorption = material->absorption[index];
+        const double scattering = material->scattering[index];
+        const double transmission = material->transmission[index];
+        if (!std::isfinite(centre) || centre <= 0.0 ||
+            (index > 0U && centre <= material->octave_band_centres_hz[index - 1U]) ||
+            !std::isfinite(absorption) || !std::isfinite(scattering) || !std::isfinite(transmission) ||
+            absorption < 0.0 || absorption > 1.0 || scattering < 0.0 || scattering > 1.0 ||
+            transmission < 0.0 || transmission > 1.0 || absorption + transmission > 1.0 + 1.0e-12) {
+            return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Acoustic material bands must be ordered, bounded, and conserve incident energy.");
+        }
+        state.octave_band_centres_hz[index] = centre;
+        state.absorption[index] = absorption;
+        state.scattering[index] = scattering;
+        state.transmission[index] = transmission;
+    }
+
+    engine->acoustic_materials.push_back(std::move(state));
+    if (out_index != nullptr) {
+        *out_index = static_cast<std::uint32_t>(engine->acoustic_materials.size() - 1U);
+    }
+    return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_desc* geometry, uint32_t* out_index)
+{
+    if (engine == nullptr || geometry == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(geometry)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Acoustic geometry structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Adding acoustic geometry") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (engine->geometries.size() >= maximum_acoustic_geometries) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Acoustic geometry capacity exceeded.");
+    }
+    if (geometry->material_index >= engine->acoustic_materials.size()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Acoustic geometry references an unknown material index.");
+    }
+    const vec3 centre = from_c(geometry->centre_metres);
+    const vec3 dimensions = from_c(geometry->dimensions_metres);
+    const vec3 rotation = from_c(geometry->rotation_degrees);
+    const bool plane_dimensions_valid = dimensions.x > 0.0 && dimensions.y > 0.0 && dimensions.z >= 0.0;
+    const bool box_dimensions_valid = dimensions.x > 0.0 && dimensions.y > 0.0 && dimensions.z > 0.0;
+    if (!finite(centre) || !finite(dimensions) || !finite(rotation) ||
+        (geometry->kind == PG_GEOMETRY_PLANE && !plane_dimensions_valid) ||
+        (geometry->kind == PG_GEOMETRY_BOX && !box_dimensions_valid) ||
+        (geometry->kind != PG_GEOMETRY_PLANE && geometry->kind != PG_GEOMETRY_BOX)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Acoustic geometry transform, dimensions, or kind is invalid.");
+    }
+
+    geometry_state state{};
+    state.name = safe_name(geometry->name_utf8, "Geometry");
+    state.kind = geometry->kind;
+    state.centre = centre;
+    state.dimensions = dimensions;
+    state.rotation_degrees = rotation;
+    state.material_index = geometry->material_index;
+    state.occludes = geometry->occludes != 0U;
+    state.reflects = geometry->reflects != 0U;
+    state.enabled = geometry->enabled != 0U;
+    engine->geometries.push_back(std::move(state));
+    if (out_index != nullptr) {
+        *out_index = static_cast<std::uint32_t>(engine->geometries.size() - 1U);
+    }
     return PG_STATUS_OK;
 }
 

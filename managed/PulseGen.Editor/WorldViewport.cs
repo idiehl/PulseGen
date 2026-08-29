@@ -61,6 +61,7 @@ public sealed class WorldViewport : Control
         }
 
         DrawRoom(context);
+        DrawAcousticGeometry(context);
         foreach (var path in Scene.MotionPaths)
         {
             DrawPath(context, path);
@@ -219,13 +220,18 @@ public sealed class WorldViewport : Control
             return;
         }
 
-        var halfX = geometry.DimensionsMetres.X * 0.5;
-        var halfZ = geometry.DimensionsMetres.Z * 0.5;
-        var height = geometry.DimensionsMetres.Y;
+        var dimensions = new Vector3d(
+            geometry.DimensionsMetres.X * geometry.Transform.Scale.X,
+            geometry.DimensionsMetres.Y * geometry.Transform.Scale.Y,
+            geometry.DimensionsMetres.Z * geometry.Transform.Scale.Z);
+        var halfX = dimensions.X * 0.5;
+        var halfY = dimensions.Y * 0.5;
+        var halfZ = dimensions.Z * 0.5;
+        var centre = geometry.Transform.PositionMetres;
         var points = new[]
         {
-            Project(new(-halfX, 0, -halfZ)), Project(new(halfX, 0, -halfZ)),
-            Project(new(halfX, 0, halfZ)), Project(new(-halfX, 0, halfZ))
+            Project(centre + new Vector3d(-halfX, -halfY, -halfZ)), Project(centre + new Vector3d(halfX, -halfY, -halfZ)),
+            Project(centre + new Vector3d(halfX, -halfY, halfZ)), Project(centre + new Vector3d(-halfX, -halfY, halfZ))
         };
         var shape = new StreamGeometry();
         using (var drawing = shape.Open())
@@ -240,8 +246,8 @@ public sealed class WorldViewport : Control
 
         var ceiling = new[]
         {
-            Project(new(-halfX, height, -halfZ)), Project(new(halfX, height, -halfZ)),
-            Project(new(halfX, height, halfZ)), Project(new(-halfX, height, halfZ))
+            Project(centre + new Vector3d(-halfX, halfY, -halfZ)), Project(centre + new Vector3d(halfX, halfY, -halfZ)),
+            Project(centre + new Vector3d(halfX, halfY, halfZ)), Project(centre + new Vector3d(-halfX, halfY, halfZ))
         };
         var wallBrush = new SolidColorBrush(Color.FromArgb(24, 62, 85, 108));
         DrawFace(context, [points[0], points[1], ceiling[1], ceiling[0]], wallBrush);
@@ -252,6 +258,83 @@ public sealed class WorldViewport : Control
             context.DrawLine(RoomPen, ceiling[index], ceiling[(index + 1) % ceiling.Length]);
             context.DrawLine(RoomPen, points[index], ceiling[index]);
         }
+    }
+
+    private void DrawAcousticGeometry(DrawingContext context)
+    {
+        if (Scene is null)
+        {
+            return;
+        }
+        foreach (var geometry in Scene.Geometry.Where(item => item.Kind is GeometryKind.Plane or GeometryKind.Box))
+        {
+            var material = Scene.Materials.FirstOrDefault(candidate => candidate.Id == geometry.MaterialId);
+            var absorption = material?.Absorption.DefaultIfEmpty(0.2).Average() ?? 0.2;
+            var scattering = material?.Scattering.DefaultIfEmpty(0.1).Average() ?? 0.1;
+            var fill = new SolidColorBrush(Color.FromArgb(
+                (byte)Math.Clamp(30 + (70 * (1 - absorption)), 20, 100),
+                (byte)Math.Clamp(48 + (90 * scattering), 0, 255),
+                (byte)Math.Clamp(112 + (80 * (1 - absorption)), 0, 255),
+                (byte)Math.Clamp(126 + (80 * scattering), 0, 255)));
+            var pen = new Pen(
+                new SolidColorBrush(geometry.Occludes ? Color.Parse("#EFBD72") : Color.Parse("#698397")),
+                geometry.Reflects ? 1.8 : 1.0,
+                geometry.Reflects ? null : new DashStyle([4, 3], 0));
+
+            var dimensions = new Vector3d(
+                geometry.DimensionsMetres.X * geometry.Transform.Scale.X,
+                geometry.DimensionsMetres.Y * geometry.Transform.Scale.Y,
+                geometry.DimensionsMetres.Z * geometry.Transform.Scale.Z);
+            if (geometry.Kind == GeometryKind.Plane)
+            {
+                var halfX = dimensions.X * 0.5;
+                var halfY = dimensions.Y * 0.5;
+                var points = new[]
+                {
+                    Project(TransformPoint(geometry, new(-halfX, -halfY, 0))),
+                    Project(TransformPoint(geometry, new(halfX, -halfY, 0))),
+                    Project(TransformPoint(geometry, new(halfX, halfY, 0))),
+                    Project(TransformPoint(geometry, new(-halfX, halfY, 0)))
+                };
+                DrawFace(context, points, fill, pen);
+                continue;
+            }
+
+            var half = dimensions * 0.5;
+            var corners = new[]
+            {
+                new Vector3d(-half.X, -half.Y, -half.Z), new Vector3d(half.X, -half.Y, -half.Z),
+                new Vector3d(half.X, half.Y, -half.Z), new Vector3d(-half.X, half.Y, -half.Z),
+                new Vector3d(-half.X, -half.Y, half.Z), new Vector3d(half.X, -half.Y, half.Z),
+                new Vector3d(half.X, half.Y, half.Z), new Vector3d(-half.X, half.Y, half.Z)
+            }.Select(corner => Project(TransformPoint(geometry, corner))).ToArray();
+            int[][] faces = [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+            foreach (var face in faces)
+            {
+                DrawFace(context, face.Select(index => corners[index]).ToArray(), fill, pen);
+            }
+        }
+    }
+
+    private static Vector3d TransformPoint(AcousticGeometry geometry, Vector3d local) =>
+        Rotate(local, geometry.Transform.RotationDegrees) + geometry.Transform.PositionMetres;
+
+    private static Vector3d Rotate(Vector3d value, Vector3d rotationDegrees)
+    {
+        var x = rotationDegrees.X * Math.PI / 180;
+        var cosine = Math.Cos(x);
+        var sine = Math.Sin(x);
+        value = new(value.X, (value.Y * cosine) - (value.Z * sine), (value.Y * sine) + (value.Z * cosine));
+
+        var y = rotationDegrees.Y * Math.PI / 180;
+        cosine = Math.Cos(y);
+        sine = Math.Sin(y);
+        value = new((value.X * cosine) + (value.Z * sine), value.Y, (-value.X * sine) + (value.Z * cosine));
+
+        var z = rotationDegrees.Z * Math.PI / 180;
+        cosine = Math.Cos(z);
+        sine = Math.Sin(z);
+        return new((value.X * cosine) - (value.Y * sine), (value.X * sine) + (value.Y * cosine), value.Z);
     }
 
     private void DrawPath(DrawingContext context, MotionPath path)
@@ -315,7 +398,7 @@ public sealed class WorldViewport : Control
         return new(x, y);
     }
 
-    private static void DrawFace(DrawingContext context, IReadOnlyList<Point> points, IBrush brush)
+    private static void DrawFace(DrawingContext context, IReadOnlyList<Point> points, IBrush brush, Pen? pen = null)
     {
         var geometry = new StreamGeometry();
         using (var drawing = geometry.Open())
@@ -327,7 +410,7 @@ public sealed class WorldViewport : Control
             }
             drawing.EndFigure(true);
         }
-        context.DrawGeometry(brush, RoomPen, geometry);
+        context.DrawGeometry(brush, pen ?? RoomPen, geometry);
     }
 
     private Vector3d InverseProject(Point point, double yMetres)

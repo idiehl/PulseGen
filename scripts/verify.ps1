@@ -103,7 +103,8 @@ try {
         throw 'Deterministic render receipts differ.'
     }
     $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
-    if ($renderReceipt.receiptVersion -ne 1 -or $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
+    if ($renderReceipt.receiptVersion -ne 2 -or $renderReceipt.acousticModel -ne 'primitive-geometry-v1' -or
+        $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
         $renderReceipt.engineVersion -notmatch '^0\.1\.0-alpha' -or $renderReceipt.sampleRate -ne 48000 -or
         $renderReceipt.sampleFormat -ne 'Float32' -or $renderReceipt.dither -ne 'None' -or
         @($renderReceipt.takes).Count -ne 2 -or $renderReceipt.dependencies[1].name -ne 'miniaudio' -or
@@ -116,6 +117,35 @@ try {
             (Get-FileHash -LiteralPath $takePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $take.sha256) {
             throw "Render receipt take hash is invalid: $($take.fileName)"
         }
+    }
+
+    $surfaceFirst = Join-Path $outputRoot 'surface-echo-a'
+    $surfaceSecond = Join-Path $outputRoot 'surface-echo-b'
+    Remove-VerificationDirectory $surfaceFirst
+    Remove-VerificationDirectory $surfaceSecond
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample surface-echo --output $surfaceFirst
+    if ($LASTEXITCODE -ne 0) { throw 'First surface-echo render failed.' }
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample surface-echo --output $surfaceSecond
+    if ($LASTEXITCODE -ne 0) { throw 'Second surface-echo render failed.' }
+
+    $surfaceFirstFiles = @(Get-ChildItem -LiteralPath $surfaceFirst -File | Sort-Object Name)
+    $surfaceSecondFiles = @(Get-ChildItem -LiteralPath $surfaceSecond -File | Sort-Object Name)
+    if ($surfaceFirstFiles.Count -ne 3 -or $surfaceSecondFiles.Count -ne 3) {
+        throw 'Expected two stereo takes and one receipt for each surface-echo render.'
+    }
+    for ($index = 0; $index -lt $surfaceFirstFiles.Count; $index++) {
+        if ($surfaceFirstFiles[$index].Name -ne $surfaceSecondFiles[$index].Name) {
+            throw 'Surface-echo deterministic file sets differ.'
+        }
+        if ((Get-FileHash -LiteralPath $surfaceFirstFiles[$index].FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $surfaceSecondFiles[$index].FullName -Algorithm SHA256).Hash) {
+            throw "Surface-echo artifact is not bit-stable: $($surfaceFirstFiles[$index].Name)"
+        }
+    }
+    $surfaceReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $surfaceFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
+    if ($surfaceReceipt.receiptVersion -ne 2 -or $surfaceReceipt.acousticModel -ne 'primitive-geometry-v1' -or
+        @($surfaceReceipt.takes).Count -ne 2 -or [Math]::Max($surfaceReceipt.peakLeft, $surfaceReceipt.peakRight) -le 0) {
+        throw 'Surface-echo receipt is incomplete or records silent output.'
     }
     $pcmProfiles = @(
         @{ Name = 'Pcm16'; Code = 1; Bits = 16 },
@@ -147,7 +177,7 @@ try {
             throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
-    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable"
+    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed"
 }
 finally {
     Set-Location -LiteralPath $originalLocation

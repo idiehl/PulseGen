@@ -14,6 +14,13 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void SurfaceEchoSceneIsValid()
+    {
+        var issues = SceneValidator.Validate(SampleScenes.CreateSurfaceEcho());
+        Assert.Empty(issues);
+    }
+
+    [Fact]
     public void UnsupportedUnitsAreRejected()
     {
         var scene = SampleScenes.CreateFlyby() with { Units = "feet" };
@@ -50,6 +57,29 @@ public sealed class SceneContractTests
             if (Directory.Exists(directory))
             {
                 Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CheckedInSurfaceEchoProjectMatchesItsFactoryScene()
+    {
+        var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "SurfaceEcho.pulseproj");
+        var generatedDirectory = Path.Combine(Path.GetTempPath(), $"pulsegen-surface-{Guid.NewGuid():N}.pulseproj");
+        try
+        {
+            var loaded = await ProjectStore.LoadAsync(fixtureDirectory);
+            var fixtureHash = await ProjectStore.ComputeSha256Async(ProjectStore.ResolveManifestPath(fixtureDirectory));
+            var generatedHash = await ProjectStore.SaveAsync(SampleScenes.CreateSurfaceEcho(), generatedDirectory);
+
+            Assert.Equal("Surface Echo Study", loaded.Name);
+            Assert.Equal(fixtureHash, generatedHash);
+        }
+        finally
+        {
+            if (Directory.Exists(generatedDirectory))
+            {
+                Directory.Delete(generatedDirectory, recursive: true);
             }
         }
     }
@@ -134,5 +164,42 @@ public sealed class SceneContractTests
 
         scene.RenderProfiles[0] = scene.RenderProfiles[0] with { SampleFormat = RenderSampleFormat.Float32, Dither = DitherMode.Tpdf };
         Assert.Contains(SceneValidator.Validate(scene), issue => issue.Path.EndsWith("/dither", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MaterialBandsMustBeOrderedAndConserveEnergy()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var material = scene.Materials[0];
+        material.OctaveBandCentresHz[2] = material.OctaveBandCentresHz[1];
+        material.Absorption[0] = 0.9;
+        material.Transmission[0] = 0.2;
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/octaveBandCentresHz", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path == $"materials/{material.Id}" && issue.Message.Contains("incident energy", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AcousticGeometryRequiresMaterialAndPhysicalDimensions()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var geometryId = Guid.NewGuid();
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = geometryId,
+            Name = "Invalid obstacle",
+            Kind = GeometryKind.Box,
+            MaterialId = Guid.NewGuid(),
+            DimensionsMetres = new(2, -1, 0.2),
+            Transform = new Transform { Scale = new(1, 0, 1) }
+        });
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path == $"geometry/{geometryId}/materialId");
+        Assert.Contains(issues, issue => issue.Path == $"geometry/{geometryId}/dimensionsMetres");
+        Assert.Contains(issues, issue => issue.Path == $"geometry/{geometryId}/transform");
     }
 }
