@@ -25,11 +25,96 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.3", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.4", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(2, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("primitive-geometry-v1", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(3, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-geometry-v2", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Contains(
+                receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
+                dependency => dependency.GetProperty("name").GetString() == "Assimp" &&
+                    dependency.GetProperty("version").GetString() == "6.0.5");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ContentAddressedObjMeshOccludesDeterministicallyAndRejectsTamperingOrReflectionFallback()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-imported-mesh-{Guid.NewGuid():N}");
+        var project = Path.Combine(root, "MeshWorld.pulseproj");
+        var sourcePath = Path.Combine(root, "wall.obj");
+        const string obj = """
+            o BoundedWall
+            v -5 -5 0
+            v 5 -5 0
+            v 5 5 0
+            v -5 5 0
+            f 1 2 3
+            f 1 3 4
+            """;
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(sourcePath, obj, Encoding.UTF8);
+            var scene = CreateScene(withSurface: false);
+            await ProjectStore.SaveAsync(scene, project);
+            var asset = await ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj", "test fixture", "CC0-1.0");
+            scene.Assets.Add(asset);
+            scene.Geometry.Add(new AcousticGeometry
+            {
+                Id = Guid.Parse("bbbbbbbb-0000-4000-8000-000000000003"),
+                Name = "Imported transmission wall",
+                Kind = GeometryKind.ImportedMesh,
+                MaterialId = scene.Materials[0].Id,
+                MeshAssetHash = asset.Sha256,
+                Transform = new Transform { PositionMetres = new(0, 0, 1) },
+                DimensionsMetres = new(10, 10, 0.01),
+                Occludes = true,
+                Reflects = false
+            });
+            await ProjectStore.SaveAsync(scene, project);
+
+            var baselineDirectory = Path.Combine(root, "baseline");
+            var firstDirectory = Path.Combine(root, "mesh-first");
+            var secondDirectory = Path.Combine(root, "mesh-second");
+            NativeSceneRenderer.Render(CreateScene(withSurface: false), baselineDirectory);
+            var first = NativeSceneRenderer.Render(scene, firstDirectory, projectDirectory: project);
+            var second = NativeSceneRenderer.Render(scene, secondDirectory, projectDirectory: project);
+            var baselineSamples = ReadFloatSamples(Directory.GetFiles(baselineDirectory, "*.wav").Single());
+            var firstSamples = ReadFloatSamples(Directory.GetFiles(firstDirectory, "*.wav").Single());
+            var secondSamples = ReadFloatSamples(Directory.GetFiles(secondDirectory, "*.wav").Single());
+
+            Assert.InRange(ChannelRms(firstSamples, 0) / ChannelRms(baselineSamples, 0), 0.498, 0.502);
+            Assert.Equal(firstSamples, secondSamples);
+            Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
+            using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
+            {
+                Assert.Equal(3, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Contains(
+                    receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
+                    dependency => dependency.GetProperty("name").GetString() == "Assimp");
+            }
+
+            Assert.Throws<InvalidOperationException>(() => NativeSceneRenderer.Render(scene, Path.Combine(root, "missing-project")));
+            var reflectionScene = scene with { Geometry = [scene.Geometry[0] with { Reflects = true }] };
+            Assert.Throws<NotSupportedException>(() =>
+                NativeSceneRenderer.Render(reflectionScene, Path.Combine(root, "reflection"), projectDirectory: project));
+
+            var storedAssetPath = ProjectStore.ResolveAssetPath(project, asset.Sha256);
+            var tampered = await File.ReadAllBytesAsync(storedAssetPath);
+            tampered[0] ^= 0x01;
+            await File.WriteAllBytesAsync(storedAssetPath, tampered);
+            Assert.Throws<InvalidDataException>(() =>
+                NativeSceneRenderer.Render(scene, Path.Combine(root, "tampered"), projectDirectory: project));
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj"));
         }
         finally
         {

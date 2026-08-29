@@ -19,3 +19,14 @@ transport. Decoder, encoder, resource-manager, and generation modules are
 disabled in the native build. Source is fetched from immutable commit
 `9634bedb5b5a2ca38c1ee7108a9358a4e233f14d`; the release archive is verified by
 the SHA-256 recorded in `dependencies.lock.json`.
+
+## Assimp 6.0.5
+
+Copyright the Assimp project contributors. PulseGen statically links the
+modified BSD 3-clause licensed Open Asset Import Library with only its OBJ and
+glTF/GLB importers enabled; exporters, tools, samples, and upstream tests are
+disabled in production builds. Source is fetched from immutable commit
+`392a658f9c271be965271f45e7521a1b80ea4392`, and the archive is verified by the
+SHA-256 recorded in `dependencies.lock.json`. The upstream license text remains
+available in the checksum-verified fetched source tree and must be included in
+packaged distributions.

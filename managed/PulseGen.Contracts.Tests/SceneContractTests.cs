@@ -202,4 +202,73 @@ public sealed class SceneContractTests
         Assert.Contains(issues, issue => issue.Path == $"geometry/{geometryId}/dimensionsMetres");
         Assert.Contains(issues, issue => issue.Path == $"geometry/{geometryId}/transform");
     }
+
+    [Fact]
+    public void ImportedMeshRequiresDeclaredMeshAssetAndLabelsReflectionBoundary()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var geometryId = Guid.NewGuid();
+        var hash = new string('a', 64);
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = geometryId,
+            Name = "Imported wall",
+            Kind = GeometryKind.ImportedMesh,
+            MaterialId = scene.Materials[0].Id,
+            MeshAssetHash = hash,
+            Reflects = false
+        });
+
+        Assert.Contains(SceneValidator.Validate(scene), issue =>
+            issue.Path == $"geometry/{geometryId}/meshAssetHash" && issue.Severity == ValidationSeverity.Error);
+
+        scene.Assets.Add(new AssetRef
+        {
+            Sha256 = hash,
+            Kind = AssetKind.Audio,
+            FileName = "wall.obj",
+            MediaType = "model/obj",
+            SizeBytes = 100
+        });
+        Assert.Contains(SceneValidator.Validate(scene), issue =>
+            issue.Path == $"geometry/{geometryId}/meshAssetHash" && issue.Severity == ValidationSeverity.Error);
+
+        scene.Assets[0] = scene.Assets[0] with { Kind = AssetKind.Mesh };
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
+        scene.Geometry[^1] = scene.Geometry[^1] with { Reflects = true };
+        Assert.Contains(SceneValidator.Validate(scene), issue =>
+            issue.Path == $"geometry/{geometryId}/reflects" &&
+            issue.Severity == ValidationSeverity.Warning &&
+            issue.Message.Contains("reflection backend", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AssetHashesMustBeValidUniqueAndNonNegative()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.Assets.Add(new AssetRef
+        {
+            Sha256 = "not-a-sha256",
+            Kind = AssetKind.Mesh,
+            FileName = "bad.obj",
+            MediaType = "model/obj",
+            SizeBytes = -1
+        });
+        var validHash = new string('b', 64);
+        scene.Assets.Add(new AssetRef
+        {
+            Sha256 = validHash,
+            Kind = AssetKind.Mesh,
+            FileName = "first.obj",
+            MediaType = "model/obj",
+            SizeBytes = 1
+        });
+        scene.Assets.Add(scene.Assets[^1] with { FileName = "duplicate.obj" });
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path == "assets/0/sha256");
+        Assert.Contains(issues, issue => issue.Path == "assets/0/sizeBytes");
+        Assert.Contains(issues, issue => issue.Path == "assets/2/sha256" && issue.Message.Contains("unique", StringComparison.Ordinal));
+    }
 }

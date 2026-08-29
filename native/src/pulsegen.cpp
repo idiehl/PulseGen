@@ -2,10 +2,16 @@
 #include "wav_writer.h"
 #include "miniaudio.h"
 
+#include <assimp/Importer.hpp>
+#include <assimp/IOSystem.hpp>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -13,6 +19,7 @@
 #include <filesystem>
 #include <limits>
 #include <numbers>
+#include <numeric>
 #include <span>
 #include <string>
 #include <string_view>
@@ -21,11 +28,15 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.3";
+constexpr std::string_view engine_version = "0.1.0-alpha.4";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
 constexpr std::size_t maximum_acoustic_materials = 256U;
 constexpr std::size_t maximum_acoustic_geometries = 256U;
+constexpr std::size_t maximum_imported_mesh_geometries = 64U;
+constexpr std::size_t maximum_imported_mesh_triangles_total = 1000000U;
+constexpr std::uint64_t maximum_mesh_asset_bytes = 512ULL * 1024ULL * 1024ULL;
+constexpr std::uint32_t mesh_bvh_leaf_triangles = 8U;
 constexpr std::array<double, 4> late_delay_seconds{ 0.0297, 0.0371, 0.0411, 0.0437 };
 
 struct vec3 {
@@ -39,6 +50,14 @@ vec3 operator+(vec3 left, vec3 right) noexcept { return { left.x + right.x, left
 vec3 operator-(vec3 left, vec3 right) noexcept { return { left.x - right.x, left.y - right.y, left.z - right.z }; }
 vec3 operator*(vec3 value, double scalar) noexcept { return { value.x * scalar, value.y * scalar, value.z * scalar }; }
 double dot(vec3 left, vec3 right) noexcept { return (left.x * right.x) + (left.y * right.y) + (left.z * right.z); }
+vec3 cross(vec3 left, vec3 right) noexcept
+{
+    return {
+        (left.y * right.z) - (left.z * right.y),
+        (left.z * right.x) - (left.x * right.z),
+        (left.x * right.y) - (left.y * right.x)
+    };
+}
 double length(vec3 value) noexcept { return std::sqrt(dot(value, value)); }
 
 vec3 normalized(vec3 value) noexcept
@@ -131,6 +150,14 @@ bool valid_struct(const T* value) noexcept
     return value != nullptr && value->size >= sizeof(T) && value->version == PG_ABI_VERSION;
 }
 
+class memory_only_io_system final : public Assimp::IOSystem {
+public:
+    bool Exists(const char*) const override { return false; }
+    char getOsSeparator() const override { return '/'; }
+    Assimp::IOStream* Open(const char*, const char* = "rb") override { return nullptr; }
+    void Close(Assimp::IOStream*) override { }
+};
+
 struct atmosphere_state {
     double temperature_celsius{ 20.0 };
     double relative_humidity_percent{ 50.0 };
@@ -169,6 +196,46 @@ struct geometry_state {
     bool occludes{ true };
     bool reflects{ true };
     bool enabled{ true };
+};
+
+struct axis_aligned_bounds {
+    vec3 minimum{
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity(),
+        std::numeric_limits<double>::infinity()
+    };
+    vec3 maximum{
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity(),
+        -std::numeric_limits<double>::infinity()
+    };
+};
+
+struct mesh_triangle {
+    vec3 a{};
+    vec3 b{};
+    vec3 c{};
+    axis_aligned_bounds bounds{};
+    vec3 centroid{};
+};
+
+struct mesh_bvh_node {
+    axis_aligned_bounds bounds{};
+    std::uint32_t left{};
+    std::uint32_t right{};
+    std::uint32_t first{};
+    std::uint32_t count{};
+};
+
+struct mesh_geometry_state {
+    std::string name;
+    std::uint32_t material_index{};
+    bool occludes{ true };
+    bool enabled{ true };
+    std::vector<mesh_triangle> triangles;
+    std::vector<std::uint32_t> triangle_indices;
+    std::vector<mesh_bvh_node> bvh;
+    axis_aligned_bounds bounds{};
 };
 
 struct keyframe_state {
@@ -236,6 +303,7 @@ struct pg_engine {
     room_state room{};
     std::vector<acoustic_material_state> acoustic_materials;
     std::vector<geometry_state> geometries;
+    std::vector<mesh_geometry_state> mesh_geometries;
     std::vector<emitter_state> emitters;
     std::vector<receiver_state> receivers;
     std::vector<channel_filter_state> receiver_filters;
@@ -318,6 +386,179 @@ double material_band_value(
     return values.back();
 }
 
+double component(vec3 value, std::size_t axis) noexcept
+{
+    return axis == 0U ? value.x : (axis == 1U ? value.y : value.z);
+}
+
+void expand(axis_aligned_bounds& bounds, vec3 point) noexcept
+{
+    bounds.minimum.x = std::min(bounds.minimum.x, point.x);
+    bounds.minimum.y = std::min(bounds.minimum.y, point.y);
+    bounds.minimum.z = std::min(bounds.minimum.z, point.z);
+    bounds.maximum.x = std::max(bounds.maximum.x, point.x);
+    bounds.maximum.y = std::max(bounds.maximum.y, point.y);
+    bounds.maximum.z = std::max(bounds.maximum.z, point.z);
+}
+
+void expand(axis_aligned_bounds& bounds, const axis_aligned_bounds& other) noexcept
+{
+    expand(bounds, other.minimum);
+    expand(bounds, other.maximum);
+}
+
+axis_aligned_bounds triangle_bounds(vec3 a, vec3 b, vec3 c) noexcept
+{
+    axis_aligned_bounds bounds{};
+    expand(bounds, a);
+    expand(bounds, b);
+    expand(bounds, c);
+    return bounds;
+}
+
+std::string normalized_format_hint(const char* value)
+{
+    std::string result = value == nullptr ? std::string{} : std::string(value);
+    if (!result.empty() && result.front() == '.') {
+        result.erase(result.begin());
+    }
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    });
+    return result;
+}
+
+std::uint32_t build_mesh_bvh(mesh_geometry_state& mesh, std::uint32_t first, std::uint32_t count)
+{
+    const std::uint32_t node_index = static_cast<std::uint32_t>(mesh.bvh.size());
+    mesh.bvh.emplace_back();
+
+    axis_aligned_bounds bounds{};
+    axis_aligned_bounds centroid_bounds{};
+    for (std::uint32_t offset = 0U; offset < count; ++offset) {
+        const mesh_triangle& triangle = mesh.triangles[mesh.triangle_indices[first + offset]];
+        expand(bounds, triangle.bounds);
+        expand(centroid_bounds, triangle.centroid);
+    }
+    mesh.bvh[node_index].bounds = bounds;
+
+    if (count <= mesh_bvh_leaf_triangles) {
+        mesh.bvh[node_index].first = first;
+        mesh.bvh[node_index].count = count;
+        return node_index;
+    }
+
+    const vec3 extent = centroid_bounds.maximum - centroid_bounds.minimum;
+    std::size_t split_axis = 0U;
+    if (extent.y > extent.x) {
+        split_axis = 1U;
+    }
+    if (component(extent, 2U) > component(extent, split_axis)) {
+        split_axis = 2U;
+    }
+    const std::uint32_t left_count = count / 2U;
+    auto begin = mesh.triangle_indices.begin() + first;
+    auto middle = begin + left_count;
+    auto end = begin + count;
+    std::nth_element(begin, middle, end, [&mesh, split_axis](std::uint32_t left, std::uint32_t right) {
+        return component(mesh.triangles[left].centroid, split_axis) < component(mesh.triangles[right].centroid, split_axis);
+    });
+
+    const std::uint32_t left = build_mesh_bvh(mesh, first, left_count);
+    const std::uint32_t right = build_mesh_bvh(mesh, first + left_count, count - left_count);
+    mesh.bvh[node_index].left = left;
+    mesh.bvh[node_index].right = right;
+    return node_index;
+}
+
+bool segment_intersects_bounds(const axis_aligned_bounds& bounds, vec3 start, vec3 end) noexcept
+{
+    const std::array<double, 3> origin{ start.x, start.y, start.z };
+    const std::array<double, 3> direction{ end.x - start.x, end.y - start.y, end.z - start.z };
+    const std::array<double, 3> minimum{ bounds.minimum.x, bounds.minimum.y, bounds.minimum.z };
+    const std::array<double, 3> maximum{ bounds.maximum.x, bounds.maximum.y, bounds.maximum.z };
+    double minimum_amount = 1.0e-7;
+    double maximum_amount = 1.0 - 1.0e-7;
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        if (std::abs(direction[axis]) <= 1.0e-12) {
+            if (origin[axis] < minimum[axis] || origin[axis] > maximum[axis]) {
+                return false;
+            }
+            continue;
+        }
+        double near_amount = (minimum[axis] - origin[axis]) / direction[axis];
+        double far_amount = (maximum[axis] - origin[axis]) / direction[axis];
+        if (near_amount > far_amount) {
+            std::swap(near_amount, far_amount);
+        }
+        minimum_amount = std::max(minimum_amount, near_amount);
+        maximum_amount = std::min(maximum_amount, far_amount);
+        if (minimum_amount > maximum_amount) {
+            return false;
+        }
+    }
+    return maximum_amount >= minimum_amount;
+}
+
+bool segment_intersects_triangle(const mesh_triangle& triangle, vec3 start, vec3 end) noexcept
+{
+    const vec3 direction = end - start;
+    const vec3 edge_one = triangle.b - triangle.a;
+    const vec3 edge_two = triangle.c - triangle.a;
+    const vec3 perpendicular = cross(direction, edge_two);
+    const double determinant = dot(edge_one, perpendicular);
+    if (std::abs(determinant) <= 1.0e-12) {
+        return false;
+    }
+    const double inverse_determinant = 1.0 / determinant;
+    const vec3 offset = start - triangle.a;
+    const double u = dot(offset, perpendicular) * inverse_determinant;
+    if (u < 0.0 || u > 1.0) {
+        return false;
+    }
+    const vec3 cross_offset = cross(offset, edge_one);
+    const double v = dot(direction, cross_offset) * inverse_determinant;
+    if (v < 0.0 || u + v > 1.0) {
+        return false;
+    }
+    const double amount = dot(edge_two, cross_offset) * inverse_determinant;
+    return amount > 1.0e-7 && amount < 1.0 - 1.0e-7;
+}
+
+bool segment_intersects_mesh(const mesh_geometry_state& mesh, vec3 start, vec3 end) noexcept
+{
+    if (mesh.bvh.empty() || !segment_intersects_bounds(mesh.bounds, start, end)) {
+        return false;
+    }
+
+    std::array<std::uint32_t, 128> stack{};
+    std::size_t stack_size = 1U;
+    stack[0] = 0U;
+    while (stack_size > 0U) {
+        const mesh_bvh_node& node = mesh.bvh[stack[--stack_size]];
+        if (!segment_intersects_bounds(node.bounds, start, end)) {
+            continue;
+        }
+        if (node.count > 0U) {
+            for (std::uint32_t offset = 0U; offset < node.count; ++offset) {
+                if (segment_intersects_triangle(mesh.triangles[mesh.triangle_indices[node.first + offset]], start, end)) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (stack_size + 2U > stack.size()) {
+            // The builder creates a balanced tree whose normal depth is far
+            // below this fixed audio-thread stack. Treat unexpected overflow
+            // conservatively as occluded instead of allocating or recursing.
+            return true;
+        }
+        stack[stack_size++] = node.left;
+        stack[stack_size++] = node.right;
+    }
+    return false;
+}
+
 bool segment_intersects_plane(const geometry_state& geometry, vec3 start, vec3 end) noexcept
 {
     const vec3 local_start = inverse_rotate_euler(start - geometry.centre, geometry.rotation_degrees);
@@ -384,6 +625,18 @@ double occlusion_transmission_gain(
         const geometry_state& geometry = engine.geometries[index];
         if (index == excluded_geometry || !geometry.enabled || !geometry.occludes ||
             geometry.material_index >= engine.acoustic_materials.size() || !segment_intersects_geometry(geometry, start, end)) {
+            continue;
+        }
+        const acoustic_material_state& material = engine.acoustic_materials[geometry.material_index];
+        const double transmission = material_band_value(material, material.transmission, frequency_hz);
+        gain *= std::sqrt(std::clamp(transmission, 0.0, 1.0));
+        if (gain <= 1.0e-12) {
+            return 0.0;
+        }
+    }
+    for (const mesh_geometry_state& geometry : engine.mesh_geometries) {
+        if (!geometry.enabled || !geometry.occludes ||
+            geometry.material_index >= engine.acoustic_materials.size() || !segment_intersects_mesh(geometry, start, end)) {
             continue;
         }
         const acoustic_material_state& material = engine.acoustic_materials[geometry.material_index];
@@ -1051,6 +1304,7 @@ pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_engine** o
         engine->config = *config;
         engine->acoustic_materials.reserve(maximum_acoustic_materials);
         engine->geometries.reserve(maximum_acoustic_geometries);
+        engine->mesh_geometries.reserve(maximum_imported_mesh_geometries);
         engine->emitters.reserve(config->max_emitters);
         engine->receivers.reserve(config->max_receivers);
         engine->receiver_filters.reserve(config->max_receivers);
@@ -1082,6 +1336,7 @@ pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine)
     }
     engine->acoustic_materials.clear();
     engine->geometries.clear();
+    engine->mesh_geometries.clear();
     engine->emitters.clear();
     engine->receivers.clear();
     engine->receiver_filters.clear();
@@ -1245,6 +1500,189 @@ pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_de
         *out_index = static_cast<std::uint32_t>(engine->geometries.size() - 1U);
     }
     return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_add_mesh_geometry(
+    pg_engine* engine,
+    const pg_mesh_geometry_desc* geometry,
+    uint32_t* out_index,
+    pg_mesh_import_receipt* out_receipt)
+{
+    if (engine == nullptr || geometry == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(geometry) || (out_receipt != nullptr && !valid_struct(out_receipt))) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Mesh geometry or import receipt structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Importing acoustic mesh geometry") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (engine->mesh_geometries.size() >= maximum_imported_mesh_geometries) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Imported acoustic mesh capacity exceeded.");
+    }
+    if (geometry->material_index >= engine->acoustic_materials.size()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported acoustic mesh references an unknown material index.");
+    }
+    if (geometry->reflects != 0U) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT,
+            "Imported-mesh reflections require the geometric reflection backend; disable Reflects until that backend is active.");
+    }
+    if (geometry->encoded_data == nullptr || geometry->encoded_size_bytes == 0U ||
+        geometry->encoded_size_bytes > maximum_mesh_asset_bytes ||
+        geometry->encoded_size_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported mesh data must contain between 1 byte and 512 MiB.");
+    }
+
+    const vec3 centre = from_c(geometry->centre_metres);
+    const vec3 scale = from_c(geometry->scale);
+    const vec3 rotation = from_c(geometry->rotation_degrees);
+    if (!finite(centre) || !finite(scale) || !finite(rotation) ||
+        std::abs(scale.x) <= 1.0e-12 || std::abs(scale.y) <= 1.0e-12 || std::abs(scale.z) <= 1.0e-12) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported mesh transform must be finite with non-zero scale components.");
+    }
+
+    const std::string format = normalized_format_hint(geometry->format_hint_utf8);
+    if (format != "obj" && format != "gltf" && format != "glb") {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported mesh format must be OBJ, glTF, or GLB.");
+    }
+    const std::uint32_t triangle_limit = geometry->max_triangles == 0U
+        ? PG_MAX_IMPORTED_MESH_TRIANGLES
+        : geometry->max_triangles;
+    if (triangle_limit > PG_MAX_IMPORTED_MESH_TRIANGLES) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported mesh triangle limit exceeds the engine safety cap.");
+    }
+
+    std::size_t existing_triangle_count = 0U;
+    for (const mesh_geometry_state& existing : engine->mesh_geometries) {
+        existing_triangle_count += existing.triangles.size();
+    }
+
+    try {
+        Assimp::Importer importer;
+        importer.SetIOHandler(new memory_only_io_system{});
+        constexpr unsigned int postprocess_flags =
+            aiProcess_Triangulate |
+            aiProcess_JoinIdenticalVertices |
+            aiProcess_PreTransformVertices |
+            aiProcess_SortByPType |
+            aiProcess_ValidateDataStructure |
+            aiProcess_FindDegenerates;
+        const aiScene* scene = importer.ReadFileFromMemory(
+            geometry->encoded_data,
+            static_cast<std::size_t>(geometry->encoded_size_bytes),
+            postprocess_flags,
+            format.c_str());
+        if (scene == nullptr || scene->mNumMeshes == 0U || scene->mMeshes == nullptr) {
+            const char* detail = importer.GetErrorString();
+            return fail(engine, PG_STATUS_INVALID_SCENE,
+                std::string("Assimp could not decode the bounded ") + format + " mesh: " +
+                (detail == nullptr || detail[0] == '\0' ? "no triangle meshes were found." : detail));
+        }
+
+        std::uint64_t source_vertex_count = 0U;
+        std::uint64_t candidate_triangle_count = 0U;
+        for (unsigned int mesh_index = 0U; mesh_index < scene->mNumMeshes; ++mesh_index) {
+            const aiMesh* source_mesh = scene->mMeshes[mesh_index];
+            if (source_mesh == nullptr) {
+                continue;
+            }
+            source_vertex_count += source_mesh->mNumVertices;
+            for (unsigned int face_index = 0U; face_index < source_mesh->mNumFaces; ++face_index) {
+                if (source_mesh->mFaces[face_index].mNumIndices == 3U) {
+                    ++candidate_triangle_count;
+                }
+            }
+        }
+        if (candidate_triangle_count == 0U) {
+            return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh contains no triangle primitives.");
+        }
+        if (source_vertex_count > std::numeric_limits<std::uint32_t>::max() ||
+            candidate_triangle_count > triangle_limit ||
+            candidate_triangle_count + existing_triangle_count > maximum_imported_mesh_triangles_total) {
+            return fail(engine, PG_STATUS_CAPACITY_EXCEEDED,
+                "Imported mesh exceeds the per-asset or total triangle safety cap.");
+        }
+
+        mesh_geometry_state state{};
+        state.name = safe_name(geometry->name_utf8, "ImportedMesh");
+        state.material_index = geometry->material_index;
+        state.occludes = geometry->occludes != 0U;
+        state.enabled = geometry->enabled != 0U;
+        state.triangles.reserve(static_cast<std::size_t>(candidate_triangle_count));
+
+        for (unsigned int mesh_index = 0U; mesh_index < scene->mNumMeshes; ++mesh_index) {
+            const aiMesh* source_mesh = scene->mMeshes[mesh_index];
+            if (source_mesh == nullptr || source_mesh->mVertices == nullptr) {
+                continue;
+            }
+            for (unsigned int face_index = 0U; face_index < source_mesh->mNumFaces; ++face_index) {
+                const aiFace& face = source_mesh->mFaces[face_index];
+                if (face.mNumIndices != 3U || face.mIndices == nullptr ||
+                    face.mIndices[0] >= source_mesh->mNumVertices || face.mIndices[1] >= source_mesh->mNumVertices ||
+                    face.mIndices[2] >= source_mesh->mNumVertices) {
+                    continue;
+                }
+                const auto transformed_vertex = [source_mesh, &face, scale, rotation, centre](unsigned int index) {
+                    const aiVector3D& source = source_mesh->mVertices[face.mIndices[index]];
+                    const vec3 scaled{
+                        static_cast<double>(source.x) * scale.x,
+                        static_cast<double>(source.y) * scale.y,
+                        static_cast<double>(source.z) * scale.z
+                    };
+                    return rotate_euler(scaled, rotation) + centre;
+                };
+                const vec3 a = transformed_vertex(0U);
+                const vec3 b = transformed_vertex(1U);
+                const vec3 c = transformed_vertex(2U);
+                if (!finite(a) || !finite(b) || !finite(c)) {
+                    return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh contains a non-finite transformed vertex.");
+                }
+                if (length(cross(b - a, c - a)) <= 1.0e-12) {
+                    continue;
+                }
+                const axis_aligned_bounds bounds = triangle_bounds(a, b, c);
+                state.triangles.push_back({ a, b, c, bounds, (a + b + c) * (1.0 / 3.0) });
+                expand(state.bounds, bounds);
+            }
+        }
+        if (state.triangles.empty()) {
+            return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh contains no non-degenerate triangles.");
+        }
+
+        state.triangle_indices.resize(state.triangles.size());
+        std::iota(state.triangle_indices.begin(), state.triangle_indices.end(), 0U);
+        state.bvh.reserve(state.triangles.size() * 2U);
+        (void)build_mesh_bvh(state, 0U, static_cast<std::uint32_t>(state.triangles.size()));
+
+        const std::uint32_t triangle_count = static_cast<std::uint32_t>(state.triangles.size());
+        const std::uint32_t bvh_node_count = static_cast<std::uint32_t>(state.bvh.size());
+        const axis_aligned_bounds imported_bounds = state.bounds;
+        engine->mesh_geometries.push_back(std::move(state));
+        if (out_index != nullptr) {
+            *out_index = static_cast<std::uint32_t>(engine->mesh_geometries.size() - 1U);
+        }
+        if (out_receipt != nullptr) {
+            out_receipt->source_mesh_count = scene->mNumMeshes;
+            out_receipt->source_vertex_count = static_cast<std::uint32_t>(source_vertex_count);
+            out_receipt->triangle_count = triangle_count;
+            out_receipt->bvh_node_count = bvh_node_count;
+            out_receipt->bounds_min_metres = {
+                imported_bounds.minimum.x,
+                imported_bounds.minimum.y,
+                imported_bounds.minimum.z
+            };
+            out_receipt->bounds_max_metres = {
+                imported_bounds.maximum.x,
+                imported_bounds.maximum.y,
+                imported_bounds.maximum.z
+            };
+        }
+        return PG_STATUS_OK;
+    } catch (const std::exception& exception) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Imported mesh processing failed: ") + exception.what());
+    } catch (...) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, "Imported mesh processing failed with an unknown error.");
+    }
 }
 
 pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index)

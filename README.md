@@ -22,13 +22,19 @@ commands and reads bounded telemetry.
   absorption, scattering, and transmission; geometry-aware direct occlusion;
   and bounded first-order image-source reflections. The viewport renders the
   same authored surfaces used by offline and preview audio.
+- Checksum-pinned Assimp 6.0.5 import for static OBJ and self-contained
+  glTF/GLB acoustic meshes. Project assets are size/SHA-256 verified before a
+  memory-only native import, capped at 250,000 triangles per mesh, and compiled
+  into immutable BVHs for direct occlusion and transmission. The editor shows
+  an explicit authored-bounds proxy; imported-mesh reflections fail clearly
+  until the geometric reflection backend is active.
 - WAV render output as 16/24-bit PCM with explicit TPDF dither or unclipped
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
 - Avalonia editor with linked World, Signal, Physics, Timeline, Receiver, and
-  Library views; validated project reopening; numerical SI editing; draggable
-  paths; raw gesture retention; audible preview; atomic save; isolated-take
-  rendering; and analysis import.
+  Library views; validated project reopening; a guarded acoustic-mesh picker;
+  numerical SI editing; draggable paths; raw gesture retention; audible preview;
+  atomic save; isolated-take rendering; and analysis import.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.
@@ -43,9 +49,10 @@ commands and reads bounded telemetry.
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
-Steam Audio, KISS FFT, libsndfile, Assimp, codec packs, GPU model execution, and
-full mesh authoring remain explicit adapters; their dependency records prevent
-an unfinished integration from being presented as active.
+Steam Audio, KISS FFT, libsndfile, codec packs, GPU model execution, full mesh
+authoring, and triangle-level imported-mesh viewport rendering remain explicit
+adapters; their dependency records prevent an unfinished integration from being
+presented as active.
 
 ## Build
 

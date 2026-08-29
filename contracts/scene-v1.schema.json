@@ -15,12 +15,12 @@
     "emitters": { "type": "array", "items": { "$ref": "#/$defs/emitter" } },
     "motionPaths": { "type": "array", "items": { "$ref": "#/$defs/motionPath" } },
     "materials": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/material" } },
-    "geometry": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/geometry" } },
+    "geometry": { "type": "array", "maxItems": 321, "items": { "$ref": "#/$defs/geometry" } },
     "receiverRigs": { "type": "array", "items": { "$ref": "#/$defs/receiver" } },
     "timeline": { "$ref": "#/$defs/timeline" },
     "renderProfiles": { "type": "array", "items": { "$ref": "#/$defs/renderProfile" } },
     "captureTakes": { "type": "array" },
-    "assets": { "type": "array" },
+    "assets": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/asset" } },
     "createdAtUtc": { "type": "string", "format": "date-time" },
     "updatedAtUtc": { "type": "string", "format": "date-time" }
   },
@@ -159,8 +159,25 @@
         "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" },
         "kind": { "enum": ["Plane", "Box", "Sphere", "Cylinder", "Arch", "Tunnel", "ParametricRoom", "Terrain", "ImportedMesh"] },
         "transform": { "$ref": "#/$defs/transform" }, "materialId": { "oneOf": [{ "$ref": "#/$defs/guid" }, { "type": "null" }] },
-        "dimensionsMetres": { "$ref": "#/$defs/vec3" }, "meshAssetHash": { "type": ["string", "null"] },
+        "dimensionsMetres": { "$ref": "#/$defs/vec3" },
+        "meshAssetHash": { "oneOf": [{ "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }, { "type": "null" }] },
         "isDynamic": { "type": "boolean" }, "occludes": { "type": "boolean" }, "reflects": { "type": "boolean" }
+      }
+    },
+    "asset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sha256", "kind", "fileName", "mediaType", "sizeBytes"],
+      "properties": {
+        "sha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "kind": { "enum": ["Audio", "Mesh", "Material", "Hrtf", "ImpulseResponse", "ModelOutput", "Render", "ProjectManifest"] },
+        "fileName": { "type": "string", "minLength": 1 },
+        "mediaType": { "type": "string", "minLength": 1 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "sampleRate": { "type": ["integer", "null"], "minimum": 1 },
+        "channels": { "type": ["integer", "null"], "minimum": 1 },
+        "durationSeconds": { "type": ["number", "null"], "minimum": 0 },
+        "provenance": { "type": ["string", "null"] },
+        "license": { "type": ["string", "null"] }
       }
     },
     "receiver": {

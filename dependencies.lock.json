@@ -34,9 +34,12 @@
       "purpose": "lossless audio formats"
     },
     "assimp": {
-      "status": "adapter-planned",
+      "version": "6.0.5",
+      "commit": "392a658f9c271be965271f45e7521a1b80ea4392",
+      "archiveSha256": "f870aef17a9a97ee62e8d59f553592c5ecde3b3997daf9d1d3ea5b084ad2b728",
+      "status": "active-static-obj-gltf-import",
       "license": "BSD-3-Clause",
-      "purpose": "glTF, GLB and OBJ mesh import"
+      "purpose": "bounded glTF, GLB and OBJ acoustic mesh import"
     }
   },
   "modelHost": {

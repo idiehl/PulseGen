@@ -31,7 +31,9 @@ public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 1;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "primitive-geometry-v1";
+    private const string AcousticModel = "bounded-geometry-v2";
+    private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
+    private const uint MaximumImportedMeshTriangles = 250_000;
     private static readonly double[] NativeBandCentresHz = [125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
     static NativeSceneRenderer()
@@ -41,14 +43,18 @@ public static unsafe class NativeSceneRenderer
 
     public static string EngineVersion => Marshal.PtrToStringUTF8(Native.pg_get_engine_version()) ?? "unknown";
 
-    public static RenderSummary Render(SceneDocument scene, string outputDirectory, RenderProfile? profile = null)
+    public static RenderSummary Render(
+        SceneDocument scene,
+        string outputDirectory,
+        RenderProfile? profile = null,
+        string? projectDirectory = null)
     {
         SceneValidator.EnsureValid(scene);
         Directory.CreateDirectory(outputDirectory);
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
 
-        var engine = CreateConfiguredEngine(scene);
+        var engine = CreateConfiguredEngine(scene, projectDirectory);
         try
         {
             var outputPointer = Marshal.StringToCoTaskMemUTF8(Path.GetFullPath(outputDirectory));
@@ -127,7 +133,7 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            2,
+            3,
             EngineVersion,
             AbiVersion,
             AcousticModel,
@@ -158,7 +164,8 @@ public static unsafe class NativeSceneRenderer
             RuntimeInformation.FrameworkDescription,
             [
                 new("PulseGen.Engine", EngineVersion, "native sample renderer"),
-                new("miniaudio", "0.11.25", "WASAPI device adapter")
+                new("miniaudio", "0.11.25", "WASAPI device adapter"),
+                new("Assimp", "6.0.5", "bounded memory-only OBJ/glTF/GLB mesh importer")
             ],
             [],
             takeFiles);
@@ -232,14 +239,15 @@ public static unsafe class NativeSceneRenderer
         uint periodFrames = 512,
         uint reflectionOrder = 1,
         bool exclusiveMode = false,
-        double startTimeSeconds = 0)
+        double startTimeSeconds = 0,
+        string? projectDirectory = null)
     {
         SceneValidator.EnsureValid(scene);
         if (!double.IsFinite(startTimeSeconds) || startTimeSeconds < 0 || startTimeSeconds > scene.Timeline.DurationSeconds)
         {
             throw new ArgumentOutOfRangeException(nameof(startTimeSeconds));
         }
-        var engine = CreateConfiguredEngine(scene);
+        var engine = CreateConfiguredEngine(scene, projectDirectory);
         try
         {
             var config = new NativeDeviceConfig
@@ -263,7 +271,7 @@ public static unsafe class NativeSceneRenderer
         }
     }
 
-    private static nint CreateConfiguredEngine(SceneDocument scene)
+    private static nint CreateConfiguredEngine(SceneDocument scene, string? projectDirectory)
     {
         var config = new NativeEngineConfig
         {
@@ -277,7 +285,7 @@ public static unsafe class NativeSceneRenderer
             ConfigureAtmosphere(scene, engine);
             var materialIndexes = ConfigureMaterials(scene, engine);
             ConfigureRoom(scene, engine);
-            ConfigureGeometry(scene, engine, materialIndexes);
+            ConfigureGeometry(scene, engine, materialIndexes, projectDirectory);
             foreach (var emitter in scene.Emitters.Where(item => item.Enabled))
             {
                 ConfigureEmitter(scene, engine, emitter);
@@ -387,7 +395,11 @@ public static unsafe class NativeSceneRenderer
         return indexes;
     }
 
-    private static void ConfigureGeometry(SceneDocument scene, nint engine, IReadOnlyDictionary<Guid, uint> materialIndexes)
+    private static void ConfigureGeometry(
+        SceneDocument scene,
+        nint engine,
+        IReadOnlyDictionary<Guid, uint> materialIndexes,
+        string? projectDirectory)
     {
         foreach (var geometry in scene.Geometry.Where(item => item.Kind != GeometryKind.ParametricRoom && (item.Occludes || item.Reflects)))
         {
@@ -395,16 +407,23 @@ public static unsafe class NativeSceneRenderer
             {
                 throw new NotSupportedException($"Dynamic acoustic geometry '{geometry.Name}' requires the motion adapter that is not active yet.");
             }
-            var nativeKind = geometry.Kind switch
-            {
-                GeometryKind.Plane => 0,
-                GeometryKind.Box => 1,
-                _ => throw new NotSupportedException($"Acoustic geometry '{geometry.Name}' uses {geometry.Kind}, which requires a mesh or primitive adapter that is not active yet.")
-            };
             if (geometry.MaterialId is not { } materialId || !materialIndexes.TryGetValue(materialId, out var materialIndex))
             {
                 throw new InvalidOperationException($"Acoustic geometry '{geometry.Name}' references a missing material.");
             }
+
+            if (geometry.Kind == GeometryKind.ImportedMesh)
+            {
+                ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory);
+                continue;
+            }
+
+            var nativeKind = geometry.Kind switch
+            {
+                GeometryKind.Plane => 0,
+                GeometryKind.Box => 1,
+                _ => throw new NotSupportedException($"Acoustic geometry '{geometry.Name}' uses {geometry.Kind}, which requires a primitive adapter that is not active yet.")
+            };
 
             var dimensions = new Vector3d(
                 geometry.DimensionsMetres.X * geometry.Transform.Scale.X,
@@ -433,6 +452,96 @@ public static unsafe class NativeSceneRenderer
             {
                 Marshal.FreeCoTaskMem(namePointer);
             }
+        }
+    }
+
+    private static void ConfigureImportedMesh(
+        SceneDocument scene,
+        nint engine,
+        AcousticGeometry geometry,
+        uint materialIndex,
+        string? projectDirectory)
+    {
+        if (geometry.Reflects)
+        {
+            throw new NotSupportedException(
+                $"Imported-mesh reflections for '{geometry.Name}' require the geometric reflection backend; disable Reflects until that backend is active.");
+        }
+        if (projectDirectory is null)
+        {
+            throw new InvalidOperationException($"Imported mesh '{geometry.Name}' requires its owning .pulseproj directory for content-addressed asset verification.");
+        }
+        var asset = scene.Assets.SingleOrDefault(item =>
+            item.Kind == AssetKind.Mesh && string.Equals(item.Sha256, geometry.MeshAssetHash, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"Imported mesh '{geometry.Name}' references a missing mesh asset.");
+        var format = Path.GetExtension(asset.FileName).TrimStart('.').ToLowerInvariant();
+        if (format is not ("obj" or "gltf" or "glb"))
+        {
+            throw new NotSupportedException($"Imported mesh asset '{asset.FileName}' must be OBJ, glTF, or GLB.");
+        }
+
+        var path = ProjectStore.ResolveAssetPath(projectDirectory, asset.Sha256);
+        var file = new FileInfo(path);
+        if (!file.Exists)
+        {
+            throw new FileNotFoundException($"Content-addressed mesh asset for '{geometry.Name}' is missing.", path);
+        }
+        if (file.Length != asset.SizeBytes || file.Length is <= 0 or > MaximumMeshAssetBytes)
+        {
+            throw new InvalidDataException($"Mesh asset '{asset.FileName}' size does not match its manifest or exceeds the 512 MiB safety cap.");
+        }
+        byte[] encoded;
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan))
+        {
+            var actualHash = Convert.ToHexStringLower(SHA256.HashData(stream));
+            if (!string.Equals(actualHash, asset.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException($"Mesh asset '{asset.FileName}' failed SHA-256 verification.");
+            }
+            stream.Position = 0;
+            encoded = new byte[checked((int)file.Length)];
+            stream.ReadExactly(encoded);
+        }
+
+        var namePointer = Marshal.StringToCoTaskMemUTF8(geometry.Name);
+        var formatPointer = Marshal.StringToCoTaskMemUTF8(format);
+        try
+        {
+            fixed (byte* encodedPointer = encoded)
+            {
+                var descriptor = new NativeMeshGeometry
+                {
+                    Size = (uint)sizeof(NativeMeshGeometry),
+                    Version = AbiVersion,
+                    NameUtf8 = namePointer,
+                    EncodedData = encodedPointer,
+                    EncodedSizeBytes = (ulong)encoded.Length,
+                    FormatHintUtf8 = formatPointer,
+                    CentreMetres = ToNative(geometry.Transform.PositionMetres),
+                    Scale = ToNative(geometry.Transform.Scale),
+                    RotationDegrees = ToNative(geometry.Transform.RotationDegrees),
+                    MaterialIndex = materialIndex,
+                    Occludes = geometry.Occludes ? 1U : 0U,
+                    Reflects = 0U,
+                    Enabled = 1U,
+                    MaxTriangles = MaximumImportedMeshTriangles
+                };
+                var receipt = new NativeMeshImportReceipt
+                {
+                    Size = (uint)sizeof(NativeMeshImportReceipt),
+                    Version = AbiVersion
+                };
+                Check(Native.pg_engine_add_mesh_geometry(engine, &descriptor, out _, &receipt), engine, "import acoustic mesh");
+                if (receipt.TriangleCount == 0 || receipt.TriangleCount > MaximumImportedMeshTriangles || receipt.BvhNodeCount == 0)
+                {
+                    throw new InvalidDataException($"Imported mesh '{geometry.Name}' returned an invalid native import receipt.");
+                }
+            }
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(namePointer);
+            Marshal.FreeCoTaskMem(formatPointer);
         }
     }
 
@@ -693,7 +802,8 @@ public static unsafe class NativeSceneRenderer
         {
             if (!NativeLibrary.TryGetExport(candidate, "pg_get_abi_version", out var abiExport) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
-                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _))
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _))
             {
                 return false;
             }
@@ -736,6 +846,8 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshGeometry { public uint Size, Version; public nint NameUtf8; public void* EncodedData; public ulong EncodedSizeBytes; public nint FormatHintUtf8; public NativeVector CentreMetres, Scale, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, MaxTriangles, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshImportReceipt { public uint Size, Version, SourceMeshCount, SourceVertexCount, TriangleCount, BvhNodeCount; public NativeVector BoundsMinMetres, BoundsMaxMetres; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMotionKeyframe { public double TimeSeconds; public NativeVector PositionMetres; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
@@ -755,6 +867,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_room(nint engine, NativeRoom* room);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_acoustic_material(nint engine, NativeAcousticMaterial* material, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_geometry(nint engine, NativeGeometry* geometry, out uint index);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_mesh_geometry(nint engine, NativeMeshGeometry* geometry, out uint index, NativeMeshImportReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);

@@ -22,8 +22,17 @@ public sealed class WorldViewport : Control
     private bool gestureCapturing;
     private DateTimeOffset gestureStarted;
     private readonly List<MotionKeyframe> gesturePoints = [];
+    private SceneDocument? scene;
 
-    public SceneDocument? Scene { get; set; }
+    public SceneDocument? Scene
+    {
+        get => scene;
+        set
+        {
+            scene = value;
+            InvalidateVisual();
+        }
+    }
 
     public bool IsGestureRecording { get; set; }
 
@@ -266,20 +275,25 @@ public sealed class WorldViewport : Control
         {
             return;
         }
-        foreach (var geometry in Scene.Geometry.Where(item => item.Kind is GeometryKind.Plane or GeometryKind.Box))
+        foreach (var geometry in Scene.Geometry.Where(item => item.Kind is GeometryKind.Plane or GeometryKind.Box or GeometryKind.ImportedMesh))
         {
             var material = Scene.Materials.FirstOrDefault(candidate => candidate.Id == geometry.MaterialId);
             var absorption = material?.Absorption.DefaultIfEmpty(0.2).Average() ?? 0.2;
             var scattering = material?.Scattering.DefaultIfEmpty(0.1).Average() ?? 0.1;
-            var fill = new SolidColorBrush(Color.FromArgb(
-                (byte)Math.Clamp(30 + (70 * (1 - absorption)), 20, 100),
-                (byte)Math.Clamp(48 + (90 * scattering), 0, 255),
-                (byte)Math.Clamp(112 + (80 * (1 - absorption)), 0, 255),
-                (byte)Math.Clamp(126 + (80 * scattering), 0, 255)));
-            var pen = new Pen(
-                new SolidColorBrush(geometry.Occludes ? Color.Parse("#EFBD72") : Color.Parse("#698397")),
-                geometry.Reflects ? 1.8 : 1.0,
-                geometry.Reflects ? null : new DashStyle([4, 3], 0));
+            var importedMesh = geometry.Kind == GeometryKind.ImportedMesh;
+            var fill = importedMesh
+                ? new SolidColorBrush(Color.FromArgb(34, 77, 176, 220))
+                : new SolidColorBrush(Color.FromArgb(
+                    (byte)Math.Clamp(30 + (70 * (1 - absorption)), 20, 100),
+                    (byte)Math.Clamp(48 + (90 * scattering), 0, 255),
+                    (byte)Math.Clamp(112 + (80 * (1 - absorption)), 0, 255),
+                    (byte)Math.Clamp(126 + (80 * scattering), 0, 255)));
+            var pen = importedMesh
+                ? new Pen(new SolidColorBrush(Color.Parse("#4DC4E8")), 1.4, new DashStyle([6, 3], 0))
+                : new Pen(
+                    new SolidColorBrush(geometry.Occludes ? Color.Parse("#EFBD72") : Color.Parse("#698397")),
+                    geometry.Reflects ? 1.8 : 1.0,
+                    geometry.Reflects ? null : new DashStyle([4, 3], 0));
 
             var dimensions = new Vector3d(
                 geometry.DimensionsMetres.X * geometry.Transform.Scale.X,

@@ -16,6 +16,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(miniaudio)
 
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build fetched dependencies as static libraries" FORCE)
+set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
+set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_IMPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_OBJ_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_GLTF_IMPORTER ON CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ALL_EXPORTERS_BY_DEFAULT OFF CACHE BOOL "" FORCE)
+set(ASSIMP_BUILD_ZLIB ON CACHE BOOL "" FORCE)
+set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    assimp
+    URL https://github.com/assimp/assimp/archive/392a658f9c271be965271f45e7521a1b80ea4392.zip
+    URL_HASH SHA256=f870aef17a9a97ee62e8d59f553592c5ecde3b3997daf9d1d3ea5b084ad2b728
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(assimp)
+
 add_library(PulseGen.Engine SHARED
     src/pulsegen.cpp
     src/wav_writer.cpp
@@ -38,6 +58,7 @@ target_compile_definitions(PulseGen.Engine PRIVATE
     MA_NO_RESOURCE_MANAGER
     MA_NO_GENERATION
 )
+target_link_libraries(PulseGen.Engine PRIVATE assimp::assimp)
 set_target_properties(PulseGen.Engine PROPERTIES
     OUTPUT_NAME "PulseGen.Engine"
     VERSION ${PROJECT_VERSION}

@@ -141,14 +141,20 @@ public static class SceneValidator
             ValidateMaterial(material, issues);
         }
 
+        var assetsByHash = ValidateAssets(scene.Assets, issues);
+
         if (scene.Geometry.Count(geometry => geometry.Kind is GeometryKind.Plane or GeometryKind.Box) > 256)
         {
             issues.Add(new("geometry", "The bounded native acoustic world supports at most 256 plane and box primitives."));
         }
+        if (scene.Geometry.Count(geometry => geometry.Kind == GeometryKind.ImportedMesh) > 64)
+        {
+            issues.Add(new("geometry", "The bounded native acoustic world supports at most 64 imported meshes."));
+        }
         var materialIds = scene.Materials.Select(material => material.Id).ToHashSet();
         foreach (var geometry in scene.Geometry)
         {
-            ValidateGeometry(geometry, materialIds, issues);
+            ValidateGeometry(geometry, materialIds, assetsByHash, issues);
         }
 
         foreach (var profile in scene.RenderProfiles)
@@ -306,7 +312,39 @@ public static class SceneValidator
         }
     }
 
-    private static void ValidateGeometry(AcousticGeometry geometry, IReadOnlySet<Guid> materialIds, List<ValidationIssue> issues)
+    private static IReadOnlyDictionary<string, AssetKind> ValidateAssets(
+        IReadOnlyList<AssetRef> assets,
+        List<ValidationIssue> issues)
+    {
+        var result = new Dictionary<string, AssetKind>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < assets.Count; index++)
+        {
+            var asset = assets[index];
+            if (string.IsNullOrEmpty(asset.Sha256) || asset.Sha256.Length != 64 || !asset.Sha256.All(Uri.IsHexDigit))
+            {
+                issues.Add(new($"assets/{index}/sha256", "Asset identity must be a 64-character SHA-256 value."));
+            }
+            else if (!result.TryAdd(asset.Sha256, asset.Kind))
+            {
+                issues.Add(new($"assets/{index}/sha256", "Asset identities must be unique within a project manifest."));
+            }
+            if (asset.SizeBytes < 0)
+            {
+                issues.Add(new($"assets/{index}/sizeBytes", "Asset size may not be negative."));
+            }
+            if (string.IsNullOrWhiteSpace(asset.FileName) || string.IsNullOrWhiteSpace(asset.MediaType))
+            {
+                issues.Add(new($"assets/{index}", "Asset filename and media type are required."));
+            }
+        }
+        return result;
+    }
+
+    private static void ValidateGeometry(
+        AcousticGeometry geometry,
+        IReadOnlySet<Guid> materialIds,
+        IReadOnlyDictionary<string, AssetKind> assetsByHash,
+        List<ValidationIssue> issues)
     {
         if ((geometry.Occludes || geometry.Reflects) && (geometry.MaterialId is null || !materialIds.Contains(geometry.MaterialId.Value)))
         {
@@ -332,11 +370,20 @@ public static class SceneValidator
         {
             issues.Add(new($"geometry/{geometry.Id}/meshAssetHash", "Imported mesh geometry requires a content-addressed mesh asset."));
         }
+        else if (geometry.Kind == GeometryKind.ImportedMesh &&
+            (!assetsByHash.TryGetValue(geometry.MeshAssetHash!, out var assetKind) || assetKind != AssetKind.Mesh))
+        {
+            issues.Add(new($"geometry/{geometry.Id}/meshAssetHash", "Imported mesh geometry must reference a declared Mesh asset."));
+        }
         if (geometry.IsDynamic && (geometry.Occludes || geometry.Reflects))
         {
             issues.Add(new($"geometry/{geometry.Id}/isDynamic", "Dynamic acoustic geometry is retained in the project but requires a future motion adapter.", ValidationSeverity.Warning));
         }
-        if (geometry.Kind is not (GeometryKind.Plane or GeometryKind.Box or GeometryKind.ParametricRoom) && (geometry.Occludes || geometry.Reflects))
+        if (geometry.Kind == GeometryKind.ImportedMesh && geometry.Reflects)
+        {
+            issues.Add(new($"geometry/{geometry.Id}/reflects", "Imported-mesh reflections require the geometric reflection backend; direct occlusion and transmission are active.", ValidationSeverity.Warning));
+        }
+        else if (geometry.Kind is not (GeometryKind.Plane or GeometryKind.Box or GeometryKind.ParametricRoom or GeometryKind.ImportedMesh) && (geometry.Occludes || geometry.Reflects))
         {
             issues.Add(new($"geometry/{geometry.Id}/kind", $"{geometry.Kind} acoustic behavior requires an adapter that is not active yet.", ValidationSeverity.Warning));
         }

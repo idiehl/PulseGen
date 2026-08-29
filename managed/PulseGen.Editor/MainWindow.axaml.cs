@@ -73,23 +73,7 @@ public sealed partial class MainWindow : Window
         DurationSummaryText.Text = $"{scene.Timeline.DurationSeconds:0.000} s";
         AtlasStateText.Text = "PRIVATE · LOCAL ONLY";
 
-        var treeItems = new List<TreeViewItem>();
-        treeItems.AddRange(scene.Emitters.Select((emitter, index) => new TreeViewItem
-        {
-            Header = $"◉  {emitter.Name}",
-            IsSelected = index == 0
-        }));
-        treeItems.AddRange(scene.MotionPaths.Select(path => new TreeViewItem { Header = $"⌁  {path.Name}" }));
-        treeItems.AddRange(scene.Geometry.Select(geometry => new TreeViewItem { Header = $"▱  {geometry.Name}" }));
-        treeItems.AddRange(scene.Atmosphere.WindZones.Select(zone => new TreeViewItem { Header = $"≋  {zone.Name}" }));
-        treeItems.AddRange(scene.ReceiverRigs.Select(rig => new TreeViewItem
-        {
-            Header = $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}"
-        }));
-        SceneTree.ItemsSource = new[]
-        {
-            new TreeViewItem { Header = $"▾  {scene.Name}", IsExpanded = true, ItemsSource = treeItems }
-        };
+        RefreshSceneTree();
 
         var emitter = scene.Emitters[0];
         var sourceNode = emitter.SignalGraph.Nodes.FirstOrDefault(node => node.Kind == SignalNodeKind.Oscillator);
@@ -126,6 +110,27 @@ public sealed partial class MainWindow : Window
         SelectKeyframe(0);
     }
 
+    private void RefreshSceneTree()
+    {
+        var treeItems = new List<TreeViewItem>();
+        treeItems.AddRange(scene.Emitters.Select((emitter, index) => new TreeViewItem
+        {
+            Header = $"◉  {emitter.Name}",
+            IsSelected = index == 0
+        }));
+        treeItems.AddRange(scene.MotionPaths.Select(path => new TreeViewItem { Header = $"⌁  {path.Name}" }));
+        treeItems.AddRange(scene.Geometry.Select(geometry => new TreeViewItem { Header = $"▱  {geometry.Name}" }));
+        treeItems.AddRange(scene.Atmosphere.WindZones.Select(zone => new TreeViewItem { Header = $"≋  {zone.Name}" }));
+        treeItems.AddRange(scene.ReceiverRigs.Select(rig => new TreeViewItem
+        {
+            Header = $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}"
+        }));
+        SceneTree.ItemsSource = new[]
+        {
+            new TreeViewItem { Header = $"▾  {scene.Name}", IsExpanded = true, ItemsSource = treeItems }
+        };
+    }
+
     private void OnPlayClicked(object? sender, RoutedEventArgs e)
     {
         StopPreviewTransport();
@@ -139,7 +144,8 @@ public sealed partial class MainWindow : Window
                 sampleRate: 48000,
                 periodFrames: 512,
                 reflectionOrder: 1,
-                startTimeSeconds: Viewport.TimeSeconds);
+                startTimeSeconds: Viewport.TimeSeconds,
+                projectDirectory: lastProjectDirectory);
             var status = audioPreview.Status;
             StatusText.Text = $"Audible WASAPI preview · {status.SampleRate:N0} Hz · {status.PeriodFrames} frames · receiver 1";
         }
@@ -236,6 +242,107 @@ public sealed partial class MainWindow : Window
         catch (Exception exception)
         {
             StatusText.Text = $"Project save failed: {exception.Message}";
+        }
+    }
+
+    private async void OnImportMeshClicked(object? sender, RoutedEventArgs e)
+    {
+        if (lastProjectDirectory is null)
+        {
+            StatusText.Text = "Save the scene as a .pulseproj before importing a content-addressed mesh";
+            return;
+        }
+        var material = scene.Materials.FirstOrDefault();
+        if (material is null)
+        {
+            StatusText.Text = "Create an acoustic material before importing mesh geometry";
+            return;
+        }
+
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import a bounded acoustic OBJ or self-contained glTF/GLB",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("Acoustic meshes") { Patterns = ["*.obj", "*.gltf", "*.glb"] }
+            ]
+        });
+        if (files.Count == 0)
+        {
+            return;
+        }
+
+        ImportMeshButton.IsEnabled = false;
+        try
+        {
+            StopPreviewTransport();
+            var sourcePath = files[0].Path.LocalPath;
+            var extension = Path.GetExtension(sourcePath).ToLowerInvariant();
+            var mediaType = extension switch
+            {
+                ".obj" => "model/obj",
+                ".gltf" => "model/gltf+json",
+                ".glb" => "model/gltf-binary",
+                _ => throw new NotSupportedException("Choose an OBJ, glTF, or GLB mesh.")
+            };
+            var source = new FileInfo(sourcePath);
+            if (!source.Exists || source.Length is <= 0 or > 512L * 1024 * 1024)
+            {
+                throw new InvalidDataException("Mesh files must contain between 1 byte and 512 MiB.");
+            }
+
+            StatusText.Text = "Hashing and copying the mesh into the private project asset store…";
+            var imported = await ProjectStore.ImportAssetAsync(
+                lastProjectDirectory,
+                sourcePath,
+                AssetKind.Mesh,
+                mediaType,
+                provenance: "PulseGen editor local import");
+            var existing = scene.Assets.FirstOrDefault(asset =>
+                string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null && existing.Kind != AssetKind.Mesh)
+            {
+                throw new InvalidDataException("The same content hash is already declared as a non-mesh asset.");
+            }
+            if (existing is null)
+            {
+                scene.Assets.Add(imported);
+            }
+
+            var baseName = Path.GetFileNameWithoutExtension(imported.FileName);
+            if (string.IsNullOrWhiteSpace(baseName))
+            {
+                baseName = "Imported mesh";
+            }
+            var geometryName = baseName;
+            for (var suffix = 2; scene.Geometry.Any(item => string.Equals(item.Name, geometryName, StringComparison.OrdinalIgnoreCase)); suffix++)
+            {
+                geometryName = $"{baseName} {suffix}";
+            }
+            scene.Geometry.Add(new AcousticGeometry
+            {
+                Id = Guid.NewGuid(),
+                Name = geometryName,
+                Kind = GeometryKind.ImportedMesh,
+                MaterialId = material.Id,
+                MeshAssetHash = imported.Sha256,
+                DimensionsMetres = new(2, 2, 2),
+                Occludes = true,
+                Reflects = false
+            });
+            sceneDirty = true;
+            Viewport.Scene = scene;
+            RefreshSceneTree();
+            StatusText.Text = $"Imported {imported.FileName} · direct occlusion active · authored bounds proxy 2 m · save to commit the manifest";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Mesh import failed without changing the scene manifest: {exception.Message}";
+        }
+        finally
+        {
+            ImportMeshButton.IsEnabled = true;
         }
     }
 
@@ -645,7 +752,7 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "Rendering isolated receiver takes…";
         try
         {
-            var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output));
+            var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output, projectDirectory: lastProjectDirectory));
             lastRenderDirectory = output;
             StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
         }

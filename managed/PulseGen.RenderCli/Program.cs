@@ -60,7 +60,10 @@ if (!arguments.ContainsKey("no-render"))
 {
     var defaultOutputName = arguments.ContainsKey("project") ? "project" : selectedSample.ToLowerInvariant();
     var output = arguments.GetValueOrDefault("output", Path.Combine("out", "renders", defaultOutputName));
-    var receipt = NativeSceneRenderer.Render(scene, output);
+    var receipt = NativeSceneRenderer.Render(
+        scene,
+        output,
+        projectDirectory: arguments.ContainsKey("project") ? projectDirectory : null);
     Console.WriteLine(JsonSerializer.Serialize(new
     {
         marker = "PULSEGEN_RENDER_OK",

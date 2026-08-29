@@ -103,12 +103,15 @@ try {
         throw 'Deterministic render receipts differ.'
     }
     $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
-    if ($renderReceipt.receiptVersion -ne 2 -or $renderReceipt.acousticModel -ne 'primitive-geometry-v1' -or
+    $miniaudioDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'miniaudio' })
+    $assimpDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'Assimp' })
+    if ($renderReceipt.receiptVersion -ne 3 -or $renderReceipt.acousticModel -ne 'bounded-geometry-v2' -or
         $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
         $renderReceipt.engineVersion -notmatch '^0\.1\.0-alpha' -or $renderReceipt.sampleRate -ne 48000 -or
         $renderReceipt.sampleFormat -ne 'Float32' -or $renderReceipt.dither -ne 'None' -or
-        @($renderReceipt.takes).Count -ne 2 -or $renderReceipt.dependencies[1].name -ne 'miniaudio' -or
-        $renderReceipt.dependencies[1].version -ne '0.11.25') {
+        @($renderReceipt.takes).Count -ne 2 -or $miniaudioDependency.Count -ne 1 -or
+        $miniaudioDependency[0].version -ne '0.11.25' -or $assimpDependency.Count -ne 1 -or
+        $assimpDependency[0].version -ne '6.0.5') {
         throw 'Render provenance receipt is incomplete or inconsistent.'
     }
     foreach ($take in $renderReceipt.takes) {
@@ -143,7 +146,7 @@ try {
         }
     }
     $surfaceReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $surfaceFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($surfaceReceipt.receiptVersion -ne 2 -or $surfaceReceipt.acousticModel -ne 'primitive-geometry-v1' -or
+    if ($surfaceReceipt.receiptVersion -ne 3 -or $surfaceReceipt.acousticModel -ne 'bounded-geometry-v2' -or
         @($surfaceReceipt.takes).Count -ne 2 -or [Math]::Max($surfaceReceipt.peakLeft, $surfaceReceipt.peakRight) -le 0) {
         throw 'Surface-echo receipt is incomplete or records silent output.'
     }
@@ -177,7 +180,7 @@ try {
             throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
-    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed"
+    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed"
 }
 finally {
     Set-Location -LiteralPath $originalLocation

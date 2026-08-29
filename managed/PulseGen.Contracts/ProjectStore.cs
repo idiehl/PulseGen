@@ -94,7 +94,15 @@ public static class ProjectStore
         var assetRoot = Path.Combine(Path.GetFullPath(projectDirectory), "assets", "sha256", hash[..2]);
         Directory.CreateDirectory(assetRoot);
         var destination = Path.Combine(assetRoot, hash);
-        if (!File.Exists(destination))
+        if (File.Exists(destination))
+        {
+            var existingHash = await ComputeSha256Async(destination, cancellationToken);
+            if (!string.Equals(hash, existingHash, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("Existing content-addressed asset failed SHA-256 verification and was not overwritten.");
+            }
+        }
+        else
         {
             var temporary = destination + $".{Guid.NewGuid():N}.tmp";
             try

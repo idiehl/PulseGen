@@ -23,6 +23,7 @@ extern "C" {
 #define PG_ABI_VERSION 1u
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
+#define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
 
 typedef struct pg_engine pg_engine;
 
@@ -157,6 +158,35 @@ typedef struct pg_geometry_desc {
     uint32_t reserved;
 } pg_geometry_desc;
 
+typedef struct pg_mesh_geometry_desc {
+    uint32_t size;
+    uint32_t version;
+    const char* name_utf8;
+    const void* encoded_data;
+    uint64_t encoded_size_bytes;
+    const char* format_hint_utf8;
+    pg_vec3 centre_metres;
+    pg_vec3 scale;
+    pg_vec3 rotation_degrees;
+    uint32_t material_index;
+    uint32_t occludes;
+    uint32_t reflects;
+    uint32_t enabled;
+    uint32_t max_triangles;
+    uint32_t reserved;
+} pg_mesh_geometry_desc;
+
+typedef struct pg_mesh_import_receipt {
+    uint32_t size;
+    uint32_t version;
+    uint32_t source_mesh_count;
+    uint32_t source_vertex_count;
+    uint32_t triangle_count;
+    uint32_t bvh_node_count;
+    pg_vec3 bounds_min_metres;
+    pg_vec3 bounds_max_metres;
+} pg_mesh_import_receipt;
+
 typedef struct pg_motion_keyframe {
     double time_seconds;
     pg_vec3 position_metres;
@@ -284,6 +314,7 @@ PG_API pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_at
 PG_API pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room);
 PG_API pg_status PG_CALL pg_engine_add_acoustic_material(pg_engine* engine, const pg_acoustic_material_desc* material, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_desc* geometry, uint32_t* out_index);
+PG_API pg_status PG_CALL pg_engine_add_mesh_geometry(pg_engine* engine, const pg_mesh_geometry_desc* geometry, uint32_t* out_index, pg_mesh_import_receipt* out_receipt);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);

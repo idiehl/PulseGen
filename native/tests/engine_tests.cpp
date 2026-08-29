@@ -242,6 +242,7 @@ std::vector<float> render_static_source(const static_render_options& options)
 
 struct surface_render_options {
     bool add_surface{ true };
+    bool use_imported_mesh{};
     pg_geometry_kind geometry_kind{ PG_GEOMETRY_PLANE };
     pg_waveform_kind waveform{ PG_WAVE_SINE };
     double frequency_hz{ 440.0 };
@@ -259,6 +260,61 @@ struct surface_render_options {
     std::uint64_t start_frame{ 24000U };
     std::uint32_t frame_count{ 4800U };
 };
+
+constexpr std::string_view bounded_wall_obj =
+    "o BoundedWall\n"
+    "v -5 -5 0\n"
+    "v 5 -5 0\n"
+    "v 5 5 0\n"
+    "v -5 5 0\n"
+    "f 1 2 3\n"
+    "f 1 3 4\n";
+
+constexpr std::string_view embedded_triangle_gltf = R"gltf({
+  "asset":{"version":"2.0"},
+  "buffers":[{"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAABAAIA","byteLength":42}],
+  "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963}],
+  "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR","min":[0],"max":[2]}],
+  "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"mode":4}]}],
+  "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0
+})gltf";
+
+void append_little_endian_u32(std::vector<std::uint8_t>& destination, std::uint32_t value)
+{
+    for (std::uint32_t shift = 0U; shift < 32U; shift += 8U) {
+        destination.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+    }
+}
+
+std::vector<std::uint8_t> make_triangle_glb()
+{
+    std::string json = R"json({"asset":{"version":"2.0"},"buffers":[{"byteLength":42}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36,"target":34962},{"buffer":0,"byteOffset":36,"byteLength":6,"target":34963}],"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]},{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR","min":[0],"max":[2]}],"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"mode":4}]}],"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})json";
+    while ((json.size() & 3U) != 0U) {
+        json.push_back(' ');
+    }
+    const std::array<float, 9> positions{ 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F };
+    std::vector<std::uint8_t> binary;
+    const auto* position_bytes = reinterpret_cast<const std::uint8_t*>(positions.data());
+    binary.insert(binary.end(), position_bytes, position_bytes + sizeof(positions));
+    binary.insert(binary.end(), { 0U, 0U, 1U, 0U, 2U, 0U });
+    while ((binary.size() & 3U) != 0U) {
+        binary.push_back(0U);
+    }
+
+    std::vector<std::uint8_t> result;
+    const std::uint32_t total_length = static_cast<std::uint32_t>(12U + 8U + json.size() + 8U + binary.size());
+    result.reserve(total_length);
+    append_little_endian_u32(result, 0x46546c67U);
+    append_little_endian_u32(result, 2U);
+    append_little_endian_u32(result, total_length);
+    append_little_endian_u32(result, static_cast<std::uint32_t>(json.size()));
+    append_little_endian_u32(result, 0x4e4f534aU);
+    result.insert(result.end(), json.begin(), json.end());
+    append_little_endian_u32(result, static_cast<std::uint32_t>(binary.size()));
+    append_little_endian_u32(result, 0x004e4942U);
+    result.insert(result.end(), binary.begin(), binary.end());
+    return result;
+}
 
 std::vector<float> render_surface_source(const surface_render_options& options)
 {
@@ -296,19 +352,45 @@ std::vector<float> render_surface_source(const surface_render_options& options)
         std::uint32_t material_index = 0U;
         REQUIRE(pg_engine_add_acoustic_material(engine, &material, &material_index) == PG_STATUS_OK);
 
-        pg_geometry_desc geometry{};
-        geometry.size = sizeof(geometry);
-        geometry.version = PG_ABI_VERSION;
-        geometry.name_utf8 = "Bounded_Surface";
-        geometry.kind = options.geometry_kind;
-        geometry.centre_metres = options.geometry_centre;
-        geometry.dimensions_metres = options.geometry_dimensions;
-        geometry.rotation_degrees = options.geometry_rotation;
-        geometry.material_index = material_index;
-        geometry.occludes = options.occludes ? 1U : 0U;
-        geometry.reflects = options.reflects ? 1U : 0U;
-        geometry.enabled = 1U;
-        REQUIRE(pg_engine_add_geometry(engine, &geometry, nullptr) == PG_STATUS_OK);
+        if (options.use_imported_mesh) {
+            pg_mesh_geometry_desc geometry{};
+            geometry.size = sizeof(geometry);
+            geometry.version = PG_ABI_VERSION;
+            geometry.name_utf8 = "Bounded_Mesh_Surface";
+            geometry.encoded_data = bounded_wall_obj.data();
+            geometry.encoded_size_bytes = bounded_wall_obj.size();
+            geometry.format_hint_utf8 = "obj";
+            geometry.centre_metres = options.geometry_centre;
+            geometry.scale = { 1.0, 1.0, 1.0 };
+            geometry.rotation_degrees = options.geometry_rotation;
+            geometry.material_index = material_index;
+            geometry.occludes = options.occludes ? 1U : 0U;
+            geometry.reflects = options.reflects ? 1U : 0U;
+            geometry.enabled = 1U;
+            geometry.max_triangles = PG_MAX_IMPORTED_MESH_TRIANGLES;
+            pg_mesh_import_receipt receipt{};
+            receipt.size = sizeof(receipt);
+            receipt.version = PG_ABI_VERSION;
+            REQUIRE(pg_engine_add_mesh_geometry(engine, &geometry, nullptr, &receipt) == PG_STATUS_OK);
+            REQUIRE(receipt.source_mesh_count == 1U);
+            REQUIRE(receipt.source_vertex_count == 4U);
+            REQUIRE(receipt.triangle_count == 2U);
+            REQUIRE(receipt.bvh_node_count == 1U);
+        } else {
+            pg_geometry_desc geometry{};
+            geometry.size = sizeof(geometry);
+            geometry.version = PG_ABI_VERSION;
+            geometry.name_utf8 = "Bounded_Surface";
+            geometry.kind = options.geometry_kind;
+            geometry.centre_metres = options.geometry_centre;
+            geometry.dimensions_metres = options.geometry_dimensions;
+            geometry.rotation_degrees = options.geometry_rotation;
+            geometry.material_index = material_index;
+            geometry.occludes = options.occludes ? 1U : 0U;
+            geometry.reflects = options.reflects ? 1U : 0U;
+            geometry.enabled = 1U;
+            REQUIRE(pg_engine_add_geometry(engine, &geometry, nullptr) == PG_STATUS_OK);
+        }
     }
 
     const double render_end_seconds = static_cast<double>(options.start_frame + options.frame_count) / sample_rate;
@@ -503,6 +585,95 @@ int main(int argument_count, char** arguments)
     REQUIRE(pg_engine_add_geometry(material_validation_engine, &missing_material_geometry, nullptr) == PG_STATUS_INVALID_ARGUMENT);
     pg_engine_destroy(material_validation_engine);
 
+    pg_engine* mesh_validation_engine = create_engine();
+    pg_acoustic_material_desc mesh_material{};
+    mesh_material.size = sizeof(mesh_material);
+    mesh_material.version = PG_ABI_VERSION;
+    mesh_material.name_utf8 = "Mesh_Test_Material";
+    for (std::size_t index = 0U; index < standard_bands.size(); ++index) {
+        mesh_material.octave_band_centres_hz[index] = standard_bands[index];
+        mesh_material.absorption[index] = 0.1;
+        mesh_material.scattering[index] = 0.1;
+        mesh_material.transmission[index] = 0.25;
+    }
+    mesh_material.roughness = 0.2;
+    std::uint32_t mesh_material_index = 0U;
+    REQUIRE(pg_engine_add_acoustic_material(mesh_validation_engine, &mesh_material, &mesh_material_index) == PG_STATUS_OK);
+
+    pg_mesh_geometry_desc mesh_descriptor{};
+    mesh_descriptor.size = sizeof(mesh_descriptor);
+    mesh_descriptor.version = PG_ABI_VERSION;
+    mesh_descriptor.name_utf8 = "Validated_Mesh";
+    mesh_descriptor.encoded_data = bounded_wall_obj.data();
+    mesh_descriptor.encoded_size_bytes = bounded_wall_obj.size();
+    mesh_descriptor.format_hint_utf8 = ".OBJ";
+    mesh_descriptor.centre_metres = { 0.0, 0.0, 1.0 };
+    mesh_descriptor.scale = { 2.0, 1.0, 1.0 };
+    mesh_descriptor.material_index = mesh_material_index;
+    mesh_descriptor.occludes = 1U;
+    mesh_descriptor.enabled = 1U;
+    mesh_descriptor.max_triangles = PG_MAX_IMPORTED_MESH_TRIANGLES;
+    pg_mesh_import_receipt mesh_receipt{};
+    mesh_receipt.size = sizeof(mesh_receipt);
+    mesh_receipt.version = PG_ABI_VERSION;
+    std::uint32_t mesh_index = std::numeric_limits<std::uint32_t>::max();
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &mesh_descriptor, &mesh_index, &mesh_receipt) == PG_STATUS_OK);
+    REQUIRE(mesh_index == 0U);
+    REQUIRE(mesh_receipt.source_mesh_count == 1U);
+    REQUIRE(mesh_receipt.source_vertex_count == 4U);
+    REQUIRE(mesh_receipt.triangle_count == 2U);
+    REQUIRE(mesh_receipt.bvh_node_count == 1U);
+    REQUIRE(std::abs(mesh_receipt.bounds_min_metres.x + 10.0) < 1.0e-9);
+    REQUIRE(std::abs(mesh_receipt.bounds_max_metres.x - 10.0) < 1.0e-9);
+    REQUIRE(std::abs(mesh_receipt.bounds_min_metres.z - 1.0) < 1.0e-9);
+    REQUIRE(std::abs(mesh_receipt.bounds_max_metres.z - 1.0) < 1.0e-9);
+
+    pg_mesh_geometry_desc gltf_descriptor = mesh_descriptor;
+    gltf_descriptor.name_utf8 = "Embedded_glTF";
+    gltf_descriptor.encoded_data = embedded_triangle_gltf.data();
+    gltf_descriptor.encoded_size_bytes = embedded_triangle_gltf.size();
+    gltf_descriptor.format_hint_utf8 = "gltf";
+    gltf_descriptor.centre_metres = { 20.0, 0.0, 0.0 };
+    gltf_descriptor.scale = { 1.0, 1.0, 1.0 };
+    pg_mesh_import_receipt gltf_receipt{};
+    gltf_receipt.size = sizeof(gltf_receipt);
+    gltf_receipt.version = PG_ABI_VERSION;
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &gltf_descriptor, nullptr, &gltf_receipt) == PG_STATUS_OK);
+    REQUIRE(gltf_receipt.source_mesh_count == 1U);
+    REQUIRE(gltf_receipt.source_vertex_count == 3U);
+    REQUIRE(gltf_receipt.triangle_count == 1U);
+
+    const std::vector<std::uint8_t> triangle_glb = make_triangle_glb();
+    pg_mesh_geometry_desc glb_descriptor = gltf_descriptor;
+    glb_descriptor.name_utf8 = "Embedded_GLB";
+    glb_descriptor.encoded_data = triangle_glb.data();
+    glb_descriptor.encoded_size_bytes = triangle_glb.size();
+    glb_descriptor.format_hint_utf8 = "glb";
+    glb_descriptor.centre_metres = { 30.0, 0.0, 0.0 };
+    pg_mesh_import_receipt glb_receipt{};
+    glb_receipt.size = sizeof(glb_receipt);
+    glb_receipt.version = PG_ABI_VERSION;
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &glb_descriptor, nullptr, &glb_receipt) == PG_STATUS_OK);
+    REQUIRE(glb_receipt.source_mesh_count == 1U);
+    REQUIRE(glb_receipt.source_vertex_count == 3U);
+    REQUIRE(glb_receipt.triangle_count == 1U);
+
+    pg_mesh_geometry_desc rejected_mesh = mesh_descriptor;
+    rejected_mesh.format_hint_utf8 = "fbx";
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    rejected_mesh = mesh_descriptor;
+    rejected_mesh.reflects = 1U;
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    constexpr std::string_view malformed_obj = "this is not an OBJ mesh";
+    rejected_mesh = mesh_descriptor;
+    rejected_mesh.encoded_data = malformed_obj.data();
+    rejected_mesh.encoded_size_bytes = malformed_obj.size();
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_INVALID_SCENE);
+    rejected_mesh = mesh_descriptor;
+    rejected_mesh.max_triangles = 1U;
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
+    pg_engine_destroy(mesh_validation_engine);
+
     surface_render_options baseline_surface{};
     baseline_surface.add_surface = false;
     const auto unobstructed_surface = render_surface_source(baseline_surface);
@@ -518,6 +689,20 @@ int main(int argument_count, char** arguments)
     const double quarter_energy_ratio = channel_rms(render_surface_source(quarter_energy_surface), 0U) /
         channel_rms(unobstructed_surface, 0U);
     REQUIRE(std::abs(quarter_energy_ratio - 0.5) < 0.002);
+
+    surface_render_options imported_mesh_surface = quarter_energy_surface;
+    imported_mesh_surface.use_imported_mesh = true;
+    const auto imported_mesh_output = render_surface_source(imported_mesh_surface);
+    const double imported_mesh_ratio = channel_rms(imported_mesh_output, 0U) /
+        channel_rms(unobstructed_surface, 0U);
+    REQUIRE(std::abs(imported_mesh_ratio - 0.5) < 0.002);
+    REQUIRE(imported_mesh_output == render_surface_source(imported_mesh_surface));
+
+    auto off_axis_mesh_surface = imported_mesh_surface;
+    off_axis_mesh_surface.geometry_centre = { 20.0, 0.0, 1.0 };
+    const double off_axis_mesh_ratio = channel_rms(render_surface_source(off_axis_mesh_surface), 0U) /
+        channel_rms(unobstructed_surface, 0U);
+    REQUIRE(std::abs(off_axis_mesh_ratio - 1.0) < 1.0e-9);
 
     surface_render_options off_axis_surface = opaque_surface;
     off_axis_surface.geometry_centre = { 2.0, 0.0, 1.0 };

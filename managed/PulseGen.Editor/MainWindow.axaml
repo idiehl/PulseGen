@@ -59,6 +59,7 @@
               <Button x:Name="AtlasButton" Content="◇  Atlas sign in" Click="OnAtlasClicked" ToolTip.Tip="Use authorization code + PKCE. The rotating refresh token is stored in Windows Credential Manager." />
               <Button x:Name="SyncButton" Grid.Column="1" Content="⇧  Sync project" Click="OnSyncClicked" ToolTip.Tip="Explicitly upload the saved manifest and create an immutable Atlas project revision. Conflicts become named branches." />
             </Grid>
+            <Button x:Name="ImportMeshButton" Content="▱  Import acoustic mesh" Click="OnImportMeshClicked" ToolTip.Tip="Copy an OBJ or self-contained glTF/GLB into this project's SHA-256 asset store and add it as a direct-occlusion surface." />
           </StackPanel>
         </Border>
       </Grid>
