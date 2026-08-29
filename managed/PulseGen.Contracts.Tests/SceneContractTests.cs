@@ -21,6 +21,18 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void MovingReceiverSceneIsValidAndAssignsOnlyTheMicrophonePath()
+    {
+        var scene = SampleScenes.CreateMovingReceiver();
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Empty(issues);
+        Assert.Null(scene.ReceiverRigs[0].MotionPathId);
+        Assert.NotNull(scene.ReceiverRigs[1].MotionPathId);
+        Assert.Contains(scene.MotionPaths, path => path.Id == scene.ReceiverRigs[1].MotionPathId);
+    }
+
+    [Fact]
     public void UnsupportedUnitsAreRejected()
     {
         var scene = SampleScenes.CreateFlyby() with { Units = "feet" };
@@ -150,6 +162,24 @@ public sealed class SceneContractTests
         scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { HrtfMode = HrtfMode.ExactSofa, SofaAssetHash = null };
         var issues = SceneValidator.Validate(scene);
         Assert.Contains(issues, issue => issue.Path.EndsWith("sofaAssetHash", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ReceiverMotionUsesAValidatedFiniteScenePath()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { MotionPathId = scene.MotionPaths[0].Id };
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
+
+        scene.MotionPaths[0].Keyframes[0] = scene.MotionPaths[0].Keyframes[0] with
+        {
+            PositionMetres = new(double.NaN, 0, 0)
+        };
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { SpacingMetres = double.NaN };
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path.Contains("/keyframes/0", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/spacingMetres", StringComparison.Ordinal));
     }
 
     [Fact]

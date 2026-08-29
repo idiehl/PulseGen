@@ -73,16 +73,28 @@ public static class SceneValidator
                 continue;
             }
 
-            for (var index = 1; index < path.Keyframes.Count; index++)
+            for (var index = 0; index < path.Keyframes.Count; index++)
             {
-                if (path.Keyframes[index].TimeSeconds <= path.Keyframes[index - 1].TimeSeconds)
+                var keyframe = path.Keyframes[index];
+                if (!double.IsFinite(keyframe.TimeSeconds) || keyframe.TimeSeconds < 0 || !Finite(keyframe.PositionMetres) ||
+                    (keyframe.InTangentMetres is { } inTangent && !Finite(inTangent)) ||
+                    (keyframe.OutTangentMetres is { } outTangent && !Finite(outTangent)))
+                {
+                    issues.Add(new($"motionPaths/{path.Id}/keyframes/{index}", "Keyframe time, position, and optional tangents must be finite; time may not be negative."));
+                    continue;
+                }
+                if (index == 0)
+                {
+                    continue;
+                }
+                if (keyframe.TimeSeconds <= path.Keyframes[index - 1].TimeSeconds)
                 {
                     issues.Add(new($"motionPaths/{path.Id}/keyframes/{index}/timeSeconds", "Keyframe times must increase strictly."));
                 }
-                else
+                else if (Finite(path.Keyframes[index - 1].PositionMetres) && double.IsFinite(path.Keyframes[index - 1].TimeSeconds))
                 {
-                    var distance = (path.Keyframes[index].PositionMetres - path.Keyframes[index - 1].PositionMetres).Length;
-                    var elapsed = path.Keyframes[index].TimeSeconds - path.Keyframes[index - 1].TimeSeconds;
+                    var distance = (keyframe.PositionMetres - path.Keyframes[index - 1].PositionMetres).Length;
+                    var elapsed = keyframe.TimeSeconds - path.Keyframes[index - 1].TimeSeconds;
                     var speed = distance / elapsed;
                     var localSoundSpeed = SpeedOfSound(scene.Atmosphere.TemperatureCelsius);
                     if (speed >= localSoundSpeed)
@@ -96,25 +108,42 @@ public static class SceneValidator
                 }
             }
 
-            for (var index = 1; index < path.VelocityProfile.Count; index++)
+            for (var index = 0; index < path.VelocityProfile.Count; index++)
             {
-                if (path.VelocityProfile[index].TimeSeconds <= path.VelocityProfile[index - 1].TimeSeconds || path.VelocityProfile[index].SpeedMetresPerSecond < 0)
+                var control = path.VelocityProfile[index];
+                if (!double.IsFinite(control.TimeSeconds) || control.TimeSeconds < 0 ||
+                    !double.IsFinite(control.SpeedMetresPerSecond) || control.SpeedMetresPerSecond < 0 ||
+                    (index > 0 && control.TimeSeconds <= path.VelocityProfile[index - 1].TimeSeconds))
                 {
-                    issues.Add(new($"motionPaths/{path.Id}/velocityProfile/{index}", "Velocity controls require increasing times and non-negative speeds."));
+                    issues.Add(new($"motionPaths/{path.Id}/velocityProfile/{index}", "Velocity controls require finite increasing times and finite non-negative speeds."));
                 }
             }
         }
 
         foreach (var rig in scene.ReceiverRigs)
         {
-            if (rig.SpacingMetres is < 0.01 or > 5)
+            if (!Finite(rig.Transform.PositionMetres) || !Finite(rig.Transform.RotationDegrees))
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/transform", "Receiver position and orientation must be finite."));
+            }
+            if (!double.IsFinite(rig.SpacingMetres) || rig.SpacingMetres is < 0.01 or > 5)
             {
                 issues.Add(new($"receiverRigs/{rig.Id}/spacingMetres", "Receiver spacing must be between 0.01 m and 5 m."));
             }
 
-            if (rig.Kind == ReceiverRigKind.BinauralHead && rig.HeadRadiusMetres is < 0.04 or > 0.2)
+            if (rig.Kind == ReceiverRigKind.BinauralHead &&
+                (!double.IsFinite(rig.HeadRadiusMetres) || rig.HeadRadiusMetres is < 0.04 or > 0.2))
             {
                 issues.Add(new($"receiverRigs/{rig.Id}/headRadiusMetres", "Binaural head radius is outside the bounded parametric range."));
+            }
+            if (!double.IsFinite(rig.AngleDegrees) || !double.IsFinite(rig.SensitivityDb) || !double.IsFinite(rig.SelfNoiseDbSpl))
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}", "Receiver angle, sensitivity, and self-noise must be finite."));
+            }
+            if (!Finite(rig.HeadDimensionsMetres) || rig.HeadDimensionsMetres.X <= 0 ||
+                rig.HeadDimensionsMetres.Y <= 0 || rig.HeadDimensionsMetres.Z <= 0)
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/headDimensionsMetres", "Receiver head dimensions must be finite and positive."));
             }
             if (rig.Kind == ReceiverRigKind.BinauralHead && rig.HrtfMode == HrtfMode.ExactSofa && string.IsNullOrWhiteSpace(rig.SofaAssetHash))
             {
@@ -403,6 +432,11 @@ public static class SceneValidator
             capsule.ResponseDb.Any(value => !double.IsFinite(value)))
         {
             issues.Add(new(path, "Microphone response frequency and gain arrays must be finite, non-empty, and equal length."));
+        }
+        if (!Finite(capsule.RelativeTransform.PositionMetres) || !Finite(capsule.RelativeTransform.RotationDegrees) ||
+            !double.IsFinite(capsule.SensitivityDb) || !double.IsFinite(capsule.SelfNoiseDbSpl))
+        {
+            issues.Add(new(path, "Microphone capsule transform, sensitivity, and self-noise must be finite."));
         }
     }
 

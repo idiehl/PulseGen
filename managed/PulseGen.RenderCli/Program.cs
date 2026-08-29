@@ -15,7 +15,8 @@ var scene = arguments.TryGetValue("project", out var projectDirectory)
     {
         "flyby" => SampleScenes.CreateFlyby(),
         "surface-echo" => SampleScenes.CreateSurfaceEcho(),
-        _ => throw new ArgumentException($"Unknown sample '{selectedSample}'. Expected flyby or surface-echo.")
+        "moving-receiver" => SampleScenes.CreateMovingReceiver(),
+        _ => throw new ArgumentException($"Unknown sample '{selectedSample}'. Expected flyby, surface-echo, or moving-receiver.")
     };
 
 if (arguments.TryGetValue("duration", out var durationText))

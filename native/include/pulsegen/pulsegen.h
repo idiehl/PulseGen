@@ -252,6 +252,16 @@ typedef struct pg_receiver_rig_desc {
     uint32_t reserved;
 } pg_receiver_rig_desc;
 
+typedef struct pg_receiver_motion_desc {
+    uint32_t size;
+    uint32_t version;
+    uint32_t receiver_index;
+    pg_motion_path_kind motion_path_kind;
+    const pg_motion_keyframe* keyframes;
+    uint32_t keyframe_count;
+    uint32_t reserved;
+} pg_receiver_motion_desc;
+
 typedef struct pg_render_request {
     uint32_t size;
     uint32_t version;
@@ -318,6 +328,7 @@ PG_API pg_status PG_CALL pg_engine_add_mesh_geometry(pg_engine* engine, const pg
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);
+PG_API pg_status PG_CALL pg_engine_set_receiver_motion(pg_engine* engine, const pg_receiver_motion_desc* motion);
 
 PG_API pg_status PG_CALL pg_engine_render_receiver_block(
     pg_engine* engine,

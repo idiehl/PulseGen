@@ -168,6 +168,10 @@ struct static_render_options {
     double microphone_angle_degrees{};
     double relative_humidity_percent{ 50.0 };
     double pressure_kilopascals{ 101.325 };
+    bool receiver_moves{};
+    pg_vec3 receiver_motion_start{};
+    pg_vec3 receiver_motion_end{};
+    double receiver_motion_end_seconds{ 2.0 };
     std::uint64_t start_frame{};
     std::uint32_t frame_count{ 4096U };
 };
@@ -225,7 +229,22 @@ std::vector<float> render_static_source(const static_render_options& options)
     receiver.microphone_angle_degrees = options.microphone_angle_degrees;
     receiver.polar_pattern = options.polar_pattern;
     receiver.enabled = 1U;
-    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+    std::uint32_t receiver_index = 0U;
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, &receiver_index) == PG_STATUS_OK);
+    if (options.receiver_moves) {
+        const std::array<pg_motion_keyframe, 2> receiver_keyframes{
+            pg_motion_keyframe{ 0.0, options.receiver_motion_start },
+            pg_motion_keyframe{ options.receiver_motion_end_seconds, options.receiver_motion_end }
+        };
+        pg_receiver_motion_desc receiver_motion{};
+        receiver_motion.size = sizeof(receiver_motion);
+        receiver_motion.version = PG_ABI_VERSION;
+        receiver_motion.receiver_index = receiver_index;
+        receiver_motion.motion_path_kind = PG_PATH_LINEAR;
+        receiver_motion.keyframes = receiver_keyframes.data();
+        receiver_motion.keyframe_count = static_cast<std::uint32_t>(receiver_keyframes.size());
+        REQUIRE(pg_engine_set_receiver_motion(engine, &receiver_motion) == PG_STATUS_OK);
+    }
 
     std::vector<float> output(static_cast<std::size_t>(options.frame_count) * 2U);
     REQUIRE(pg_engine_render_receiver_block(
@@ -451,6 +470,21 @@ double channel_rms(const std::vector<float>& samples, std::size_t channel)
     return std::sqrt(static_cast<double>(sum / static_cast<long double>(std::max<std::size_t>(count, 1U))));
 }
 
+double estimate_channel_frequency(
+    const std::vector<float>& samples,
+    std::size_t channel,
+    std::uint32_t sample_rate)
+{
+    std::size_t upward_crossings = 0U;
+    for (std::size_t frame = 1U; frame < samples.size() / 2U; ++frame) {
+        if (samples[((frame - 1U) * 2U) + channel] <= 0.0F && samples[(frame * 2U) + channel] > 0.0F) {
+            ++upward_crossings;
+        }
+    }
+    const double duration = static_cast<double>(samples.size() / 2U) / sample_rate;
+    return static_cast<double>(upward_crossings) / duration;
+}
+
 std::size_t first_active_frame(const std::vector<float>& samples, float threshold = 1.0e-7F)
 {
     for (std::size_t frame = 0; frame < samples.size() / 2U; ++frame) {
@@ -489,6 +523,36 @@ int main(int argument_count, char** arguments)
         }
     }
     REQUIRE(upward_crossings >= 439U && upward_crossings <= 441U);
+
+    static_render_options stationary_receiver_frequency{};
+    stationary_receiver_frequency.source_position = { 0.0, 0.0, 100.0 };
+    stationary_receiver_frequency.start_frame = 24000U;
+    stationary_receiver_frequency.frame_count = 24000U;
+    stationary_receiver_frequency.receiver_spacing_metres = 0.18;
+    const auto stationary_receiver_output = render_static_source(stationary_receiver_frequency);
+    auto approaching_receiver_frequency = stationary_receiver_frequency;
+    approaching_receiver_frequency.receiver_moves = true;
+    approaching_receiver_frequency.receiver_motion_start = { 0.0, 0.0, 0.0 };
+    approaching_receiver_frequency.receiver_motion_end = { 0.0, 0.0, 40.0 };
+    const auto approaching_receiver_output = render_static_source(approaching_receiver_frequency);
+    auto receding_receiver_frequency = approaching_receiver_frequency;
+    receding_receiver_frequency.receiver_motion_end = { 0.0, 0.0, -40.0 };
+    const auto receding_receiver_output = render_static_source(receding_receiver_frequency);
+    constexpr double humid_speed_of_sound = 344.04;
+    const double stationary_frequency = estimate_channel_frequency(stationary_receiver_output, 0U, 48000U);
+    const double measured_approaching_frequency = estimate_channel_frequency(approaching_receiver_output, 0U, 48000U);
+    const double measured_receding_frequency = estimate_channel_frequency(receding_receiver_output, 0U, 48000U);
+    const double expected_approaching_frequency = pg_calculate_observed_frequency(440.0, humid_speed_of_sound, 0.0, 20.0);
+    const double expected_receding_frequency = pg_calculate_observed_frequency(440.0, humid_speed_of_sound, 0.0, -20.0);
+    REQUIRE(std::abs(stationary_frequency - 440.0) <= 2.0);
+    REQUIRE(std::abs(measured_approaching_frequency - expected_approaching_frequency) <= 2.1);
+    REQUIRE(std::abs(measured_receding_frequency - expected_receding_frequency) <= 2.1);
+    REQUIRE(measured_approaching_frequency > stationary_frequency);
+    REQUIRE(measured_receding_frequency < stationary_frequency);
+    REQUIRE(approaching_receiver_output == render_static_source(approaching_receiver_frequency));
+    for (std::size_t frame = 0U; frame < approaching_receiver_frequency.frame_count; ++frame) {
+        REQUIRE(approaching_receiver_output[frame * 2U] == approaching_receiver_output[(frame * 2U) + 1U]);
+    }
 
     static_render_options propagation_test{};
     propagation_test.waveform = PG_WAVE_IMPULSE;
@@ -561,6 +625,44 @@ int main(int argument_count, char** arguments)
     invalid_atmosphere.turbulence = std::numeric_limits<double>::quiet_NaN();
     REQUIRE(pg_engine_set_atmosphere(atmosphere_validation_engine, &invalid_atmosphere) == PG_STATUS_INVALID_ARGUMENT);
     pg_engine_destroy(atmosphere_validation_engine);
+
+    pg_engine* receiver_motion_validation_engine = create_engine();
+    pg_receiver_rig_desc motion_receiver{};
+    motion_receiver.size = sizeof(motion_receiver);
+    motion_receiver.version = PG_ABI_VERSION;
+    motion_receiver.name_utf8 = "Motion_Validation";
+    motion_receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    motion_receiver.spacing_metres = 0.18;
+    motion_receiver.head_radius_metres = 0.09;
+    motion_receiver.polar_pattern = PG_POLAR_OMNI;
+    motion_receiver.enabled = 1U;
+    std::uint32_t motion_receiver_index = 0U;
+    REQUIRE(pg_engine_add_receiver(receiver_motion_validation_engine, &motion_receiver, &motion_receiver_index) == PG_STATUS_OK);
+    const std::array<pg_motion_keyframe, 2> valid_receiver_motion_keyframes{
+        pg_motion_keyframe{ 0.0, { 0.0, 0.0, 0.0 } },
+        pg_motion_keyframe{ 1.0, { 0.0, 0.0, 10.0 } }
+    };
+    pg_receiver_motion_desc receiver_motion_descriptor{};
+    receiver_motion_descriptor.size = sizeof(receiver_motion_descriptor);
+    receiver_motion_descriptor.version = PG_ABI_VERSION;
+    receiver_motion_descriptor.receiver_index = motion_receiver_index + 1U;
+    receiver_motion_descriptor.motion_path_kind = PG_PATH_LINEAR;
+    receiver_motion_descriptor.keyframes = valid_receiver_motion_keyframes.data();
+    receiver_motion_descriptor.keyframe_count = static_cast<std::uint32_t>(valid_receiver_motion_keyframes.size());
+    REQUIRE(pg_engine_set_receiver_motion(receiver_motion_validation_engine, &receiver_motion_descriptor) == PG_STATUS_INVALID_ARGUMENT);
+    receiver_motion_descriptor.receiver_index = motion_receiver_index;
+    receiver_motion_descriptor.keyframe_count = 1U;
+    REQUIRE(pg_engine_set_receiver_motion(receiver_motion_validation_engine, &receiver_motion_descriptor) == PG_STATUS_INVALID_ARGUMENT);
+    const std::array<pg_motion_keyframe, 2> unordered_receiver_motion_keyframes{
+        pg_motion_keyframe{ 1.0, { 0.0, 0.0, 0.0 } },
+        pg_motion_keyframe{ 1.0, { 0.0, 0.0, 10.0 } }
+    };
+    receiver_motion_descriptor.keyframes = unordered_receiver_motion_keyframes.data();
+    receiver_motion_descriptor.keyframe_count = static_cast<std::uint32_t>(unordered_receiver_motion_keyframes.size());
+    REQUIRE(pg_engine_set_receiver_motion(receiver_motion_validation_engine, &receiver_motion_descriptor) == PG_STATUS_INVALID_ARGUMENT);
+    receiver_motion_descriptor.keyframes = valid_receiver_motion_keyframes.data();
+    REQUIRE(pg_engine_set_receiver_motion(receiver_motion_validation_engine, &receiver_motion_descriptor) == PG_STATUS_OK);
+    pg_engine_destroy(receiver_motion_validation_engine);
 
     pg_engine* material_validation_engine = create_engine();
     pg_acoustic_material_desc invalid_material{};

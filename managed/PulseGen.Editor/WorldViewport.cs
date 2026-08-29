@@ -78,7 +78,9 @@ public sealed class WorldViewport : Control
 
         foreach (var receiver in Scene.ReceiverRigs.Where(receiver => receiver.Enabled))
         {
-            DrawReceiver(context, receiver);
+            var path = Scene.MotionPaths.FirstOrDefault(candidate => candidate.Id == receiver.MotionPathId);
+            var position = path is null ? receiver.Transform.PositionMetres : SceneKinematics.PositionAt(path, TimeSeconds);
+            DrawReceiver(context, receiver, position);
         }
 
         foreach (var emitter in Scene.Emitters.Where(emitter => emitter.Enabled))
@@ -395,9 +397,9 @@ public sealed class WorldViewport : Control
         context.DrawEllipse(EmitterBrush, new Pen(Brushes.White, 1), point, 7, 7);
     }
 
-    private void DrawReceiver(DrawingContext context, ReceiverRig receiver)
+    private void DrawReceiver(DrawingContext context, ReceiverRig receiver, Vector3d position)
     {
-        var point = Project(receiver.Transform.PositionMetres);
+        var point = Project(position);
         var halfSpacing = Math.Max(5, receiver.SpacingMetres * 28);
         context.DrawLine(new Pen(ReceiverBrush, 2), new(point.X - halfSpacing, point.Y), new(point.X + halfSpacing, point.Y));
         context.DrawEllipse(ReceiverBrush, null, new(point.X - halfSpacing, point.Y), 4, 4);

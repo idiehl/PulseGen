@@ -293,4 +293,82 @@ public static class SampleScenes
             UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
         };
     }
+
+    public static SceneDocument CreateMovingReceiver()
+    {
+        var scene = CreateFlyby();
+        var sourcePosition = new Vector3d(0, 1.7, 40);
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Name = "Stationary Doppler reference source",
+            Kind = MotionPathKind.Linear,
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = sourcePosition },
+                new MotionKeyframe { TimeSeconds = 2, PositionMetres = sourcePosition }
+            ]
+        };
+        scene.Emitters[0] = scene.Emitters[0] with
+        {
+            Name = "Stationary 440 Hz reference",
+            GainLinear = 1,
+            MinDistanceMetres = 0.25
+        };
+        scene.Geometry.Clear();
+        var receiverPathId = Guid.Parse("dddddddd-0000-4000-8000-000000000001");
+        scene.MotionPaths.Add(new MotionPath
+        {
+            Id = receiverPathId,
+            Name = "Microphone approach at 10 m/s",
+            Kind = MotionPathKind.Linear,
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = new(0, 1.7, 0) },
+                new MotionKeyframe { TimeSeconds = 2, PositionMetres = new(0, 1.7, 20) }
+            ]
+        });
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with
+        {
+            Name = "Static listener reference",
+            Transform = new Transform { PositionMetres = new(0, 1.7, 0) }
+        };
+        scene.ReceiverRigs[1] = scene.ReceiverRigs[1] with
+        {
+            Name = "Moving microphone pair",
+            Transform = new Transform { PositionMetres = new(0, 1.7, 0) },
+            MotionPathId = receiverPathId,
+            PolarPattern = PolarPattern.Omni,
+            SensitivityDb = 0
+        };
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            Name = "Moving receiver final 48k",
+            Quality = RenderQuality.Final,
+            ReflectionOrder = 0,
+            RayCount = 0,
+            ImpulseResponseSeconds = 0,
+            Seed = 271828
+        };
+        return scene with
+        {
+            ProjectId = Guid.Parse("dddddddd-0000-4000-8000-000000000000"),
+            Name = "Moving Receiver Doppler",
+            Atmosphere = new AtmosphereField
+            {
+                TemperatureCelsius = 20,
+                RelativeHumidityPercent = 50,
+                PressureKilopascals = 101.325
+            },
+            Timeline = new EventTimeline
+            {
+                DurationSeconds = 2,
+                Events =
+                [
+                    new TimelineEvent { Id = Guid.Parse("dddddddd-0000-4000-8000-000000000002"), Kind = TimelineEventKind.StartEmitter, TimeSeconds = 0, TargetId = scene.Emitters[0].Id },
+                    new TimelineEvent { Id = Guid.Parse("dddddddd-0000-4000-8000-000000000003"), Kind = TimelineEventKind.EndCapture, TimeSeconds = 2, Label = "End receiver fly-in" }
+                ]
+            },
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
+        };
+    }
 }

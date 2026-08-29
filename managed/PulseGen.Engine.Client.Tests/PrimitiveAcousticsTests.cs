@@ -25,15 +25,57 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.4", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.5", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(3, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-geometry-v2", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v3", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Contains(
                 receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                 dependency => dependency.GetProperty("name").GetString() == "Assimp" &&
                     dependency.GetProperty("version").GetString() == "6.0.5");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void MovingReceiverPathProducesAnalyticListenerDopplerAndStableStereoTake()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-moving-receiver-{Guid.NewGuid():N}");
+        try
+        {
+            var staticScene = CreateReceiverDopplerScene(moving: false);
+            var movingScene = CreateReceiverDopplerScene(moving: true);
+            var staticDirectory = Path.Combine(root, "static");
+            var firstDirectory = Path.Combine(root, "moving-first");
+            var secondDirectory = Path.Combine(root, "moving-second");
+            NativeSceneRenderer.Render(staticScene, staticDirectory);
+            var first = NativeSceneRenderer.Render(movingScene, firstDirectory);
+            NativeSceneRenderer.Render(movingScene, secondDirectory);
+            var staticSamples = ReadFloatSamples(Directory.GetFiles(staticDirectory, "*.wav").Single());
+            var firstSamples = ReadFloatSamples(Directory.GetFiles(firstDirectory, "*.wav").Single());
+            var secondSamples = ReadFloatSamples(Directory.GetFiles(secondDirectory, "*.wav").Single());
+
+            const int startFrame = 24000;
+            const int endFrame = 48000;
+            var staticFrequency = EstimateFrequency(staticSamples, 0, startFrame, endFrame, 48000);
+            var movingFrequency = EstimateFrequency(firstSamples, 0, startFrame, endFrame, 48000);
+            var expectedFrequency = 440.0 * ((344.04 + 20.0) / 344.04);
+            Assert.InRange(staticFrequency, 438.0, 442.0);
+            Assert.InRange(movingFrequency, expectedFrequency - 2.1, expectedFrequency + 2.1);
+            Assert.True(movingFrequency > staticFrequency);
+            Assert.Equal(firstSamples, secondSamples);
+            Assert.Equal((ulong)73, first.DeterministicSeed);
+            for (var frame = startFrame; frame < endFrame; frame++)
+            {
+                Assert.Equal(firstSamples[frame * 2], firstSamples[(frame * 2) + 1]);
+            }
         }
         finally
         {
@@ -194,6 +236,38 @@ public sealed class PrimitiveAcousticsTests
         };
     }
 
+    private static SceneDocument CreateReceiverDopplerScene(bool moving)
+    {
+        var scene = CreateScene(withSurface: false);
+        var sourcePosition = new Vector3d(0, 0, 100);
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = sourcePosition },
+                new MotionKeyframe { TimeSeconds = 1, PositionMetres = sourcePosition }
+            ]
+        };
+        var receiverPathId = Guid.Parse("bbbbbbbb-0000-4000-8000-000000000004");
+        if (moving)
+        {
+            scene.MotionPaths.Add(new MotionPath
+            {
+                Id = receiverPathId,
+                Name = "Microphones approach source",
+                Kind = MotionPathKind.Linear,
+                Keyframes =
+                [
+                    new MotionKeyframe { TimeSeconds = 0, PositionMetres = Vector3d.Zero },
+                    new MotionKeyframe { TimeSeconds = 2, PositionMetres = new(0, 0, 40) }
+                ]
+            });
+            scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { MotionPathId = receiverPathId };
+        }
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with { Seed = 73 };
+        return scene with { Name = moving ? "Moving Receiver" : "Static Receiver" };
+    }
+
     private static float[] ReadFloatSamples(string path)
     {
         using var stream = File.OpenRead(path);
@@ -241,5 +315,23 @@ public sealed class PrimitiveAcousticsTests
             count++;
         }
         return Math.Sqrt(sum / count);
+    }
+
+    private static double EstimateFrequency(
+        IReadOnlyList<float> samples,
+        int channel,
+        int startFrame,
+        int endFrame,
+        int sampleRate)
+    {
+        var upwardCrossings = 0;
+        for (var frame = startFrame + 1; frame < endFrame; frame++)
+        {
+            if (samples[((frame - 1) * 2) + channel] <= 0 && samples[(frame * 2) + channel] > 0)
+            {
+                upwardCrossings++;
+            }
+        }
+        return upwardCrossings / ((endFrame - startFrame) / (double)sampleRate);
     }
 }

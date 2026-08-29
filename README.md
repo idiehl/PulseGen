@@ -17,7 +17,9 @@ commands and reads bounded telemetry.
   noise, impulses, additive banks, and procedural turbulence sources.
 - Retarded-time propagation, distance loss, wind-adjusted sound speed, simple
   air absorption, first-order shoebox reflections, bounded modal resonances,
-  late-field feedback delays, and receiver-pair modelling.
+  late-field feedback delays, and receiver-pair modelling. Receiver rigs can
+  follow the same editable absolute-coordinate paths as emitters; their arrival-
+  time motion produces listener-side Doppler in every isolated stereo take.
 - Static, transformed finite planes and oriented boxes with octave-band
   absorption, scattering, and transmission; geometry-aware direct occlusion;
   and bounded first-order image-source reflections. The viewport renders the
@@ -68,17 +70,21 @@ Run the editor after a successful build:
 dotnet run --project managed/PulseGen.Editor/PulseGen.Editor.csproj -c Release
 ```
 
-The repository includes two deterministic sample projects:
+The repository includes two deterministic checked-in sample projects and one
+built-in receiver-motion scenario:
 
 - `samples/PhysicsFlyby.pulseproj/project.json` exercises motion, Doppler,
   atmosphere, a shoebox room, and simultaneous receiver rigs.
 - `samples/SurfaceEcho.pulseproj/project.json` compares finite stone, curtain,
   and timber surfaces with direct transmission and early reflections.
+- `--sample moving-receiver` compares a static listener with a microphone pair
+  approaching a stationary 440 Hz source at 10 m/s.
 
 The render CLI can also create or render either built-in scene:
 
 ```powershell
 dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample surface-echo --output out/renders/surface-echo
+dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample moving-receiver --output out/renders/moving-receiver
 ```
 
 Atlas integration defaults to the production service origins but does not upload

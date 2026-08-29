@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.4";
+constexpr std::string_view engine_version = "0.1.0-alpha.5";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
 constexpr std::size_t maximum_acoustic_materials = 256U;
@@ -279,6 +279,8 @@ struct receiver_state {
     pg_polar_pattern polar_pattern{ PG_POLAR_OMNI };
     double sensitivity_linear{ 1.0 };
     double self_noise_db_spl{};
+    pg_motion_path_kind motion_path_kind{ PG_PATH_LINEAR };
+    std::vector<keyframe_state> keyframes;
     bool enabled{ true };
 };
 
@@ -701,32 +703,36 @@ bool point_within_surface(const reflection_surface& surface, vec3 point) noexcep
         std::abs(dot(offset, surface.tangent_v)) <= surface.half_extent_v + 1.0e-8;
 }
 
-vec3 sample_motion(const emitter_state& emitter, double time_seconds) noexcept
+vec3 sample_motion_path(
+    pg_motion_path_kind motion_path_kind,
+    const std::vector<keyframe_state>& keyframes,
+    double time_seconds,
+    vec3 fallback = {}) noexcept
 {
-    if (emitter.keyframes.empty()) {
-        return {};
+    if (keyframes.empty()) {
+        return fallback;
     }
-    if (time_seconds <= emitter.keyframes.front().time_seconds) {
-        return emitter.keyframes.front().position;
+    if (time_seconds <= keyframes.front().time_seconds) {
+        return keyframes.front().position;
     }
-    if (time_seconds >= emitter.keyframes.back().time_seconds) {
-        return emitter.keyframes.back().position;
+    if (time_seconds >= keyframes.back().time_seconds) {
+        return keyframes.back().position;
     }
 
     const auto upper = std::upper_bound(
-        emitter.keyframes.begin(),
-        emitter.keyframes.end(),
+        keyframes.begin(),
+        keyframes.end(),
         time_seconds,
         [](double time, const keyframe_state& keyframe) { return time < keyframe.time_seconds; });
     const auto lower = upper - 1;
     const double duration = upper->time_seconds - lower->time_seconds;
     const double amount = duration > 0.0 ? (time_seconds - lower->time_seconds) / duration : 0.0;
-    if (emitter.motion_path_kind == PG_PATH_CATMULL_ROM || emitter.motion_path_kind == PG_PATH_CUBIC_BEZIER_APPROXIMATION) {
-        const std::size_t right_index = static_cast<std::size_t>(std::distance(emitter.keyframes.begin(), upper));
-        const vec3 p0 = right_index >= 2U ? emitter.keyframes[right_index - 2U].position : lower->position;
+    if (motion_path_kind == PG_PATH_CATMULL_ROM || motion_path_kind == PG_PATH_CUBIC_BEZIER_APPROXIMATION) {
+        const std::size_t right_index = static_cast<std::size_t>(std::distance(keyframes.begin(), upper));
+        const vec3 p0 = right_index >= 2U ? keyframes[right_index - 2U].position : lower->position;
         const vec3 p1 = lower->position;
         const vec3 p2 = upper->position;
-        const vec3 p3 = right_index + 1U < emitter.keyframes.size() ? emitter.keyframes[right_index + 1U].position : upper->position;
+        const vec3 p3 = right_index + 1U < keyframes.size() ? keyframes[right_index + 1U].position : upper->position;
         const double amount_squared = amount * amount;
         const double amount_cubed = amount_squared * amount;
         return (p1 * 2.0 +
@@ -735,6 +741,16 @@ vec3 sample_motion(const emitter_state& emitter, double time_seconds) noexcept
             ((p1 * 3.0) - p0 - (p2 * 3.0) + p3) * amount_cubed) * 0.5;
     }
     return lower->position + ((upper->position - lower->position) * amount);
+}
+
+vec3 sample_motion(const emitter_state& emitter, double time_seconds) noexcept
+{
+    return sample_motion_path(emitter.motion_path_kind, emitter.keyframes, time_seconds);
+}
+
+vec3 sample_motion(const receiver_state& receiver, double time_seconds) noexcept
+{
+    return sample_motion_path(receiver.motion_path_kind, receiver.keyframes, time_seconds, receiver.centre);
 }
 
 double effective_sound_speed(const atmosphere_state& atmosphere, vec3 source, vec3 receiver) noexcept
@@ -1120,10 +1136,11 @@ std::pair<float, float> render_frame(
     std::uint32_t reflection_order) noexcept
 {
     const receiver_state& receiver = engine.receivers[receiver_index];
+    const vec3 receiver_centre = sample_motion(receiver, receive_time);
     const vec3 right = normalized(rotate_yaw({ 1.0, 0.0, 0.0 }, receiver.yaw_degrees));
     const vec3 forward = normalized(rotate_yaw({ 0.0, 0.0, 1.0 }, receiver.yaw_degrees));
-    const vec3 left_position = receiver.centre - (right * (receiver.spacing_metres * 0.5));
-    const vec3 right_position = receiver.centre + (right * (receiver.spacing_metres * 0.5));
+    const vec3 left_position = receiver_centre - (right * (receiver.spacing_metres * 0.5));
+    const vec3 right_position = receiver_centre + (right * (receiver.spacing_metres * 0.5));
     const vec3 left_forward = rotate_yaw(forward, -receiver.microphone_angle_degrees * 0.5);
     const vec3 right_forward = rotate_yaw(forward, receiver.microphone_angle_degrees * 0.5);
     const auto receiver_path_sample = [&](const delayed_path_sample& path, vec3 capsule_forward) noexcept {
@@ -1144,7 +1161,7 @@ std::pair<float, float> render_frame(
         const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, false, 0, false);
         double left_sample = receiver_path_sample(left_direct, left_forward);
         double right_sample = receiver_path_sample(right_direct, right_forward);
-        source_lateral += dot(normalized(left_direct.source_position - receiver.centre), right);
+        source_lateral += dot(normalized(left_direct.source_position - receiver_centre), right);
 
         if (engine.room.enabled && reflection_order > 0U) {
             for (int axis = 0; axis < 3; ++axis) {
@@ -1795,8 +1812,13 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
     if (engine->receivers.size() >= engine->config.max_receivers) {
         return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Receiver capacity exceeded.");
     }
-    if (!finite(from_c(receiver->centre_metres)) || !std::isfinite(receiver->spacing_metres) || receiver->spacing_metres < 0.01 || receiver->spacing_metres > 5.0 ||
-        receiver->head_radius_metres < 0.04 || receiver->head_radius_metres > 0.2 || !std::isfinite(receiver->sensitivity_db)) {
+    if (!finite(from_c(receiver->centre_metres)) || !std::isfinite(receiver->yaw_degrees) ||
+        !std::isfinite(receiver->spacing_metres) || receiver->spacing_metres < 0.01 || receiver->spacing_metres > 5.0 ||
+        !std::isfinite(receiver->head_radius_metres) || receiver->head_radius_metres < 0.04 || receiver->head_radius_metres > 0.2 ||
+        !std::isfinite(receiver->microphone_angle_degrees) || !std::isfinite(receiver->sensitivity_db) ||
+        !std::isfinite(receiver->self_noise_db_spl) ||
+        (receiver->kind != PG_RECEIVER_BINAURAL_HEAD && receiver->kind != PG_RECEIVER_STEREO_MICROPHONE) ||
+        receiver->polar_pattern < PG_POLAR_OMNI || receiver->polar_pattern > PG_POLAR_FIGURE_EIGHT) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver position, spacing, head radius, or sensitivity is invalid.");
     }
 
@@ -1820,6 +1842,50 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
         *out_index = static_cast<std::uint32_t>(engine->receivers.size() - 1U);
     }
     return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_set_receiver_motion(pg_engine* engine, const pg_receiver_motion_desc* motion)
+{
+    if (engine == nullptr || motion == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(motion)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Receiver motion structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Changing receiver motion") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (motion->receiver_index >= engine->receivers.size()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver motion index is out of range.");
+    }
+    if (motion->motion_path_kind < PG_PATH_LINEAR || motion->motion_path_kind > PG_PATH_RECORDED_GESTURE ||
+        motion->keyframes == nullptr || motion->keyframe_count < 2U ||
+        motion->keyframe_count > engine->config.max_keyframes_per_path) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver motion requires a supported path with at least two bounded keyframes.");
+    }
+
+    try {
+        std::vector<keyframe_state> keyframes;
+        keyframes.reserve(motion->keyframe_count);
+        for (std::uint32_t index = 0U; index < motion->keyframe_count; ++index) {
+            const pg_motion_keyframe& keyframe = motion->keyframes[index];
+            const vec3 position = from_c(keyframe.position_metres);
+            if (!std::isfinite(keyframe.time_seconds) || !finite(position) ||
+                (index > 0U && keyframe.time_seconds <= motion->keyframes[index - 1U].time_seconds)) {
+                return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver motion keyframes must be finite and strictly increasing in time.");
+            }
+            keyframes.push_back({ keyframe.time_seconds, position });
+        }
+
+        receiver_state& receiver = engine->receivers[motion->receiver_index];
+        receiver.motion_path_kind = motion->motion_path_kind;
+        receiver.keyframes = std::move(keyframes);
+        return PG_STATUS_OK;
+    } catch (const std::exception& exception) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Receiver motion setup failed: ") + exception.what());
+    } catch (...) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, "Receiver motion setup failed with an unknown error.");
+    }
 }
 
 pg_status PG_CALL pg_engine_render_receiver_block(

@@ -105,7 +105,7 @@ try {
     $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
     $miniaudioDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'miniaudio' })
     $assimpDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'Assimp' })
-    if ($renderReceipt.receiptVersion -ne 3 -or $renderReceipt.acousticModel -ne 'bounded-geometry-v2' -or
+    if ($renderReceipt.receiptVersion -ne 3 -or $renderReceipt.acousticModel -ne 'bounded-propagation-v3' -or
         $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
         $renderReceipt.engineVersion -notmatch '^0\.1\.0-alpha' -or $renderReceipt.sampleRate -ne 48000 -or
         $renderReceipt.sampleFormat -ne 'Float32' -or $renderReceipt.dither -ne 'None' -or
@@ -146,9 +146,40 @@ try {
         }
     }
     $surfaceReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $surfaceFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($surfaceReceipt.receiptVersion -ne 3 -or $surfaceReceipt.acousticModel -ne 'bounded-geometry-v2' -or
+    if ($surfaceReceipt.receiptVersion -ne 3 -or $surfaceReceipt.acousticModel -ne 'bounded-propagation-v3' -or
         @($surfaceReceipt.takes).Count -ne 2 -or [Math]::Max($surfaceReceipt.peakLeft, $surfaceReceipt.peakRight) -le 0) {
         throw 'Surface-echo receipt is incomplete or records silent output.'
+    }
+
+    $movingFirst = Join-Path $outputRoot 'moving-receiver-a'
+    $movingSecond = Join-Path $outputRoot 'moving-receiver-b'
+    Remove-VerificationDirectory $movingFirst
+    Remove-VerificationDirectory $movingSecond
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample moving-receiver --output $movingFirst
+    if ($LASTEXITCODE -ne 0) { throw 'First moving-receiver render failed.' }
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample moving-receiver --output $movingSecond
+    if ($LASTEXITCODE -ne 0) { throw 'Second moving-receiver render failed.' }
+    $movingFirstFiles = @(Get-ChildItem -LiteralPath $movingFirst -File | Sort-Object Name)
+    $movingSecondFiles = @(Get-ChildItem -LiteralPath $movingSecond -File | Sort-Object Name)
+    if ($movingFirstFiles.Count -ne 3 -or $movingSecondFiles.Count -ne 3) {
+        throw 'Expected two stereo takes and one receipt for each moving-receiver render.'
+    }
+    for ($index = 0; $index -lt $movingFirstFiles.Count; $index++) {
+        if ($movingFirstFiles[$index].Name -ne $movingSecondFiles[$index].Name -or
+            (Get-FileHash -LiteralPath $movingFirstFiles[$index].FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $movingSecondFiles[$index].FullName -Algorithm SHA256).Hash) {
+            throw "Moving-receiver artifact is not bit-stable: $($movingFirstFiles[$index].Name)"
+        }
+    }
+    $movingTakes = @(Get-ChildItem -LiteralPath $movingFirst -Filter '*.wav' | Sort-Object Name)
+    if ((Get-FileHash -LiteralPath $movingTakes[0].FullName -Algorithm SHA256).Hash -eq
+        (Get-FileHash -LiteralPath $movingTakes[1].FullName -Algorithm SHA256).Hash) {
+        throw 'Static and moving receiver takes unexpectedly match.'
+    }
+    $movingReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $movingFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
+    if ($movingReceipt.acousticModel -ne 'bounded-propagation-v3' -or $movingReceipt.seed -ne 271828 -or
+        @($movingReceipt.takes).Count -ne 2 -or [Math]::Max($movingReceipt.peakLeft, $movingReceipt.peakRight) -le 0) {
+        throw 'Moving-receiver receipt is incomplete or records silent output.'
     }
     $pcmProfiles = @(
         @{ Name = 'Pcm16'; Code = 1; Bits = 16 },
@@ -180,7 +211,7 @@ try {
             throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
-    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed"
+    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed receiver-motion=passed"
 }
 finally {
     Set-Location -LiteralPath $originalLocation
