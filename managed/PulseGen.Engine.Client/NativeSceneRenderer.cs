@@ -15,6 +15,14 @@ public readonly record struct RenderSummary(
     double SpeedOfSoundMetresPerSecond,
     ulong DeterministicSeed);
 
+public readonly record struct PreviewDeviceStatus(
+    bool Running,
+    uint SampleRate,
+    uint PeriodFrames,
+    uint ReceiverIndex,
+    ulong FramesProcessed,
+    ulong CallbackCount);
+
 public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 1;
@@ -34,26 +42,9 @@ public static unsafe class NativeSceneRenderer
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
 
-        var config = new NativeEngineConfig
-        {
-            Size = (uint)sizeof(NativeEngineConfig), Version = AbiVersion,
-            MaxEmitters = 64, MaxReceivers = 16, MaxKeyframesPerPath = 4096
-        };
-
-        Check(Native.pg_engine_create(&config, out var engine), engine, "create engine");
+        var engine = CreateConfiguredEngine(scene);
         try
         {
-            ConfigureAtmosphere(scene, engine);
-            ConfigureRoom(scene, engine);
-            foreach (var emitter in scene.Emitters.Where(item => item.Enabled))
-            {
-                ConfigureEmitter(scene, engine, emitter);
-            }
-            foreach (var receiver in scene.ReceiverRigs.Where(item => item.Enabled))
-            {
-                ConfigureReceiver(engine, receiver);
-            }
-
             var outputPointer = Marshal.StringToCoTaskMemUTF8(Path.GetFullPath(outputDirectory));
             var prefixPointer = Marshal.StringToCoTaskMemUTF8(SafePrefix(scene.Name));
             try
@@ -89,6 +80,116 @@ public static unsafe class NativeSceneRenderer
         finally
         {
             Native.pg_engine_destroy(engine);
+        }
+    }
+
+    public static PreviewSession StartPreview(
+        SceneDocument scene,
+        uint enabledReceiverIndex = 0,
+        uint sampleRate = 48000,
+        uint periodFrames = 512,
+        uint reflectionOrder = 1,
+        bool exclusiveMode = false,
+        double startTimeSeconds = 0)
+    {
+        SceneValidator.EnsureValid(scene);
+        if (!double.IsFinite(startTimeSeconds) || startTimeSeconds < 0 || startTimeSeconds > scene.Timeline.DurationSeconds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startTimeSeconds));
+        }
+        var engine = CreateConfiguredEngine(scene);
+        try
+        {
+            var config = new NativeDeviceConfig
+            {
+                Size = (uint)sizeof(NativeDeviceConfig),
+                Version = AbiVersion,
+                ReceiverIndex = enabledReceiverIndex,
+                SampleRate = sampleRate,
+                PeriodFrames = periodFrames,
+                ReflectionOrder = reflectionOrder,
+                ExclusiveMode = exclusiveMode ? 1U : 0U,
+                StartFrame = checked((ulong)Math.Round(startTimeSeconds * sampleRate))
+            };
+            Check(Native.pg_engine_start_device(engine, &config), engine, "start WASAPI preview");
+            return new PreviewSession(engine);
+        }
+        catch
+        {
+            Native.pg_engine_destroy(engine);
+            throw;
+        }
+    }
+
+    private static nint CreateConfiguredEngine(SceneDocument scene)
+    {
+        var config = new NativeEngineConfig
+        {
+            Size = (uint)sizeof(NativeEngineConfig), Version = AbiVersion,
+            MaxEmitters = 64, MaxReceivers = 16, MaxKeyframesPerPath = 4096
+        };
+
+        Check(Native.pg_engine_create(&config, out var engine), engine, "create engine");
+        try
+        {
+            ConfigureAtmosphere(scene, engine);
+            ConfigureRoom(scene, engine);
+            foreach (var emitter in scene.Emitters.Where(item => item.Enabled))
+            {
+                ConfigureEmitter(scene, engine, emitter);
+            }
+            foreach (var receiver in scene.ReceiverRigs.Where(item => item.Enabled))
+            {
+                ConfigureReceiver(engine, receiver);
+            }
+            return engine;
+        }
+        catch
+        {
+            Native.pg_engine_destroy(engine);
+            throw;
+        }
+    }
+
+    public sealed unsafe class PreviewSession : IDisposable
+    {
+        private nint engine;
+
+        internal PreviewSession(nint engineHandle)
+        {
+            engine = engineHandle;
+        }
+
+        public PreviewDeviceStatus Status
+        {
+            get
+            {
+                var current = engine;
+                if (current == 0)
+                {
+                    return default;
+                }
+                var status = new NativeDeviceStatus { Size = (uint)sizeof(NativeDeviceStatus), Version = AbiVersion };
+                Check(Native.pg_engine_get_device_status(current, &status), current, "read preview device status");
+                return new(
+                    status.Running != 0,
+                    status.SampleRate,
+                    status.PeriodFrames,
+                    status.ReceiverIndex,
+                    status.FramesProcessed,
+                    status.CallbackCount);
+            }
+        }
+
+        public void Dispose()
+        {
+            var current = Interlocked.Exchange(ref engine, 0);
+            if (current == 0)
+            {
+                return;
+            }
+            _ = Native.pg_engine_stop_device(current);
+            Native.pg_engine_destroy(current);
         }
     }
 
@@ -132,34 +233,101 @@ public static unsafe class NativeSceneRenderer
 
     private static void ConfigureEmitter(SceneDocument scene, nint engine, Emitter emitter)
     {
-        var oscillator = emitter.SignalGraph.Nodes.FirstOrDefault(item => item.Kind == SignalNodeKind.Oscillator)
-            ?? throw new NotSupportedException($"Emitter '{emitter.Name}' does not contain an oscillator supported by the alpha engine.");
+        var oscillator = emitter.SignalGraph.Nodes.FirstOrDefault(item => item.Kind is SignalNodeKind.Oscillator or SignalNodeKind.Noise or SignalNodeKind.Turbulence)
+            ?? throw new NotSupportedException($"Emitter '{emitter.Name}' does not contain a primitive source supported by the alpha engine.");
         var path = scene.MotionPaths.FirstOrDefault(item => item.Id == emitter.MotionPathId)
             ?? throw new InvalidOperationException($"Emitter '{emitter.Name}' requires a motion path for native rendering.");
         var frames = path.Keyframes.Select(item => new NativeMotionKeyframe
         {
             TimeSeconds = item.TimeSeconds, PositionMetres = ToNative(item.PositionMetres)
         }).ToArray();
+        var waveform = MapWaveform(oscillator.Waveform ?? WaveformKind.Sine);
+        var partials = ReadAdditivePartials(oscillator);
         var namePointer = Marshal.StringToCoTaskMemUTF8(emitter.Name);
         try
         {
             fixed (NativeMotionKeyframe* framePointer = frames)
+            fixed (NativeAdditivePartial* partialPointer = partials)
             {
-                var descriptor = new NativeSineEmitter
+                var descriptor = new NativeSignalEmitter
                 {
-                    Size = (uint)sizeof(NativeSineEmitter), Version = AbiVersion, NameUtf8 = namePointer,
-                    FrequencyHz = oscillator.NumericParameters["frequencyHz"],
+                    Size = (uint)sizeof(NativeSignalEmitter), Version = AbiVersion, NameUtf8 = namePointer,
+                    Waveform = waveform,
+                    FrequencyHz = oscillator.NumericParameters.GetValueOrDefault("frequencyHz", 440),
                     Amplitude = oscillator.NumericParameters.GetValueOrDefault("amplitude", 1),
+                    PhaseRadians = oscillator.NumericParameters.GetValueOrDefault("phaseRadians", 0),
+                    PulseWidth = oscillator.NumericParameters.GetValueOrDefault("pulseWidth", 0.5),
                     GainLinear = emitter.GainLinear, MinDistanceMetres = emitter.MinDistanceMetres,
-                    Keyframes = framePointer, KeyframeCount = (uint)frames.Length, Enabled = 1
+                    AttackSeconds = oscillator.NumericParameters.GetValueOrDefault("attackSeconds", 0),
+                    ReleaseSeconds = oscillator.NumericParameters.GetValueOrDefault("releaseSeconds", 0),
+                    NonlinearDrive = oscillator.NumericParameters.GetValueOrDefault("drive", 0),
+                    AdditivePartials = partialPointer, AdditivePartialCount = (uint)partials.Length,
+                    MotionPathKind = MapPath(path.Kind),
+                    Keyframes = framePointer, KeyframeCount = (uint)frames.Length,
+                    NoiseSeed = (uint)Math.Clamp(oscillator.NumericParameters.GetValueOrDefault("seed", 1), 1, uint.MaxValue),
+                    Enabled = 1
                 };
-                Check(Native.pg_engine_add_sine_emitter(engine, &descriptor, out _), engine, "add emitter");
+                Check(Native.pg_engine_add_signal_emitter(engine, &descriptor, out _), engine, "add primitive signal emitter");
             }
         }
         finally
         {
             Marshal.FreeCoTaskMem(namePointer);
         }
+    }
+
+    private static int MapWaveform(WaveformKind waveform) => waveform switch
+    {
+        WaveformKind.Sine => 0,
+        WaveformKind.Triangle => 1,
+        WaveformKind.Saw => 2,
+        WaveformKind.Square => 3,
+        WaveformKind.Pulse => 4,
+        WaveformKind.WhiteNoise => 5,
+        WaveformKind.PinkNoise => 6,
+        WaveformKind.BrownNoise => 7,
+        WaveformKind.Impulse => 8,
+        WaveformKind.Additive => 9,
+        WaveformKind.Turbulence => 10,
+        _ => throw new NotSupportedException($"Waveform '{waveform}' requires an adapter that is not active in the alpha engine.")
+    };
+
+    private static int MapPath(MotionPathKind path) => path switch
+    {
+        MotionPathKind.Linear => 0,
+        MotionPathKind.CatmullRom => 1,
+        MotionPathKind.CubicBezier => 2,
+        MotionPathKind.Arc or MotionPathKind.Orbit => 3,
+        MotionPathKind.RecordedGesture => 4,
+        _ => 0
+    };
+
+    private static NativeAdditivePartial[] ReadAdditivePartials(SignalNode node)
+    {
+        if (node.Waveform != WaveformKind.Additive)
+        {
+            return [];
+        }
+
+        var partials = new List<NativeAdditivePartial>();
+        for (var index = 0; index < 1024; index++)
+        {
+            if (!node.NumericParameters.TryGetValue($"partial.{index}.amplitude", out var amplitude))
+            {
+                break;
+            }
+            partials.Add(new NativeAdditivePartial
+            {
+                FrequencyRatio = node.NumericParameters.GetValueOrDefault($"partial.{index}.ratio", index + 1),
+                Amplitude = amplitude,
+                PhaseRadians = node.NumericParameters.GetValueOrDefault($"partial.{index}.phaseRadians", 0)
+            });
+        }
+        if (partials.Count == 0)
+        {
+            throw new InvalidOperationException("An additive source requires partial.N.amplitude parameters beginning at index zero.");
+        }
+        return [.. partials];
     }
 
     private static void ConfigureReceiver(nint engine, ReceiverRig receiver)
@@ -244,10 +412,13 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphere { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeVector UniformWindMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMotionKeyframe { public double TimeSeconds; public NativeVector PositionMetres; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeSineEmitter { public uint Size, Version; public nint NameUtf8; public double FrequencyHz, Amplitude, GainLinear, MinDistanceMetres; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, Enabled; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiver { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres; public double YawDegrees, SpacingMetres, HeadRadiusMetres, MicrophoneAngleDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderRequest { public uint Size, Version; public nint OutputDirectoryUtf8, FilePrefixUtf8; public double DurationSeconds; public uint SampleRate; public int SampleFormat, Quality; public uint ReflectionOrder, Seed; public nint CancellationFlag; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; }
 
     private static class Native
     {
@@ -257,8 +428,11 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern nint pg_get_last_error(nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_atmosphere(nint engine, NativeAtmosphere* atmosphere);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_room(nint engine, NativeRoom* room);
-        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_sine_emitter(nint engine, NativeSineEmitter* emitter, out uint index);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_device(nint engine, NativeDeviceConfig* config);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_stop_device(nint engine);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_get_device_status(nint engine, NativeDeviceStatus* status);
     }
 }

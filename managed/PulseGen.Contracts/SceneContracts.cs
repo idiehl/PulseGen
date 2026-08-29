@@ -13,6 +13,7 @@ public readonly record struct Vector3d(double X, double Y, double Z)
 {
     public static Vector3d Zero => new(0, 0, 0);
 
+    [JsonIgnore]
     public double Length => Math.Sqrt((X * X) + (Y * Y) + (Z * Z));
 
     public static Vector3d operator +(Vector3d left, Vector3d right) =>
@@ -114,7 +115,18 @@ public sealed record Emitter
     public double GainLinear { get; init; } = 1;
     public double MinDistanceMetres { get; init; } = 1;
     public double Directivity { get; init; }
+    public SourceChannelMapping ChannelMapping { get; init; } = SourceChannelMapping.MonoPoint;
+    public Guid? LinkedRightEmitterId { get; init; }
     public bool Enabled { get; init; } = true;
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum SourceChannelMapping
+{
+    MonoPoint,
+    LinkedDualEmitters,
+    NonSpatialStereoBed,
+    ExplicitMonoFoldDown
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -143,7 +155,14 @@ public sealed record MotionPath
     public MotionPathKind Kind { get; init; } = MotionPathKind.Linear;
     public List<MotionKeyframe> Keyframes { get; init; } = [];
     public List<MotionKeyframe> RawGesture { get; init; } = [];
+    public List<VelocityControlPoint> VelocityProfile { get; init; } = [];
     public bool Loop { get; init; }
+}
+
+public sealed record VelocityControlPoint
+{
+    public required double TimeSeconds { get; init; }
+    public required double SpeedMetresPerSecond { get; init; }
 }
 
 public sealed record AcousticMaterial
@@ -197,11 +216,21 @@ public sealed record WindZone
     public double NoiseSeed { get; init; } = 1;
 }
 
+public sealed record AtmosphereLayer
+{
+    public required double BaseAltitudeMetres { get; init; }
+    public required double TopAltitudeMetres { get; init; }
+    public double TemperatureCelsius { get; init; } = 20;
+    public double RelativeHumidityPercent { get; init; } = 50;
+    public double PressureKilopascals { get; init; } = 101.325;
+}
+
 public sealed record AtmosphereField
 {
     public double TemperatureCelsius { get; init; } = 20;
     public double RelativeHumidityPercent { get; init; } = 50;
     public double PressureKilopascals { get; init; } = 101.325;
+    public List<AtmosphereLayer> Layers { get; init; } = [];
     public List<WindZone> WindZones { get; init; } = [];
 }
 
@@ -238,13 +267,26 @@ public sealed record ReceiverRig
     public double SpacingMetres { get; init; } = 0.18;
     public double AngleDegrees { get; init; }
     public double HeadRadiusMetres { get; init; } = 0.09;
+    public Vector3d HeadDimensionsMetres { get; init; } = new(0.18, 0.22, 0.24);
     public HrtfMode HrtfMode { get; init; } = HrtfMode.Parametric;
     public string? SofaAssetHash { get; init; }
     public PolarPattern PolarPattern { get; init; } = PolarPattern.Omni;
     public double SensitivityDb { get; init; }
     public double SelfNoiseDbSpl { get; init; }
+    public MicrophoneCapsule? LeftCapsule { get; init; }
+    public MicrophoneCapsule? RightCapsule { get; init; }
     public Guid? MotionPathId { get; init; }
     public bool Enabled { get; init; } = true;
+}
+
+public sealed record MicrophoneCapsule
+{
+    public Transform RelativeTransform { get; init; } = new();
+    public PolarPattern PolarPattern { get; init; } = PolarPattern.Omni;
+    public double SensitivityDb { get; init; }
+    public double SelfNoiseDbSpl { get; init; }
+    public double[] ResponseCentresHz { get; init; } = [20, 100, 1000, 10000, 20000];
+    public double[] ResponseDb { get; init; } = [0, 0, 0, 0, 0];
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -292,6 +334,7 @@ public sealed record RenderProfile
     public int ReflectionOrder { get; init; } = 1;
     public int RayCount { get; init; } = 1024;
     public double ImpulseResponseSeconds { get; init; } = 2;
+    public int AtmosphereIntegrationSegments { get; init; } = 1;
     public int Seed { get; init; } = 1;
 }
 
@@ -354,4 +397,3 @@ public sealed record SceneDocument
     public DateTimeOffset CreatedAtUtc { get; init; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 }
-

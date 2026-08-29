@@ -35,6 +35,8 @@ class ModelHost:
                 self.emit({"requestId": request_id, "ok": True, "packs": self.registry.inventory()})
             elif operation == "pack.verify":
                 self.emit({"requestId": request_id, "ok": True, "state": self.registry.verify(message["packId"])})
+            elif operation == "pack.install":
+                self._submit_pack_install(request_id, message)
             elif operation == "analysis.submit":
                 self._submit_analysis(request_id, message)
             elif operation == "job.cancel":
@@ -80,6 +82,26 @@ class ModelHost:
         finally:
             self.jobs.pop(job_id, None)
 
+    def _submit_pack_install(self, request_id: str | None, message: dict) -> None:
+        job_id = message.get("jobId")
+        if not job_id or job_id in self.jobs:
+            raise ValueError("pack.install requires a unique non-empty jobId.")
+        if message.get("explicitApproval") is not True:
+            raise PermissionError("pack.install requires explicitApproval=true from a user-initiated action.")
+        cancellation = Event()
+        self.jobs[job_id] = cancellation
+        self.executor.submit(self._run_pack_install, job_id, message["packId"], cancellation)
+        self.emit({"requestId": request_id, "ok": True, "jobId": job_id, "accepted": True})
+
+    def _run_pack_install(self, job_id: str, pack_id: str, cancellation: Event) -> None:
+        try:
+            state = self.registry.install(pack_id, explicit_approval=True, cancellation=cancellation)
+            self.emit({"event": "job.completed", "jobId": job_id, "result": {"packId": pack_id, "state": state}})
+        except BaseException as exception:
+            self.emit({"event": "job.failed", "jobId": job_id, "error": {"type": type(exception).__name__, "message": str(exception)}})
+        finally:
+            self.jobs.pop(job_id, None)
+
 
 def run_stdio(root: Path) -> int:
     host = ModelHost(root)
@@ -89,6 +111,8 @@ def run_stdio(root: Path) -> int:
             break
         try:
             host.handle(json.loads(line))
+            if host.stopping.is_set():
+                break
         except json.JSONDecodeError as exception:
             host.emit({"ok": False, "error": {"type": "InvalidJson", "message": str(exception)}})
     host.executor.shutdown(wait=True, cancel_futures=False)

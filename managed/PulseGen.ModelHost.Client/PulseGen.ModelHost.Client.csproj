@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Description>Cancellable JSON-lines client for the application-managed PulseGen.ModelHost.</Description>
+  </PropertyGroup>
+</Project>

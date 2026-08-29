@@ -7,6 +7,27 @@ var scene = arguments.TryGetValue("project", out var projectDirectory)
     ? await ProjectStore.LoadAsync(projectDirectory)
     : SampleScenes.CreateFlyby();
 
+if (arguments.TryGetValue("duration", out var durationText))
+{
+    var duration = double.Parse(durationText, System.Globalization.CultureInfo.InvariantCulture);
+    if (duration is <= 0 or > 3600)
+    {
+        throw new ArgumentOutOfRangeException("duration", "Render duration must be in (0, 3600] seconds.");
+    }
+    scene = scene with { Timeline = scene.Timeline with { DurationSeconds = duration } };
+}
+
+if (arguments.TryGetValue("waveform", out var waveformText))
+{
+    var waveform = Enum.Parse<WaveformKind>(waveformText, ignoreCase: true);
+    var emitter = scene.Emitters[0];
+    var nodeIndex = emitter.SignalGraph.Nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+    var graph = emitter.SignalGraph with { Nodes = [.. emitter.SignalGraph.Nodes] };
+    graph.Nodes[nodeIndex] = graph.Nodes[nodeIndex] with { Waveform = waveform };
+    var emitters = new List<Emitter>(scene.Emitters) { [0] = emitter with { SignalGraph = graph } };
+    scene = scene with { Emitters = emitters };
+}
+
 if (arguments.TryGetValue("write-project", out var destination))
 {
     var hash = await ProjectStore.SaveAsync(scene, destination);

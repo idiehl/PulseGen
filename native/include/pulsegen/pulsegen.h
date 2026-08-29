@@ -60,6 +60,28 @@ typedef enum pg_render_quality {
     PG_RENDER_FINAL = 2
 } pg_render_quality;
 
+typedef enum pg_waveform_kind {
+    PG_WAVE_SINE = 0,
+    PG_WAVE_TRIANGLE = 1,
+    PG_WAVE_SAW = 2,
+    PG_WAVE_SQUARE = 3,
+    PG_WAVE_PULSE = 4,
+    PG_WAVE_WHITE_NOISE = 5,
+    PG_WAVE_PINK_NOISE = 6,
+    PG_WAVE_BROWN_NOISE = 7,
+    PG_WAVE_IMPULSE = 8,
+    PG_WAVE_ADDITIVE = 9,
+    PG_WAVE_TURBULENCE = 10
+} pg_waveform_kind;
+
+typedef enum pg_motion_path_kind {
+    PG_PATH_LINEAR = 0,
+    PG_PATH_CATMULL_ROM = 1,
+    PG_PATH_CUBIC_BEZIER_APPROXIMATION = 2,
+    PG_PATH_ARC_APPROXIMATION = 3,
+    PG_PATH_RECORDED_GESTURE = 4
+} pg_motion_path_kind;
+
 typedef struct pg_vec3 {
     double x;
     double y;
@@ -117,6 +139,36 @@ typedef struct pg_sine_emitter_desc {
     uint32_t enabled;
 } pg_sine_emitter_desc;
 
+typedef struct pg_additive_partial {
+    double frequency_ratio;
+    double amplitude;
+    double phase_radians;
+} pg_additive_partial;
+
+typedef struct pg_signal_emitter_desc {
+    uint32_t size;
+    uint32_t version;
+    const char* name_utf8;
+    pg_waveform_kind waveform;
+    double frequency_hz;
+    double amplitude;
+    double phase_radians;
+    double pulse_width;
+    double gain_linear;
+    double min_distance_metres;
+    double attack_seconds;
+    double release_seconds;
+    double nonlinear_drive;
+    const pg_additive_partial* additive_partials;
+    uint32_t additive_partial_count;
+    pg_motion_path_kind motion_path_kind;
+    const pg_motion_keyframe* keyframes;
+    uint32_t keyframe_count;
+    uint32_t noise_seed;
+    uint32_t enabled;
+    uint32_t reserved;
+} pg_signal_emitter_desc;
+
 typedef struct pg_receiver_rig_desc {
     uint32_t size;
     uint32_t version;
@@ -162,6 +214,29 @@ typedef struct pg_render_receipt {
     uint64_t deterministic_seed;
 } pg_render_receipt;
 
+typedef struct pg_device_config {
+    uint32_t size;
+    uint32_t version;
+    uint32_t receiver_index;
+    uint32_t sample_rate;
+    uint32_t period_frames;
+    uint32_t reflection_order;
+    uint32_t exclusive_mode;
+    uint32_t reserved;
+    uint64_t start_frame;
+} pg_device_config;
+
+typedef struct pg_device_status {
+    uint32_t size;
+    uint32_t version;
+    uint32_t running;
+    uint32_t sample_rate;
+    uint32_t period_frames;
+    uint32_t receiver_index;
+    uint64_t frames_processed;
+    uint64_t callback_count;
+} pg_device_status;
+
 PG_API uint32_t PG_CALL pg_get_abi_version(void);
 PG_API const char* PG_CALL pg_get_engine_version(void);
 PG_API const char* PG_CALL pg_get_last_error(const pg_engine* engine);
@@ -172,6 +247,7 @@ PG_API pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmosphere_desc* atmosphere);
 PG_API pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
+PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);
 
 PG_API pg_status PG_CALL pg_engine_render_receiver_block(
@@ -188,6 +264,10 @@ PG_API pg_status PG_CALL pg_engine_render_offline(
     const pg_render_request* request,
     pg_render_receipt* receipt);
 
+PG_API pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_config* config);
+PG_API pg_status PG_CALL pg_engine_stop_device(pg_engine* engine);
+PG_API pg_status PG_CALL pg_engine_get_device_status(const pg_engine* engine, pg_device_status* status);
+
 PG_API double PG_CALL pg_calculate_speed_of_sound(double temperature_celsius);
 PG_API double PG_CALL pg_calculate_observed_frequency(
     double source_frequency_hz,
@@ -200,4 +280,3 @@ PG_API double PG_CALL pg_calculate_observed_frequency(
 #endif
 
 #endif
-

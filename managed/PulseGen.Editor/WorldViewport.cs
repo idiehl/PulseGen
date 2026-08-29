@@ -18,8 +18,16 @@ public sealed class WorldViewport : Control
     private static readonly IBrush RoomBrush = new SolidColorBrush(Color.Parse("#121D27"));
     private static readonly Pen RoomPen = new(new SolidColorBrush(Color.Parse("#34465B")), 1.3);
     private double timeSeconds;
+    private int? draggingKeyframeIndex;
+    private bool gestureCapturing;
+    private DateTimeOffset gestureStarted;
+    private readonly List<MotionKeyframe> gesturePoints = [];
 
     public SceneDocument? Scene { get; set; }
+
+    public bool IsGestureRecording { get; set; }
+
+    public int SelectedKeyframeIndex { get; private set; }
 
     public double TimeSeconds
     {
@@ -32,6 +40,10 @@ public sealed class WorldViewport : Control
     }
 
     public event EventHandler<double>? PlayheadChanged;
+
+    public event EventHandler<int>? PathPointSelected;
+
+    public event EventHandler<string>? SceneEdited;
 
     public override void Render(DrawingContext context)
     {
@@ -76,9 +88,111 @@ public sealed class WorldViewport : Control
         }
 
         var point = e.GetPosition(this);
+        if (IsGestureRecording)
+        {
+            gesturePoints.Clear();
+            gestureStarted = DateTimeOffset.UtcNow;
+            gestureCapturing = true;
+            gesturePoints.Add(new MotionKeyframe { TimeSeconds = 0, PositionMetres = InverseProject(point, 1.7) });
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            return;
+        }
+
+        var path = Scene.MotionPaths.FirstOrDefault();
+        if (path is not null)
+        {
+            var nearest = FindNearestPathPoint(path, point);
+            if (nearest.Index >= 0 && nearest.Distance <= 14)
+            {
+                draggingKeyframeIndex = nearest.Index;
+                SelectedKeyframeIndex = nearest.Index;
+                PathPointSelected?.Invoke(this, nearest.Index);
+                e.Pointer.Capture(this);
+                e.Handled = true;
+                return;
+            }
+        }
+
         var time = Math.Clamp(point.X / Math.Max(1, Bounds.Width), 0, 1) * Scene.Timeline.DurationSeconds;
         PlayheadChanged?.Invoke(this, time);
         e.Handled = true;
+    }
+
+    protected override void OnPointerMoved(PointerEventArgs e)
+    {
+        base.OnPointerMoved(e);
+        if (Scene is null)
+        {
+            return;
+        }
+
+        var point = e.GetPosition(this);
+        if (gestureCapturing)
+        {
+            var elapsed = (DateTimeOffset.UtcNow - gestureStarted).TotalSeconds;
+            if (elapsed - gesturePoints[^1].TimeSeconds >= 1.0 / 120.0)
+            {
+                gesturePoints.Add(new MotionKeyframe { TimeSeconds = elapsed, PositionMetres = InverseProject(point, 1.7) });
+                InvalidateVisual();
+            }
+            e.Handled = true;
+            return;
+        }
+
+        if (draggingKeyframeIndex is { } index)
+        {
+            var path = Scene.MotionPaths[0];
+            var existing = path.Keyframes[index];
+            SetPathPoint(index, InverseProject(point, existing.PositionMetres.Y), announce: false);
+            PathPointSelected?.Invoke(this, index);
+            e.Handled = true;
+        }
+    }
+
+    protected override void OnPointerReleased(PointerReleasedEventArgs e)
+    {
+        base.OnPointerReleased(e);
+        if (gestureCapturing)
+        {
+            var elapsed = Math.Max((DateTimeOffset.UtcNow - gestureStarted).TotalSeconds, 0.01);
+            var finalPosition = InverseProject(e.GetPosition(this), 1.7);
+            if (gesturePoints.Count == 1 || elapsed > gesturePoints[^1].TimeSeconds)
+            {
+                gesturePoints.Add(new MotionKeyframe { TimeSeconds = elapsed, PositionMetres = finalPosition });
+            }
+            CommitGesture();
+            gestureCapturing = false;
+            IsGestureRecording = false;
+        }
+        else if (draggingKeyframeIndex is not null)
+        {
+            SceneEdited?.Invoke(this, $"Motion keyframe {draggingKeyframeIndex.Value + 1} moved in SI world coordinates · scene is dirty");
+        }
+
+        draggingKeyframeIndex = null;
+        e.Pointer.Capture(null);
+        e.Handled = true;
+    }
+
+    public void SetPathPoint(int index, Vector3d position) => SetPathPoint(index, position, announce: true);
+
+    private void SetPathPoint(int index, Vector3d position, bool announce)
+    {
+        if (Scene is null || Scene.MotionPaths.Count == 0 || index < 0 || index >= Scene.MotionPaths[0].Keyframes.Count ||
+            !double.IsFinite(position.X) || !double.IsFinite(position.Y) || !double.IsFinite(position.Z))
+        {
+            return;
+        }
+        var path = Scene.MotionPaths[0];
+        path.Keyframes[index] = path.Keyframes[index] with { PositionMetres = position };
+        SelectedKeyframeIndex = index;
+        InvalidateVisual();
+        if (announce)
+        {
+            PathPointSelected?.Invoke(this, index);
+            SceneEdited?.Invoke(this, $"Motion keyframe {index + 1} set to ({position.X:0.###}, {position.Y:0.###}, {position.Z:0.###}) m · scene is dirty");
+        }
     }
 
     private void DrawGrid(DrawingContext context)
@@ -107,6 +221,7 @@ public sealed class WorldViewport : Control
 
         var halfX = geometry.DimensionsMetres.X * 0.5;
         var halfZ = geometry.DimensionsMetres.Z * 0.5;
+        var height = geometry.DimensionsMetres.Y;
         var points = new[]
         {
             Project(new(-halfX, 0, -halfZ)), Project(new(halfX, 0, -halfZ)),
@@ -122,6 +237,21 @@ public sealed class WorldViewport : Control
             drawing.EndFigure(true);
         }
         context.DrawGeometry(RoomBrush, RoomPen, shape);
+
+        var ceiling = new[]
+        {
+            Project(new(-halfX, height, -halfZ)), Project(new(halfX, height, -halfZ)),
+            Project(new(halfX, height, halfZ)), Project(new(-halfX, height, halfZ))
+        };
+        var wallBrush = new SolidColorBrush(Color.FromArgb(24, 62, 85, 108));
+        DrawFace(context, [points[0], points[1], ceiling[1], ceiling[0]], wallBrush);
+        DrawFace(context, [points[1], points[2], ceiling[2], ceiling[1]], wallBrush);
+        DrawFace(context, [points[3], points[0], ceiling[0], ceiling[3]], wallBrush);
+        for (var index = 0; index < ceiling.Length; index++)
+        {
+            context.DrawLine(RoomPen, ceiling[index], ceiling[(index + 1) % ceiling.Length]);
+            context.DrawLine(RoomPen, points[index], ceiling[index]);
+        }
     }
 
     private void DrawPath(DrawingContext context, MotionPath path)
@@ -145,9 +275,19 @@ public sealed class WorldViewport : Control
             previous = point;
         }
 
-        foreach (var keyframe in path.Keyframes)
+        for (var index = 0; index < path.Keyframes.Count; index++)
         {
-            context.DrawEllipse(PathPointBrush, null, Project(keyframe.PositionMetres), 3.5, 3.5);
+            var keyframe = path.Keyframes[index];
+            var radius = index == SelectedKeyframeIndex ? 6.0 : 3.5;
+            context.DrawEllipse(index == SelectedKeyframeIndex ? EmitterBrush : PathPointBrush, null, Project(keyframe.PositionMetres), radius, radius);
+        }
+
+        if (gestureCapturing && gesturePoints.Count > 1)
+        {
+            for (var index = 1; index < gesturePoints.Count; index++)
+            {
+                context.DrawLine(new Pen(EmitterBrush, 2), Project(gesturePoints[index - 1].PositionMetres), Project(gesturePoints[index].PositionMetres));
+            }
         }
     }
 
@@ -173,5 +313,115 @@ public sealed class WorldViewport : Control
         var x = (Bounds.Width * 0.5) + ((point.X + (point.Z * 0.35)) * scale);
         var y = (Bounds.Height * 0.58) - (point.Y * scale) + (point.Z * scale * 0.24);
         return new(x, y);
+    }
+
+    private static void DrawFace(DrawingContext context, IReadOnlyList<Point> points, IBrush brush)
+    {
+        var geometry = new StreamGeometry();
+        using (var drawing = geometry.Open())
+        {
+            drawing.BeginFigure(points[0], true);
+            for (var index = 1; index < points.Count; index++)
+            {
+                drawing.LineTo(points[index]);
+            }
+            drawing.EndFigure(true);
+        }
+        context.DrawGeometry(brush, RoomPen, geometry);
+    }
+
+    private Vector3d InverseProject(Point point, double yMetres)
+    {
+        var scale = Math.Clamp(Bounds.Width / 78.0, 8, 18);
+        var z = (point.Y - (Bounds.Height * 0.58) + (yMetres * scale)) / (scale * 0.24);
+        var x = ((point.X - (Bounds.Width * 0.5)) / scale) - (z * 0.35);
+        return new(x, yMetres, z);
+    }
+
+    private (int Index, double Distance) FindNearestPathPoint(MotionPath path, Point point)
+    {
+        var selected = -1;
+        var best = double.PositiveInfinity;
+        for (var index = 0; index < path.Keyframes.Count; index++)
+        {
+            var projected = Project(path.Keyframes[index].PositionMetres);
+            var deltaX = projected.X - point.X;
+            var deltaY = projected.Y - point.Y;
+            var distance = Math.Sqrt((deltaX * deltaX) + (deltaY * deltaY));
+            if (distance < best)
+            {
+                best = distance;
+                selected = index;
+            }
+        }
+        return (selected, best);
+    }
+
+    private void CommitGesture()
+    {
+        if (Scene is null || Scene.MotionPaths.Count == 0 || gesturePoints.Count < 2)
+        {
+            return;
+        }
+        var simplified = SimplifyGesture(gesturePoints, 0.20);
+        if (simplified.Count < 2)
+        {
+            simplified = [gesturePoints[0], gesturePoints[^1]];
+        }
+        var existing = Scene.MotionPaths[0];
+        Scene.MotionPaths[0] = existing with
+        {
+            Kind = MotionPathKind.RecordedGesture,
+            RawGesture = [.. gesturePoints],
+            Keyframes = simplified
+        };
+        SelectedKeyframeIndex = 0;
+        InvalidateVisual();
+        PathPointSelected?.Invoke(this, 0);
+        SceneEdited?.Invoke(this, $"Gesture captured · {gesturePoints.Count} raw samples retained · {simplified.Count} editable keyframes");
+    }
+
+    private static List<MotionKeyframe> SimplifyGesture(IReadOnlyList<MotionKeyframe> points, double toleranceMetres)
+    {
+        var keep = new bool[points.Count];
+        keep[0] = true;
+        keep[^1] = true;
+        SimplifyRange(points, 0, points.Count - 1, toleranceMetres * toleranceMetres, keep);
+        return points.Where((_, index) => keep[index]).ToList();
+    }
+
+    private static void SimplifyRange(IReadOnlyList<MotionKeyframe> points, int first, int last, double toleranceSquared, bool[] keep)
+    {
+        if (last <= first + 1)
+        {
+            return;
+        }
+        var start = points[first].PositionMetres;
+        var end = points[last].PositionMetres;
+        var segment = end - start;
+        var segmentLengthSquared = (segment.X * segment.X) + (segment.Y * segment.Y) + (segment.Z * segment.Z);
+        var furthest = -1;
+        var maximumDistance = 0.0;
+        for (var index = first + 1; index < last; index++)
+        {
+            var relative = points[index].PositionMetres - start;
+            var amount = segmentLengthSquared <= double.Epsilon
+                ? 0
+                : Math.Clamp(((relative.X * segment.X) + (relative.Y * segment.Y) + (relative.Z * segment.Z)) / segmentLengthSquared, 0, 1);
+            var nearest = start + (segment * amount);
+            var difference = points[index].PositionMetres - nearest;
+            var distanceSquared = (difference.X * difference.X) + (difference.Y * difference.Y) + (difference.Z * difference.Z);
+            if (distanceSquared > maximumDistance)
+            {
+                maximumDistance = distanceSquared;
+                furthest = index;
+            }
+        }
+        if (furthest >= 0 && maximumDistance > toleranceSquared)
+        {
+            keep[furthest] = true;
+            SimplifyRange(points, first, furthest, toleranceSquared, keep);
+            SimplifyRange(points, furthest, last, toleranceSquared, keep);
+        }
     }
 }

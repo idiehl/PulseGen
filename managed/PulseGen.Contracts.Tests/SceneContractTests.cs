@@ -96,4 +96,29 @@ public sealed class SceneContractTests
         Assert.Equal("PulseGen SceneDocument v1", scene.RootElement.GetProperty("title").GetString());
         Assert.Equal("PulseGen ModelPackManifest v1", packs.RootElement.GetProperty("title").GetString());
     }
+
+    [Fact]
+    public void NearSonicMotionWarnsButSupersonicMotionFails()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var path = scene.MotionPaths[0];
+        path.Keyframes[1] = path.Keyframes[1] with { TimeSeconds = 0.1, PositionMetres = new(30, 1.7, 4) };
+        var issues = SceneValidator.Validate(scene);
+        Assert.Contains(issues, issue => issue.Severity == ValidationSeverity.Error && issue.Message.Contains("supersonic", StringComparison.Ordinal));
+        Assert.Throws<SceneValidationException>(() => SceneValidator.EnsureValid(scene));
+
+        path.Keyframes[1] = path.Keyframes[1] with { TimeSeconds = 0.2, PositionMetres = new(27, 1.7, 4) };
+        issues = SceneValidator.Validate(scene);
+        Assert.Contains(issues, issue => issue.Severity == ValidationSeverity.Warning && issue.Message.Contains("near sonic", StringComparison.Ordinal));
+        SceneValidator.EnsureValid(scene);
+    }
+
+    [Fact]
+    public void ExactSofaModeCannotSilentlyUseNoDataset()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { HrtfMode = HrtfMode.ExactSofa, SofaAssetHash = null };
+        var issues = SceneValidator.Validate(scene);
+        Assert.Contains(issues, issue => issue.Path.EndsWith("sofaAssetHash", StringComparison.Ordinal));
+    }
 }

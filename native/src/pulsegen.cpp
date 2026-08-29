@@ -1,8 +1,11 @@
 #include "pulsegen/pulsegen.h"
 #include "wav_writer.h"
+#include "miniaudio.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -18,8 +21,10 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.1";
+constexpr std::string_view engine_version = "0.1.0-alpha.2";
 constexpr double minimum_effective_sound_speed = 40.0;
+constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
+constexpr std::array<double, 4> late_delay_seconds{ 0.0297, 0.0371, 0.0411, 0.0437 };
 
 struct vec3 {
     double x{};
@@ -111,12 +116,27 @@ struct keyframe_state {
     vec3 position{};
 };
 
+struct additive_partial_state {
+    double frequency_ratio{ 1.0 };
+    double amplitude{ 1.0 };
+    double phase_radians{};
+};
+
 struct emitter_state {
     std::string name;
+    pg_waveform_kind waveform{ PG_WAVE_SINE };
+    pg_motion_path_kind motion_path_kind{ PG_PATH_LINEAR };
     double frequency_hz{ 440.0 };
     double amplitude{ 1.0 };
+    double phase_radians{};
+    double pulse_width{ 0.5 };
     double gain_linear{ 1.0 };
     double min_distance_metres{ 1.0 };
+    double attack_seconds{};
+    double release_seconds{};
+    double nonlinear_drive{};
+    std::uint64_t noise_seed{ 1U };
+    std::vector<additive_partial_state> additive_partials;
     std::vector<keyframe_state> keyframes;
     bool enabled{ true };
 };
@@ -140,6 +160,14 @@ struct channel_filter_state {
     double right{};
 };
 
+struct room_response_state {
+    std::array<std::vector<float>, 4> delay_lines;
+    std::array<std::size_t, 4> delay_indices{};
+    std::array<double, 3> modal_previous_one{};
+    std::array<double, 3> modal_previous_two{};
+    std::uint32_t sample_rate{};
+};
+
 } // namespace
 
 struct pg_engine {
@@ -150,10 +178,26 @@ struct pg_engine {
     std::vector<receiver_state> receivers;
     std::vector<channel_filter_state> receiver_filters;
     std::vector<std::uint64_t> receiver_next_frames;
+    std::vector<room_response_state> receiver_room_responses;
+    ma_device device{};
+    bool device_initialized{};
+    std::atomic_bool device_running{};
+    std::atomic_uint64_t device_frame_cursor{};
+    std::atomic_uint64_t device_frames_processed{};
+    std::atomic_uint64_t device_callback_count{};
+    std::uint32_t device_sample_rate{};
+    std::uint32_t device_period_frames{};
+    std::uint32_t device_receiver_index{};
+    std::uint32_t device_reflection_order{ 1U };
     std::string last_error;
 };
 
 namespace {
+
+bool device_running(const pg_engine* engine) noexcept
+{
+    return engine != nullptr && engine->device_running.load(std::memory_order_acquire);
+}
 
 pg_status fail(pg_engine* engine, pg_status status, std::string message)
 {
@@ -161,6 +205,14 @@ pg_status fail(pg_engine* engine, pg_status status, std::string message)
         engine->last_error = std::move(message);
     }
     return status;
+}
+
+pg_status require_stopped_device(pg_engine* engine, std::string_view operation)
+{
+    if (engine == nullptr || (!device_running(engine) && !engine->device_initialized)) {
+        return PG_STATUS_OK;
+    }
+    return fail(engine, PG_STATUS_INVALID_ARGUMENT, std::string(operation) + " requires stopping real-time preview first.");
 }
 
 double speed_of_sound(const atmosphere_state& atmosphere) noexcept
@@ -201,6 +253,19 @@ vec3 sample_motion(const emitter_state& emitter, double time_seconds) noexcept
     const auto lower = upper - 1;
     const double duration = upper->time_seconds - lower->time_seconds;
     const double amount = duration > 0.0 ? (time_seconds - lower->time_seconds) / duration : 0.0;
+    if (emitter.motion_path_kind == PG_PATH_CATMULL_ROM || emitter.motion_path_kind == PG_PATH_CUBIC_BEZIER_APPROXIMATION) {
+        const std::size_t right_index = static_cast<std::size_t>(std::distance(emitter.keyframes.begin(), upper));
+        const vec3 p0 = right_index >= 2U ? emitter.keyframes[right_index - 2U].position : lower->position;
+        const vec3 p1 = lower->position;
+        const vec3 p2 = upper->position;
+        const vec3 p3 = right_index + 1U < emitter.keyframes.size() ? emitter.keyframes[right_index + 1U].position : upper->position;
+        const double amount_squared = amount * amount;
+        const double amount_cubed = amount_squared * amount;
+        return (p1 * 2.0 +
+            (p2 - p0) * amount +
+            ((p0 * 2.0) - (p1 * 5.0) + (p2 * 4.0) - p3) * amount_squared +
+            ((p1 * 3.0) - p0 - (p2 * 3.0) + p3) * amount_cubed) * 0.5;
+    }
     return lower->position + ((upper->position - lower->position) * amount);
 }
 
@@ -208,6 +273,141 @@ double effective_sound_speed(const atmosphere_state& atmosphere, vec3 source, ve
 {
     const vec3 propagation = normalized(receiver - source);
     return std::max(minimum_effective_sound_speed, speed_of_sound(atmosphere) + dot(atmosphere.wind, propagation));
+}
+
+double fractional(double value) noexcept
+{
+    return value - std::floor(value);
+}
+
+double poly_blep(double phase, double phase_increment) noexcept
+{
+    if (phase_increment <= 0.0) {
+        return 0.0;
+    }
+    if (phase < phase_increment) {
+        const double amount = phase / phase_increment;
+        return amount + amount - (amount * amount) - 1.0;
+    }
+    if (phase > 1.0 - phase_increment) {
+        const double amount = (phase - 1.0) / phase_increment;
+        return (amount * amount) + amount + amount + 1.0;
+    }
+    return 0.0;
+}
+
+std::uint64_t mix_hash(std::uint64_t value) noexcept
+{
+    value ^= value >> 30U;
+    value *= 0xbf58476d1ce4e5b9ULL;
+    value ^= value >> 27U;
+    value *= 0x94d049bb133111ebULL;
+    return value ^ (value >> 31U);
+}
+
+double hashed_noise(std::uint64_t seed, std::int64_t index) noexcept
+{
+    const std::uint64_t mixed = mix_hash(seed ^ std::bit_cast<std::uint64_t>(index));
+    constexpr double scale = 1.0 / static_cast<double>(std::numeric_limits<std::uint64_t>::max());
+    return (static_cast<double>(mixed) * scale * 2.0) - 1.0;
+}
+
+double smooth_hashed_noise(std::uint64_t seed, double position) noexcept
+{
+    const auto left_index = static_cast<std::int64_t>(std::floor(position));
+    const double amount = fractional(position);
+    const double smooth_amount = amount * amount * (3.0 - (2.0 * amount));
+    return std::lerp(hashed_noise(seed, left_index), hashed_noise(seed, left_index + 1), smooth_amount);
+}
+
+double primitive_sample(const emitter_state& emitter, double emission_time, std::uint32_t sample_rate) noexcept
+{
+    const double start_time = emitter.keyframes.empty() ? 0.0 : emitter.keyframes.front().time_seconds;
+    const double end_time = emitter.keyframes.empty() ? std::numeric_limits<double>::infinity() : emitter.keyframes.back().time_seconds;
+    if (emission_time < start_time || emission_time > end_time) {
+        return 0.0;
+    }
+
+    double envelope = 1.0;
+    if (emitter.attack_seconds > 0.0) {
+        envelope *= std::clamp((emission_time - start_time) / emitter.attack_seconds, 0.0, 1.0);
+    }
+    if (emitter.release_seconds > 0.0) {
+        envelope *= std::clamp((end_time - emission_time) / emitter.release_seconds, 0.0, 1.0);
+    }
+
+    const double local_time = emission_time - start_time;
+    const double cycles = (local_time * emitter.frequency_hz) + (emitter.phase_radians / (2.0 * std::numbers::pi));
+    const double phase = fractional(cycles);
+    const double increment = std::clamp(emitter.frequency_hz / static_cast<double>(sample_rate), 1.0e-9, 0.49);
+    double value = 0.0;
+    switch (emitter.waveform) {
+    case PG_WAVE_TRIANGLE:
+        value = (2.0 / std::numbers::pi) * std::asin(std::sin(2.0 * std::numbers::pi * phase));
+        break;
+    case PG_WAVE_SAW:
+        value = (2.0 * phase) - 1.0 - poly_blep(phase, increment);
+        break;
+    case PG_WAVE_SQUARE:
+        value = phase < 0.5 ? 1.0 : -1.0;
+        value += poly_blep(phase, increment);
+        value -= poly_blep(fractional(phase + 0.5), increment);
+        break;
+    case PG_WAVE_PULSE:
+        value = phase < emitter.pulse_width ? 1.0 : -1.0;
+        value += poly_blep(phase, increment);
+        value -= poly_blep(fractional(phase + (1.0 - emitter.pulse_width)), increment);
+        break;
+    case PG_WAVE_WHITE_NOISE: {
+        const auto sample_index = static_cast<std::int64_t>(std::floor(local_time * static_cast<double>(sample_rate)));
+        value = hashed_noise(emitter.noise_seed, sample_index);
+        break;
+    }
+    case PG_WAVE_PINK_NOISE: {
+        const auto sample_index = static_cast<std::int64_t>(std::floor(local_time * static_cast<double>(sample_rate)));
+        double weight = 1.0;
+        double weight_sum = 0.0;
+        for (int octave = 0; octave < 7; ++octave) {
+            value += hashed_noise(emitter.noise_seed + static_cast<std::uint64_t>(octave), sample_index >> octave) * weight;
+            weight_sum += weight;
+            weight *= 0.72;
+        }
+        value /= weight_sum;
+        break;
+    }
+    case PG_WAVE_BROWN_NOISE:
+        value = (0.68 * smooth_hashed_noise(emitter.noise_seed, local_time * static_cast<double>(sample_rate) / 64.0)) +
+            (0.32 * smooth_hashed_noise(emitter.noise_seed + 1U, local_time * static_cast<double>(sample_rate) / 257.0));
+        break;
+    case PG_WAVE_IMPULSE:
+        value = phase < increment ? 1.0 : 0.0;
+        break;
+    case PG_WAVE_ADDITIVE: {
+        double normalization = 0.0;
+        for (const auto& partial : emitter.additive_partials) {
+            value += partial.amplitude * std::sin((2.0 * std::numbers::pi * cycles * partial.frequency_ratio) + partial.phase_radians);
+            normalization += std::abs(partial.amplitude);
+        }
+        value /= std::max(1.0, normalization);
+        break;
+    }
+    case PG_WAVE_TURBULENCE:
+        value = (0.55 * smooth_hashed_noise(emitter.noise_seed, local_time * 19.0)) +
+            (0.28 * smooth_hashed_noise(emitter.noise_seed + 1U, local_time * 53.0)) +
+            (0.12 * smooth_hashed_noise(emitter.noise_seed + 2U, local_time * 131.0)) +
+            (0.05 * hashed_noise(emitter.noise_seed + 3U, static_cast<std::int64_t>(local_time * sample_rate)));
+        break;
+    case PG_WAVE_SINE:
+    default:
+        value = std::sin(2.0 * std::numbers::pi * phase);
+        break;
+    }
+
+    value *= emitter.amplitude * envelope;
+    if (emitter.nonlinear_drive > 0.0) {
+        value = std::tanh(value * emitter.nonlinear_drive) / std::tanh(emitter.nonlinear_drive);
+    }
+    return value;
 }
 
 struct delayed_path_sample {
@@ -221,6 +421,7 @@ delayed_path_sample sample_delayed_path(
     const emitter_state& emitter,
     vec3 receiver_position,
     double receive_time,
+    std::uint32_t sample_rate,
     bool reflected,
     int reflection_axis,
     bool reflection_high_side) noexcept
@@ -257,8 +458,7 @@ delayed_path_sample sample_delayed_path(
         reflection *= 1.0 - (0.35 * engine.room.scattering);
     }
 
-    const double phase = 2.0 * std::numbers::pi * emitter.frequency_hz * emission_time;
-    const double sample = std::sin(phase) * emitter.amplitude * emitter.gain_linear * absorption * reflection / attenuation_distance;
+    const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear * absorption * reflection / attenuation_distance;
     return { sample, distance, source_position };
 }
 
@@ -278,11 +478,93 @@ double microphone_pattern_gain(pg_polar_pattern pattern, vec3 capsule_forward, v
     }
 }
 
+room_response_state make_room_response_state()
+{
+    room_response_state state{};
+    for (std::size_t index = 0; index < late_delay_seconds.size(); ++index) {
+        const auto capacity = static_cast<std::size_t>(std::ceil(late_delay_seconds[index] * maximum_supported_sample_rate)) + 2U;
+        state.delay_lines[index].resize(capacity);
+    }
+    return state;
+}
+
+void reset_room_response(room_response_state& state, std::uint32_t sample_rate) noexcept
+{
+    for (auto& line : state.delay_lines) {
+        std::fill(line.begin(), line.end(), 0.0F);
+    }
+    state.delay_indices = {};
+    state.modal_previous_one = {};
+    state.modal_previous_two = {};
+    state.sample_rate = sample_rate;
+}
+
+std::pair<double, double> process_room_response(
+    pg_engine& engine,
+    std::size_t receiver_index,
+    double input,
+    std::uint32_t sample_rate,
+    std::uint32_t reflection_order) noexcept
+{
+    if (!engine.room.enabled || reflection_order == 0U) {
+        return {};
+    }
+    room_response_state& state = engine.receiver_room_responses[receiver_index];
+    if (state.sample_rate != sample_rate) {
+        reset_room_response(state, sample_rate);
+    }
+
+    const double room_reflection = std::clamp(engine.room.reflection_mid * (1.0 - (0.25 * engine.room.scattering)), 0.0, 0.98);
+    const double order_factor = 1.0 + (0.035 * static_cast<double>(std::min(reflection_order, 8U) - 1U));
+    const double feedback = std::clamp((0.35 + (0.56 * room_reflection)) * order_factor, 0.1, 0.965);
+    constexpr std::array<double, 4> left_mix{ 0.24, 0.19, -0.17, 0.15 };
+    constexpr std::array<double, 4> right_mix{ 0.17, -0.23, 0.15, 0.19 };
+    double late_left = 0.0;
+    double late_right = 0.0;
+    for (std::size_t index = 0; index < state.delay_lines.size(); ++index) {
+        auto& line = state.delay_lines[index];
+        const auto delay_length = std::clamp(
+            static_cast<std::size_t>(std::llround(late_delay_seconds[index] * sample_rate)),
+            std::size_t{ 2U },
+            line.size());
+        std::size_t& cursor = state.delay_indices[index];
+        if (cursor >= delay_length) {
+            cursor = 0U;
+        }
+        const double delayed = line[cursor];
+        line[cursor] = static_cast<float>(std::clamp(input + (delayed * feedback), -8.0, 8.0));
+        cursor = (cursor + 1U) % delay_length;
+        late_left += delayed * left_mix[index];
+        late_right += delayed * right_mix[index];
+    }
+
+    const std::array<double, 3> dimensions{
+        std::max(engine.room.dimensions.x, 0.5),
+        std::max(engine.room.dimensions.y, 0.5),
+        std::max(engine.room.dimensions.z, 0.5)
+    };
+    constexpr std::array<double, 3> mode_numbers{ 5.0, 3.0, 7.0 };
+    const double local_speed = speed_of_sound(engine.atmosphere);
+    const double radius = std::clamp(0.992 + (0.006 * room_reflection), 0.98, 0.9992);
+    double modal = 0.0;
+    for (std::size_t mode = 0; mode < dimensions.size(); ++mode) {
+        const double frequency = std::min(local_speed * mode_numbers[mode] / (2.0 * dimensions[mode]), sample_rate * 0.45);
+        const double coefficient = 2.0 * radius * std::cos(2.0 * std::numbers::pi * frequency / sample_rate);
+        const double output = (input * 0.0035) + (coefficient * state.modal_previous_one[mode]) -
+            (radius * radius * state.modal_previous_two[mode]);
+        state.modal_previous_two[mode] = state.modal_previous_one[mode];
+        state.modal_previous_one[mode] = std::clamp(output, -4.0, 4.0);
+        modal += output * 0.16;
+    }
+    return { late_left + modal, late_right + (modal * 0.94) };
+}
+
 std::pair<float, float> render_frame(
     pg_engine& engine,
     std::size_t receiver_index,
     double receive_time,
-    std::uint32_t sample_rate) noexcept
+    std::uint32_t sample_rate,
+    std::uint32_t reflection_order) noexcept
 {
     const receiver_state& receiver = engine.receivers[receiver_index];
     const vec3 right = normalized(rotate_yaw({ 1.0, 0.0, 0.0 }, receiver.yaw_degrees));
@@ -298,17 +580,17 @@ std::pair<float, float> render_frame(
             continue;
         }
 
-        const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, false, 0, false);
-        const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, false, 0, false);
+        const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, false, 0, false);
+        const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, false, 0, false);
         double left_sample = left_direct.value;
         double right_sample = right_direct.value;
         source_lateral += dot(normalized(left_direct.source_position - receiver.centre), right);
 
-        if (engine.room.enabled) {
+        if (engine.room.enabled && reflection_order > 0U) {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int side = 0; side < 2; ++side) {
-                    left_sample += sample_delayed_path(engine, emitter, left_position, receive_time, true, axis, side != 0).value;
-                    right_sample += sample_delayed_path(engine, emitter, right_position, receive_time, true, axis, side != 0).value;
+                    left_sample += sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, true, axis, side != 0).value;
+                    right_sample += sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, true, axis, side != 0).value;
                 }
             }
         }
@@ -323,6 +605,15 @@ std::pair<float, float> render_frame(
         left_total += left_sample;
         right_total += right_sample;
     }
+
+    const auto [room_left, room_right] = process_room_response(
+        engine,
+        receiver_index,
+        0.5 * (left_total + right_total),
+        sample_rate,
+        reflection_order);
+    left_total += room_left;
+    right_total += room_right;
 
     if (receiver.kind == PG_RECEIVER_BINAURAL_HEAD) {
         channel_filter_state& filter = engine.receiver_filters[receiver_index];
@@ -359,6 +650,43 @@ pg_status validate_scene(pg_engine* engine)
     return PG_STATUS_OK;
 }
 
+void device_data_callback(ma_device* device, void* output, const void* input, ma_uint32 frame_count) noexcept
+{
+    (void)input;
+    auto* engine = static_cast<pg_engine*>(device->pUserData);
+    auto* samples = static_cast<float*>(output);
+    if (engine == nullptr || samples == nullptr || !engine->device_running.load(std::memory_order_relaxed)) {
+        if (samples != nullptr) {
+            std::fill_n(samples, static_cast<std::size_t>(frame_count) * 2U, 0.0F);
+        }
+        return;
+    }
+
+    const std::uint64_t start_frame = engine->device_frame_cursor.fetch_add(frame_count, std::memory_order_relaxed);
+    engine->device_frames_processed.fetch_add(frame_count, std::memory_order_relaxed);
+    const std::uint32_t receiver_index = engine->device_receiver_index;
+    const std::uint32_t sample_rate = engine->device_sample_rate;
+    const std::uint32_t reflection_order = engine->device_reflection_order;
+    for (ma_uint32 frame = 0; frame < frame_count; ++frame) {
+        const double receive_time = static_cast<double>(start_frame + frame) / static_cast<double>(sample_rate);
+        const auto [left, right] = render_frame(*engine, receiver_index, receive_time, sample_rate, reflection_order);
+        samples[static_cast<std::size_t>(frame) * 2U] = left;
+        samples[(static_cast<std::size_t>(frame) * 2U) + 1U] = right;
+    }
+    engine->device_callback_count.fetch_add(1U, std::memory_order_relaxed);
+}
+
+void device_notification_callback(const ma_device_notification* notification) noexcept
+{
+    if (notification == nullptr || notification->pDevice == nullptr) {
+        return;
+    }
+    auto* engine = static_cast<pg_engine*>(notification->pDevice->pUserData);
+    if (engine != nullptr && notification->type == ma_device_notification_type_stopped) {
+        engine->device_running.store(false, std::memory_order_release);
+    }
+}
+
 } // namespace
 
 extern "C" {
@@ -392,6 +720,7 @@ pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_engine** o
         engine->receivers.reserve(config->max_receivers);
         engine->receiver_filters.reserve(config->max_receivers);
         engine->receiver_next_frames.reserve(config->max_receivers);
+        engine->receiver_room_responses.reserve(config->max_receivers);
         *out_engine = engine;
         return PG_STATUS_OK;
     } catch (...) {
@@ -399,17 +728,28 @@ pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_engine** o
     }
 }
 
-void PG_CALL pg_engine_destroy(pg_engine* engine) { delete engine; }
+void PG_CALL pg_engine_destroy(pg_engine* engine)
+{
+    if (engine == nullptr) {
+        return;
+    }
+    (void)pg_engine_stop_device(engine);
+    delete engine;
+}
 
 pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine)
 {
     if (engine == nullptr) {
         return PG_STATUS_INVALID_ARGUMENT;
     }
+    if (require_stopped_device(engine, "Clearing the scene") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
     engine->emitters.clear();
     engine->receivers.clear();
     engine->receiver_filters.clear();
     engine->receiver_next_frames.clear();
+    engine->receiver_room_responses.clear();
     engine->last_error.clear();
     return PG_STATUS_OK;
 }
@@ -421,6 +761,9 @@ pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmospher
     }
     if (!valid_struct(atmosphere)) {
         return fail(engine, PG_STATUS_ABI_MISMATCH, "Atmosphere structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Changing the atmosphere") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
     }
     const vec3 wind = from_c(atmosphere->uniform_wind_metres_per_second);
     if (!finite(wind) || !std::isfinite(atmosphere->temperature_celsius) || atmosphere->temperature_celsius < -80.0 || atmosphere->temperature_celsius > 80.0 ||
@@ -445,6 +788,9 @@ pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room
     }
     if (!valid_struct(room)) {
         return fail(engine, PG_STATUS_ABI_MISMATCH, "Room structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Changing the acoustic room") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
     }
     const vec3 dimensions = from_c(room->dimensions_metres);
     if (!finite(dimensions) || dimensions.x <= 0.0 || dimensions.y <= 0.0 || dimensions.z <= 0.0) {
@@ -475,22 +821,77 @@ pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_em
     if (!valid_struct(emitter)) {
         return fail(engine, PG_STATUS_ABI_MISMATCH, "Emitter structure version or size is incompatible.");
     }
+    pg_signal_emitter_desc signal{};
+    signal.size = sizeof(signal);
+    signal.version = PG_ABI_VERSION;
+    signal.name_utf8 = emitter->name_utf8;
+    signal.waveform = PG_WAVE_SINE;
+    signal.frequency_hz = emitter->frequency_hz;
+    signal.amplitude = emitter->amplitude;
+    signal.pulse_width = 0.5;
+    signal.gain_linear = emitter->gain_linear;
+    signal.min_distance_metres = emitter->min_distance_metres;
+    signal.motion_path_kind = PG_PATH_LINEAR;
+    signal.keyframes = emitter->keyframes;
+    signal.keyframe_count = emitter->keyframe_count;
+    signal.noise_seed = 1U;
+    signal.enabled = emitter->enabled;
+    return pg_engine_add_signal_emitter(engine, &signal, out_index);
+}
+
+pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index)
+{
+    if (engine == nullptr || emitter == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(emitter)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Signal emitter structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Adding an emitter") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
     if (engine->emitters.size() >= engine->config.max_emitters) {
         return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Emitter capacity exceeded.");
     }
     if (emitter->keyframes == nullptr || emitter->keyframe_count < 2U || emitter->keyframe_count > engine->config.max_keyframes_per_path ||
         !std::isfinite(emitter->frequency_hz) || emitter->frequency_hz <= 0.0 || !std::isfinite(emitter->amplitude) ||
-        !std::isfinite(emitter->gain_linear) || emitter->gain_linear < 0.0 || emitter->min_distance_metres <= 0.0) {
+        !std::isfinite(emitter->gain_linear) || emitter->gain_linear < 0.0 || emitter->min_distance_metres <= 0.0 ||
+        !std::isfinite(emitter->phase_radians) ||
+        emitter->waveform < PG_WAVE_SINE || emitter->waveform > PG_WAVE_TURBULENCE ||
+        emitter->motion_path_kind < PG_PATH_LINEAR || emitter->motion_path_kind > PG_PATH_RECORDED_GESTURE ||
+        emitter->pulse_width <= 0.01 || emitter->pulse_width >= 0.99 || emitter->attack_seconds < 0.0 ||
+        emitter->release_seconds < 0.0 || emitter->nonlinear_drive < 0.0 || emitter->nonlinear_drive > 100.0 ||
+        emitter->additive_partial_count > 1024U || (emitter->additive_partial_count > 0U && emitter->additive_partials == nullptr)) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Emitter frequency, gain, minimum distance, or path is invalid.");
     }
 
     emitter_state state{};
     state.name = safe_name(emitter->name_utf8, "Emitter");
+    state.waveform = emitter->waveform;
+    state.motion_path_kind = emitter->motion_path_kind;
     state.frequency_hz = emitter->frequency_hz;
     state.amplitude = emitter->amplitude;
+    state.phase_radians = emitter->phase_radians;
+    state.pulse_width = emitter->pulse_width;
     state.gain_linear = emitter->gain_linear;
     state.min_distance_metres = emitter->min_distance_metres;
+    state.attack_seconds = emitter->attack_seconds;
+    state.release_seconds = emitter->release_seconds;
+    state.nonlinear_drive = emitter->nonlinear_drive;
+    state.noise_seed = emitter->noise_seed == 0U ? 1U : emitter->noise_seed;
     state.enabled = emitter->enabled != 0U;
+    state.additive_partials.reserve(emitter->additive_partial_count);
+    for (std::uint32_t index = 0; index < emitter->additive_partial_count; ++index) {
+        const auto& partial = emitter->additive_partials[index];
+        if (!std::isfinite(partial.frequency_ratio) || partial.frequency_ratio <= 0.0 ||
+            !std::isfinite(partial.amplitude) || !std::isfinite(partial.phase_radians)) {
+            return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Additive partials must contain finite positive frequency ratios.");
+        }
+        state.additive_partials.push_back({ partial.frequency_ratio, partial.amplitude, partial.phase_radians });
+    }
+    if (state.waveform == PG_WAVE_ADDITIVE && state.additive_partials.empty()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Additive emitters require at least one partial.");
+    }
     state.keyframes.reserve(emitter->keyframe_count);
     for (std::uint32_t index = 0; index < emitter->keyframe_count; ++index) {
         const auto& keyframe = emitter->keyframes[index];
@@ -516,6 +917,9 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
     if (!valid_struct(receiver)) {
         return fail(engine, PG_STATUS_ABI_MISMATCH, "Receiver structure version or size is incompatible.");
     }
+    if (require_stopped_device(engine, "Adding a receiver") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
     if (engine->receivers.size() >= engine->config.max_receivers) {
         return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Receiver capacity exceeded.");
     }
@@ -539,6 +943,7 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
     engine->receivers.push_back(std::move(state));
     engine->receiver_filters.push_back({});
     engine->receiver_next_frames.push_back(0U);
+    engine->receiver_room_responses.push_back(make_room_response_state());
     if (out_index != nullptr) {
         *out_index = static_cast<std::uint32_t>(engine->receivers.size() - 1U);
     }
@@ -554,11 +959,14 @@ pg_status PG_CALL pg_engine_render_receiver_block(
     float* interleaved_stereo,
     size_t interleaved_sample_capacity)
 {
-    if (engine == nullptr || interleaved_stereo == nullptr || sample_rate == 0U) {
+    if (engine == nullptr || interleaved_stereo == nullptr || sample_rate == 0U || sample_rate > maximum_supported_sample_rate) {
         return PG_STATUS_INVALID_ARGUMENT;
     }
     if (receiver_index >= engine->receivers.size()) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver index is out of range.");
+    }
+    if (require_stopped_device(engine, "Block rendering") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
     }
     if (interleaved_sample_capacity < static_cast<std::size_t>(frame_count) * 2U) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Output buffer is too small for requested stereo frames.");
@@ -569,10 +977,11 @@ pg_status PG_CALL pg_engine_render_receiver_block(
 
     if (start_frame == 0U || engine->receiver_next_frames[receiver_index] != start_frame) {
         engine->receiver_filters[receiver_index] = {};
+        reset_room_response(engine->receiver_room_responses[receiver_index], sample_rate);
     }
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
         const double receive_time = static_cast<double>(start_frame + frame) / static_cast<double>(sample_rate);
-        const auto [left, right] = render_frame(*engine, receiver_index, receive_time, sample_rate);
+        const auto [left, right] = render_frame(*engine, receiver_index, receive_time, sample_rate, 1U);
         interleaved_stereo[static_cast<std::size_t>(frame) * 2U] = left;
         interleaved_stereo[(static_cast<std::size_t>(frame) * 2U) + 1U] = right;
     }
@@ -588,10 +997,14 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
     if (!valid_struct(request) || receipt->size < sizeof(pg_render_receipt) || receipt->version != PG_ABI_VERSION) {
         return fail(engine, PG_STATUS_ABI_MISMATCH, "Render request or receipt structure is incompatible.");
     }
+    if (require_stopped_device(engine, "Offline rendering") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
     if (validate_scene(engine) != PG_STATUS_OK) {
         return PG_STATUS_INVALID_SCENE;
     }
     if (request->output_directory_utf8 == nullptr || request->duration_seconds <= 0.0 || request->sample_rate == 0U ||
+        request->sample_rate > maximum_supported_sample_rate ||
         !std::isfinite(request->duration_seconds)) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Render directory, duration, or sample rate is invalid.");
     }
@@ -619,6 +1032,7 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
                 continue;
             }
             engine->receiver_filters[receiver_index] = {};
+            reset_room_response(engine->receiver_room_responses[receiver_index], request->sample_rate);
             for (std::uint64_t frame = 0; frame < frame_count; ++frame) {
                 if (request->cancellation_flag != nullptr && *request->cancellation_flag != 0U) {
                     for (const auto& [staged, unused_final] : staged_files) {
@@ -629,7 +1043,7 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
                     return fail(engine, PG_STATUS_CANCELLED, "Render cancelled before output commit.");
                 }
                 const double receive_time = static_cast<double>(frame) / static_cast<double>(request->sample_rate);
-                const auto [left, right] = render_frame(*engine, receiver_index, receive_time, request->sample_rate);
+                const auto [left, right] = render_frame(*engine, receiver_index, receive_time, request->sample_rate, request->reflection_order);
                 const std::size_t sample_index = static_cast<std::size_t>(frame) * 2U;
                 buffer[sample_index] = left;
                 buffer[sample_index + 1U] = right;
@@ -691,6 +1105,112 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
     } catch (...) {
         return fail(engine, PG_STATUS_INTERNAL_ERROR, "Unknown failure while rendering offline.");
     }
+}
+
+pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_config* config)
+{
+    if (engine == nullptr || config == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(config)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Device configuration structure is incompatible.");
+    }
+    if (engine->device_initialized || device_running(engine)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Real-time preview is already initialized.");
+    }
+    if (validate_scene(engine) != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_SCENE;
+    }
+    if (config->receiver_index >= engine->receivers.size() || !engine->receivers[config->receiver_index].enabled) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Preview receiver index is out of range or disabled.");
+    }
+    if (config->sample_rate < 8000U || config->sample_rate > maximum_supported_sample_rate ||
+        config->period_frames < 32U || config->period_frames > 8192U || config->reflection_order > 8U) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Preview sample rate, period, or reflection order is outside supported bounds.");
+    }
+
+    engine->receiver_filters[config->receiver_index] = {};
+    reset_room_response(engine->receiver_room_responses[config->receiver_index], config->sample_rate);
+    engine->device_sample_rate = config->sample_rate;
+    engine->device_period_frames = config->period_frames;
+    engine->device_receiver_index = config->receiver_index;
+    engine->device_reflection_order = config->reflection_order;
+    engine->device_frame_cursor.store(config->start_frame, std::memory_order_relaxed);
+    engine->device_frames_processed.store(0U, std::memory_order_relaxed);
+    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+
+    ma_device_config device_config = ma_device_config_init(ma_device_type_playback);
+    device_config.sampleRate = config->sample_rate;
+    device_config.periodSizeInFrames = config->period_frames;
+    device_config.performanceProfile = ma_performance_profile_low_latency;
+    device_config.playback.format = ma_format_f32;
+    device_config.playback.channels = 2U;
+    device_config.playback.shareMode = config->exclusive_mode != 0U ? ma_share_mode_exclusive : ma_share_mode_shared;
+    device_config.dataCallback = device_data_callback;
+    device_config.notificationCallback = device_notification_callback;
+    device_config.pUserData = engine;
+
+#if defined(_WIN32)
+    constexpr ma_backend backends[]{ ma_backend_wasapi };
+    const ma_result init_result = ma_device_init_ex(backends, 1U, nullptr, &device_config, &engine->device);
+#else
+    const ma_result init_result = ma_device_init(nullptr, &device_config, &engine->device);
+#endif
+    if (init_result != MA_SUCCESS) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to initialize the audio device: ") + ma_result_description(init_result));
+    }
+    engine->device_initialized = true;
+    engine->device_sample_rate = engine->device.sampleRate;
+    if (engine->device.playback.internalPeriodSizeInFrames > 0U) {
+        engine->device_period_frames = engine->device.playback.internalPeriodSizeInFrames;
+    }
+
+    engine->device_running.store(true, std::memory_order_release);
+    const ma_result start_result = ma_device_start(&engine->device);
+    if (start_result != MA_SUCCESS) {
+        engine->device_running.store(false, std::memory_order_release);
+        ma_device_uninit(&engine->device);
+        engine->device_initialized = false;
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to start the audio device: ") + ma_result_description(start_result));
+    }
+    engine->last_error.clear();
+    return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_stop_device(pg_engine* engine)
+{
+    if (engine == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    engine->device_running.store(false, std::memory_order_release);
+    if (!engine->device_initialized) {
+        return PG_STATUS_OK;
+    }
+
+    const ma_result stop_result = ma_device_stop(&engine->device);
+    ma_device_uninit(&engine->device);
+    engine->device_initialized = false;
+    if (stop_result != MA_SUCCESS && stop_result != MA_DEVICE_NOT_STARTED) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to stop the audio device cleanly: ") + ma_result_description(stop_result));
+    }
+    return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_get_device_status(const pg_engine* engine, pg_device_status* status)
+{
+    if (engine == nullptr || status == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(status)) {
+        return PG_STATUS_ABI_MISMATCH;
+    }
+    status->running = device_running(engine) ? 1U : 0U;
+    status->sample_rate = engine->device_sample_rate;
+    status->period_frames = engine->device_period_frames;
+    status->receiver_index = engine->device_receiver_index;
+    status->frames_processed = engine->device_frames_processed.load(std::memory_order_relaxed);
+    status->callback_count = engine->device_callback_count.load(std::memory_order_relaxed);
+    return PG_STATUS_OK;
 }
 
 double PG_CALL pg_calculate_speed_of_sound(double temperature_celsius)

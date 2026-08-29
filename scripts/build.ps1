@@ -19,10 +19,20 @@ $cmakeDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsof
 $ninjaDirectory = Join-Path $installation 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja'
 $vcvars = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
 $preset = "windows-$($Configuration.ToLowerInvariant())"
+$nativeCache = Join-Path $repositoryRoot "out\native\$($Configuration.ToLowerInvariant())\CMakeCache.txt"
+$refreshConfigure = ''
+if (Test-Path -LiteralPath $nativeCache) {
+    $cachedCompiler = Select-String -LiteralPath $nativeCache -Pattern '^CMAKE_C_COMPILER:FILEPATH=' -ErrorAction SilentlyContinue
+    if ($null -eq $cachedCompiler -or $cachedCompiler.Line.EndsWith('NOTFOUND', [StringComparison]::Ordinal)) {
+        $refreshConfigure = ' --fresh'
+    }
+}
 $originalLocation = Get-Location
 try {
     Set-Location -LiteralPath $repositoryRoot
-    $nativeCommand = "`"$vcvars`" && set `"PATH=$cmakeDirectory;$ninjaDirectory;%PATH%`" && cmake --preset $preset && cmake --build --preset $preset"
+    # Expand the caller PATH before vcvars augments it. Appending %PATH% after
+    # vcvars on the same cmd.exe line expands too early and silently discards cl.exe.
+    $nativeCommand = "set `"PATH=$cmakeDirectory;$ninjaDirectory;%PATH%`" && call `"$vcvars`" && cmake$refreshConfigure --preset $preset && cmake --build --preset $preset"
     & cmd.exe /d /s /c $nativeCommand
     if ($LASTEXITCODE -ne 0) {
         throw "Native $Configuration build failed."

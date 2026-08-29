@@ -8,6 +8,7 @@
     "temperatureCelsius": 20,
     "relativeHumidityPercent": 50,
     "pressureKilopascals": 101.325,
+    "layers": [],
     "windZones": [
       {
         "id": "aaaaaaaa-0000-4000-8000-000000000010",
@@ -16,33 +17,28 @@
           "positionMetres": {
             "x": 0,
             "y": 0,
-            "z": 0,
-            "length": 0
+            "z": 0
           },
           "rotationDegrees": {
             "x": 0,
             "y": 0,
-            "z": 0,
-            "length": 0
+            "z": 0
           },
           "scale": {
             "x": 1,
             "y": 1,
-            "z": 1,
-            "length": 1.7320508075688772
+            "z": 1
           }
         },
         "dimensionsMetres": {
           "x": 80,
           "y": 20,
-          "z": 40,
-          "length": 91.6515138991168
+          "z": 40
         },
         "velocityMetresPerSecond": {
           "x": 0,
           "y": 0,
-          "z": 2,
-          "length": 2
+          "z": 2
         },
         "turbulence": 0.08,
         "noiseSeed": 42
@@ -57,20 +53,17 @@
         "positionMetres": {
           "x": 0,
           "y": 0,
-          "z": 0,
-          "length": 0
+          "z": 0
         },
         "rotationDegrees": {
           "x": 0,
           "y": 0,
-          "z": 0,
-          "length": 0
+          "z": 0
         },
         "scale": {
           "x": 1,
           "y": 1,
-          "z": 1,
-          "length": 1.7320508075688772
+          "z": 1
         }
       },
       "signalGraph": {
@@ -109,6 +102,8 @@
       "gainLinear": 0.8,
       "minDistanceMetres": 1,
       "directivity": 0,
+      "channelMapping": "MonoPoint",
+      "linkedRightEmitterId": null,
       "enabled": true
     }
   ],
@@ -123,8 +118,7 @@
           "positionMetres": {
             "x": -28,
             "y": 1.7,
-            "z": 4,
-            "length": 28.335313656284097
+            "z": 4
           },
           "inTangentMetres": null,
           "outTangentMetres": null
@@ -134,8 +128,7 @@
           "positionMetres": {
             "x": -4,
             "y": 1.7,
-            "z": 1.5,
-            "length": 4.59782557302906
+            "z": 1.5
           },
           "inTangentMetres": null,
           "outTangentMetres": null
@@ -145,8 +138,7 @@
           "positionMetres": {
             "x": 4,
             "y": 1.7,
-            "z": 1.5,
-            "length": 4.59782557302906
+            "z": 1.5
           },
           "inTangentMetres": null,
           "outTangentMetres": null
@@ -156,14 +148,14 @@
           "positionMetres": {
             "x": 28,
             "y": 1.7,
-            "z": 4,
-            "length": 28.335313656284097
+            "z": 4
           },
           "inTangentMetres": null,
           "outTangentMetres": null
         }
       ],
       "rawGesture": [],
+      "velocityProfile": [],
       "loop": false
     }
   ],
@@ -224,28 +216,24 @@
         "positionMetres": {
           "x": 0,
           "y": 4,
-          "z": 0,
-          "length": 4
+          "z": 0
         },
         "rotationDegrees": {
           "x": 0,
           "y": 0,
-          "z": 0,
-          "length": 0
+          "z": 0
         },
         "scale": {
           "x": 1,
           "y": 1,
-          "z": 1,
-          "length": 1.7320508075688772
+          "z": 1
         }
       },
       "materialId": "aaaaaaaa-0000-4000-8000-000000000005",
       "dimensionsMetres": {
         "x": 64,
         "y": 8,
-        "z": 18,
-        "length": 66.96267617113283
+        "z": 18
       },
       "meshAssetHash": null,
       "isDynamic": false,
@@ -262,30 +250,34 @@
         "positionMetres": {
           "x": 0,
           "y": 1.7,
-          "z": 0,
-          "length": 1.7
+          "z": 0
         },
         "rotationDegrees": {
           "x": 0,
           "y": 0,
-          "z": 0,
-          "length": 0
+          "z": 0
         },
         "scale": {
           "x": 1,
           "y": 1,
-          "z": 1,
-          "length": 1.7320508075688772
+          "z": 1
         }
       },
       "spacingMetres": 0.18,
       "angleDegrees": 0,
       "headRadiusMetres": 0.09,
+      "headDimensionsMetres": {
+        "x": 0.18,
+        "y": 0.22,
+        "z": 0.24
+      },
       "hrtfMode": "Parametric",
       "sofaAssetHash": null,
       "polarPattern": "Omni",
       "sensitivityDb": 0,
       "selfNoiseDbSpl": 0,
+      "leftCapsule": null,
+      "rightCapsule": null,
       "motionPathId": null,
       "enabled": true
     },
@@ -297,30 +289,34 @@
         "positionMetres": {
           "x": 0,
           "y": 1.7,
-          "z": -1,
-          "length": 1.972308292331602
+          "z": -1
         },
         "rotationDegrees": {
           "x": 0,
           "y": 0,
-          "z": 0,
-          "length": 0
+          "z": 0
         },
         "scale": {
           "x": 1,
           "y": 1,
-          "z": 1,
-          "length": 1.7320508075688772
+          "z": 1
         }
       },
       "spacingMetres": 0.17,
       "angleDegrees": 110,
       "headRadiusMetres": 0.09,
+      "headDimensionsMetres": {
+        "x": 0.18,
+        "y": 0.22,
+        "z": 0.24
+      },
       "hrtfMode": "Parametric",
       "sofaAssetHash": null,
       "polarPattern": "Cardioid",
       "sensitivityDb": -6,
       "selfNoiseDbSpl": 0,
+      "leftCapsule": null,
+      "rightCapsule": null,
       "motionPathId": null,
       "enabled": true
     }
@@ -356,11 +352,12 @@
       "reflectionOrder": 1,
       "rayCount": 1024,
       "impulseResponseSeconds": 2,
+      "atmosphereIntegrationSegments": 1,
       "seed": 42
     }
   ],
   "captureTakes": [],
   "assets": [],
-  "createdAtUtc": "2026-08-29T04:45:12.7505166+00:00",
-  "updatedAtUtc": "2026-08-29T04:45:12.7505389+00:00"
+  "createdAtUtc": "2026-08-29T05:19:20.7920816+00:00",
+  "updatedAtUtc": "2026-08-29T05:19:20.7921128+00:00"
 }

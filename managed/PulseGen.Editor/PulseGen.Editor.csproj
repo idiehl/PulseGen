@@ -13,5 +13,6 @@
   <ItemGroup>
     <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
     <ProjectReference Include="..\PulseGen.Engine.Client\PulseGen.Engine.Client.csproj" />
+    <ProjectReference Include="..\PulseGen.ModelHost.Client\PulseGen.ModelHost.Client.csproj" />
   </ItemGroup>
 </Project>

@@ -16,6 +16,12 @@ jobs:
         with:
           python-version: '3.11'
       - uses: lukka/get-cmake@latest
+      - name: Prepare isolated ModelHost test boundary
+        shell: pwsh
+        run: |
+          python -m pip install numpy==2.0.2
+          "PULSEGEN_MODELHOST_PYTHON=$((Get-Command python).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PULSEGEN_MODELHOST_ROOT=$((Resolve-Path modelhost).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Restore managed projects
         run: dotnet restore PulseGen.sln
       - name: Build managed projects
@@ -30,7 +36,6 @@ jobs:
         run: ctest --preset windows-release
       - name: Validate model-host manifests
         run: |
-          python -m pip install numpy==2.0.2
           python -m unittest discover -s modelhost/tests -v
       - name: Verify managed/native render boundary
         shell: pwsh

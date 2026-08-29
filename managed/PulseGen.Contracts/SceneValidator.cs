@@ -1,6 +1,12 @@
 namespace PulseGen.Contracts;
 
-public sealed record ValidationIssue(string Path, string Message);
+public enum ValidationSeverity
+{
+    Warning,
+    Error
+}
+
+public sealed record ValidationIssue(string Path, string Message, ValidationSeverity Severity = ValidationSeverity.Error);
 
 public static class SceneValidator
 {
@@ -48,6 +54,11 @@ public static class SceneValidator
             }
 
             ValidateSignalGraph(emitter, issues);
+            if (emitter.ChannelMapping == SourceChannelMapping.LinkedDualEmitters &&
+                (emitter.LinkedRightEmitterId is null || !scene.Emitters.Any(candidate => candidate.Id == emitter.LinkedRightEmitterId)))
+            {
+                issues.Add(new($"emitters/{emitter.Id}/linkedRightEmitterId", "Linked dual-emitter mapping requires a valid right emitter."));
+            }
         }
 
         foreach (var path in scene.MotionPaths)
@@ -64,6 +75,29 @@ public static class SceneValidator
                 {
                     issues.Add(new($"motionPaths/{path.Id}/keyframes/{index}/timeSeconds", "Keyframe times must increase strictly."));
                 }
+                else
+                {
+                    var distance = (path.Keyframes[index].PositionMetres - path.Keyframes[index - 1].PositionMetres).Length;
+                    var elapsed = path.Keyframes[index].TimeSeconds - path.Keyframes[index - 1].TimeSeconds;
+                    var speed = distance / elapsed;
+                    var localSoundSpeed = SpeedOfSound(scene.Atmosphere.TemperatureCelsius);
+                    if (speed >= localSoundSpeed)
+                    {
+                        issues.Add(new($"motionPaths/{path.Id}/keyframes/{index}", $"Segment speed {speed:0.##} m/s is sonic or supersonic and cannot be rendered by the bounded retarded-time solver."));
+                    }
+                    else if (speed >= 0.8 * localSoundSpeed)
+                    {
+                        issues.Add(new($"motionPaths/{path.Id}/keyframes/{index}", $"Segment speed {speed:0.##} m/s is near sonic; final render will clamp solver discontinuities.", ValidationSeverity.Warning));
+                    }
+                }
+            }
+
+            for (var index = 1; index < path.VelocityProfile.Count; index++)
+            {
+                if (path.VelocityProfile[index].TimeSeconds <= path.VelocityProfile[index - 1].TimeSeconds || path.VelocityProfile[index].SpeedMetresPerSecond < 0)
+                {
+                    issues.Add(new($"motionPaths/{path.Id}/velocityProfile/{index}", "Velocity controls require increasing times and non-negative speeds."));
+                }
             }
         }
 
@@ -77,6 +111,15 @@ public static class SceneValidator
             if (rig.Kind == ReceiverRigKind.BinauralHead && rig.HeadRadiusMetres is < 0.04 or > 0.2)
             {
                 issues.Add(new($"receiverRigs/{rig.Id}/headRadiusMetres", "Binaural head radius is outside the bounded parametric range."));
+            }
+            if (rig.Kind == ReceiverRigKind.BinauralHead && rig.HrtfMode == HrtfMode.ExactSofa && string.IsNullOrWhiteSpace(rig.SofaAssetHash))
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/sofaAssetHash", "Exact SOFA mode requires an imported dataset asset."));
+            }
+            if (rig.Kind == ReceiverRigKind.StereoMicrophone)
+            {
+                ValidateCapsule(rig.LeftCapsule, $"receiverRigs/{rig.Id}/leftCapsule", issues);
+                ValidateCapsule(rig.RightCapsule, $"receiverRigs/{rig.Id}/rightCapsule", issues);
             }
 
             if (rig.MotionPathId is { } pathId && !pathIds.Contains(pathId))
@@ -101,6 +144,10 @@ public static class SceneValidator
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/bufferFrames", "Buffer size must be between 64 and 8192 frames."));
             }
+            if (profile.AtmosphereIntegrationSegments is < 1 or > 4096)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/atmosphereIntegrationSegments", "Atmosphere integration segment count must be in 1..4096."));
+            }
         }
 
         return issues;
@@ -109,7 +156,7 @@ public static class SceneValidator
     public static void EnsureValid(SceneDocument scene)
     {
         var issues = Validate(scene);
-        if (issues.Count > 0)
+        if (issues.Any(issue => issue.Severity == ValidationSeverity.Error))
         {
             throw new SceneValidationException(issues);
         }
@@ -142,6 +189,21 @@ public static class SceneValidator
             if (zone.Turbulence is < 0 or > 1)
             {
                 issues.Add(new($"atmosphere/windZones/{zone.Id}/turbulence", "Turbulence must be normalized to 0..1."));
+            }
+        }
+
+        var orderedLayers = atmosphere.Layers.OrderBy(layer => layer.BaseAltitudeMetres).ToList();
+        for (var index = 0; index < orderedLayers.Count; index++)
+        {
+            var layer = orderedLayers[index];
+            if (layer.TopAltitudeMetres <= layer.BaseAltitudeMetres || layer.TemperatureCelsius is < -80 or > 80 ||
+                layer.RelativeHumidityPercent is < 0 or > 100 || layer.PressureKilopascals is < 20 or > 120)
+            {
+                issues.Add(new($"atmosphere/layers/{index}", "Atmosphere layers require increasing altitude and bounded temperature, humidity, and pressure."));
+            }
+            if (index > 0 && layer.BaseAltitudeMetres < orderedLayers[index - 1].TopAltitudeMetres)
+            {
+                issues.Add(new($"atmosphere/layers/{index}", "Atmosphere layers may touch but may not overlap."));
             }
         }
     }
@@ -205,6 +267,20 @@ public static class SceneValidator
         }
     }
 
+    private static void ValidateCapsule(MicrophoneCapsule? capsule, string path, List<ValidationIssue> issues)
+    {
+        if (capsule is null)
+        {
+            return;
+        }
+        if (capsule.ResponseCentresHz.Length == 0 || capsule.ResponseCentresHz.Length != capsule.ResponseDb.Length ||
+            capsule.ResponseCentresHz.Any(frequency => frequency <= 0 || !double.IsFinite(frequency)) ||
+            capsule.ResponseDb.Any(value => !double.IsFinite(value)))
+        {
+            issues.Add(new(path, "Microphone response frequency and gain arrays must be finite, non-empty, and equal length."));
+        }
+    }
+
     public static double SpeedOfSound(double temperatureCelsius) => 331.3 + (0.606 * temperatureCelsius);
 }
 
@@ -213,4 +289,3 @@ public sealed class SceneValidationException(IReadOnlyList<ValidationIssue> issu
 {
     public IReadOnlyList<ValidationIssue> Issues { get; } = issues;
 }
-

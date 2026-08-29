@@ -12,6 +12,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.RenderCli", "manag
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Workspace", "managed\PulseGen.Workspace\PulseGen.Workspace.csproj", "{0BE1F348-D8EC-44D3-9430-485627F4AE09}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.ModelHost.Client", "managed\PulseGen.ModelHost.Client\PulseGen.ModelHost.Client.csproj", "{6E1B66C6-B8F8-4A87-B887-FE2C5ACB986C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.ModelHost.Client.Tests", "managed\PulseGen.ModelHost.Client.Tests\PulseGen.ModelHost.Client.Tests.csproj", "{BF859976-4012-4779-AF77-7EB270F68337}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Workspace.Tests", "managed\PulseGen.Workspace.Tests\PulseGen.Workspace.Tests.csproj", "{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Contracts.Tests", "managed\PulseGen.Contracts.Tests\PulseGen.Contracts.Tests.csproj", "{A4C9781E-D383-48FC-90AD-931D252DD6EB}"
@@ -42,6 +46,14 @@ Global
 		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0BE1F348-D8EC-44D3-9430-485627F4AE09}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6E1B66C6-B8F8-4A87-B887-FE2C5ACB986C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6E1B66C6-B8F8-4A87-B887-FE2C5ACB986C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6E1B66C6-B8F8-4A87-B887-FE2C5ACB986C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6E1B66C6-B8F8-4A87-B887-FE2C5ACB986C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BF859976-4012-4779-AF77-7EB270F68337}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BF859976-4012-4779-AF77-7EB270F68337}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BF859976-4012-4779-AF77-7EB270F68337}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BF859976-4012-4779-AF77-7EB270F68337}.Release|Any CPU.Build.0 = Release|Any CPU
 		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{976796DC-DCD4-4A8E-AB1A-BFE03BB3D887}.Release|Any CPU.ActiveCfg = Release|Any CPU
