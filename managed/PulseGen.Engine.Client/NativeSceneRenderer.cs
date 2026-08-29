@@ -1,5 +1,8 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using PulseGen.Contracts;
 
 namespace PulseGen.Engine.Client;
@@ -13,7 +16,8 @@ public readonly record struct RenderSummary(
     ulong FramesRendered,
     uint SampleRate,
     double SpeedOfSoundMetresPerSecond,
-    ulong DeterministicSeed);
+    ulong DeterministicSeed,
+    string RenderReceiptPath);
 
 public readonly record struct PreviewDeviceStatus(
     bool Running,
@@ -54,13 +58,19 @@ public static unsafe class NativeSceneRenderer
                     Size = (uint)sizeof(NativeRenderRequest), Version = AbiVersion,
                     OutputDirectoryUtf8 = outputPointer, FilePrefixUtf8 = prefixPointer,
                     DurationSeconds = scene.Timeline.DurationSeconds,
-                    SampleRate = (uint)profile.SampleRate, SampleFormat = 2,
+                    SampleRate = (uint)profile.SampleRate,
+                    SampleFormat = profile.SampleFormat switch
+                    {
+                        RenderSampleFormat.Pcm16 => 0,
+                        RenderSampleFormat.Pcm24 => 1,
+                        _ => 2
+                    },
                     Quality = profile.Quality switch { RenderQuality.Draft => 0, RenderQuality.Final => 2, _ => 1 },
                     ReflectionOrder = (uint)profile.ReflectionOrder, Seed = (uint)profile.Seed
                 };
                 var receipt = new NativeRenderReceipt { Size = (uint)sizeof(NativeRenderReceipt), Version = AbiVersion };
                 Check(Native.pg_engine_render_offline(engine, &request, &receipt), engine, "offline render");
-                return new(
+                var summary = new RenderSummary(
                     receipt.FilesWritten,
                     receipt.PeakLeft,
                     receipt.PeakRight,
@@ -69,7 +79,10 @@ public static unsafe class NativeSceneRenderer
                     receipt.FramesRendered,
                     receipt.SampleRate,
                     receipt.SpeedOfSoundMetresPerSecond,
-                    receipt.DeterministicSeed);
+                    receipt.DeterministicSeed,
+                    string.Empty);
+                var receiptPath = WriteRenderReceipt(scene, profile, outputDirectory, summary);
+                return summary with { RenderReceiptPath = receiptPath };
             }
             finally
             {
@@ -82,6 +95,131 @@ public static unsafe class NativeSceneRenderer
             Native.pg_engine_destroy(engine);
         }
     }
+
+    private static string WriteRenderReceipt(
+        SceneDocument scene,
+        RenderProfile profile,
+        string outputDirectory,
+        RenderSummary summary)
+    {
+        var output = Path.GetFullPath(outputDirectory);
+        var prefix = SafePrefix(scene.Name);
+        var takeFiles = scene.ReceiverRigs.Where(receiver => receiver.Enabled)
+            .Select(receiver => Path.Combine(output, $"{prefix}_{SafeNativeName(receiver.Name, "Receiver")}.wav"))
+            .Order(StringComparer.Ordinal)
+            .Select(path =>
+            {
+                if (!File.Exists(path))
+                {
+                    throw new FileNotFoundException("The native engine did not produce an expected isolated receiver take.", path);
+                }
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
+                return new RenderedTakeIdentity(
+                    Path.GetFileName(path),
+                    stream.Length,
+                    Convert.ToHexStringLower(SHA256.HashData(stream)));
+            })
+            .ToArray();
+        if (takeFiles.Length != summary.FilesWritten)
+        {
+            throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
+        }
+        var document = new RenderReceiptDocument(
+            1,
+            EngineVersion,
+            AbiVersion,
+            scene.ProjectId,
+            scene.Name,
+            ProjectStore.ComputeSceneRevisionSha256(scene),
+            scene.UpdatedAtUtc,
+            profile.Id,
+            profile.Name,
+            profile.Quality,
+            profile.SampleRate,
+            profile.SampleFormat,
+            profile.Dither,
+            profile.ReflectionOrder,
+            profile.RayCount,
+            profile.ImpulseResponseSeconds,
+            profile.AtmosphereIntegrationSegments,
+            summary.DeterministicSeed,
+            summary.FramesRendered,
+            summary.FilesWritten,
+            summary.PeakLeft,
+            summary.PeakRight,
+            summary.RmsLeft,
+            summary.RmsRight,
+            summary.SpeedOfSoundMetresPerSecond,
+            RuntimeInformation.OSDescription,
+            RuntimeInformation.ProcessArchitecture.ToString(),
+            RuntimeInformation.FrameworkDescription,
+            [
+                new("PulseGen.Engine", EngineVersion, "native sample renderer"),
+                new("miniaudio", "0.11.25", "WASAPI device adapter")
+            ],
+            [],
+            takeFiles);
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter() }
+        };
+        var destination = Path.Combine(output, $"{prefix}-render-receipt.json");
+        var temporary = destination + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(document, jsonOptions);
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                stream.Write(bytes);
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, destination, overwrite: true);
+            return destination;
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    private sealed record RenderDependency(string Name, string Version, string Role);
+    private sealed record RenderedTakeIdentity(string FileName, long SizeBytes, string Sha256);
+    private sealed record RenderReceiptDocument(
+        int ReceiptVersion,
+        string EngineVersion,
+        uint NativeAbiVersion,
+        Guid ProjectId,
+        string SceneName,
+        string SceneRevisionSha256,
+        DateTimeOffset SceneUpdatedAtUtc,
+        Guid RenderProfileId,
+        string RenderProfileName,
+        RenderQuality Quality,
+        int SampleRate,
+        RenderSampleFormat SampleFormat,
+        DitherMode Dither,
+        int ReflectionOrder,
+        int RayCount,
+        double ImpulseResponseSeconds,
+        int AtmosphereIntegrationSegments,
+        ulong Seed,
+        ulong FramesRendered,
+        uint FilesWritten,
+        double PeakLeft,
+        double PeakRight,
+        double RmsLeft,
+        double RmsRight,
+        double SpeedOfSoundMetresPerSecond,
+        string OperatingSystem,
+        string ProcessArchitecture,
+        string ManagedRuntime,
+        IReadOnlyList<RenderDependency> Dependencies,
+        IReadOnlyList<string> ModelPacks,
+        IReadOnlyList<RenderedTakeIdentity> Takes);
 
     public static PreviewSession StartPreview(
         SceneDocument scene,
@@ -356,7 +494,15 @@ public static unsafe class NativeSceneRenderer
     private static string SafePrefix(string value)
     {
         var safe = new string(value.Select(character => char.IsAsciiLetterOrDigit(character) ? character : '_').ToArray());
-        return string.IsNullOrWhiteSpace(safe) ? "PulseGen" : safe;
+        safe = string.IsNullOrWhiteSpace(safe) ? "PulseGen" : safe;
+        return safe.Length > 63 ? safe[..63] : safe;
+    }
+
+    private static string SafeNativeName(string value, string fallback)
+    {
+        var safe = new string((string.IsNullOrEmpty(value) ? fallback : value).Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '-' or '_' ? character : '_').ToArray());
+        return safe.Length > 63 ? safe[..63] : safe;
     }
 
     private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

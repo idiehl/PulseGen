@@ -11,8 +11,10 @@
     <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.20" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\PulseGen.Atlas.Client\PulseGen.Atlas.Client.csproj" />
     <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
     <ProjectReference Include="..\PulseGen.Engine.Client\PulseGen.Engine.Client.csproj" />
     <ProjectReference Include="..\PulseGen.ModelHost.Client\PulseGen.ModelHost.Client.csproj" />
+    <ProjectReference Include="..\PulseGen.Workspace\PulseGen.Workspace.csproj" />
   </ItemGroup>
 </Project>

@@ -28,6 +28,17 @@ if (arguments.TryGetValue("waveform", out var waveformText))
     scene = scene with { Emitters = emitters };
 }
 
+if (arguments.TryGetValue("sample-format", out var sampleFormatText))
+{
+    var format = Enum.Parse<RenderSampleFormat>(sampleFormatText, ignoreCase: true);
+    var profile = scene.RenderProfiles[0] with
+    {
+        SampleFormat = format,
+        Dither = format == RenderSampleFormat.Float32 ? DitherMode.None : DitherMode.Tpdf
+    };
+    scene = scene with { RenderProfiles = [profile, .. scene.RenderProfiles.Skip(1)] };
+}
+
 if (arguments.TryGetValue("write-project", out var destination))
 {
     var hash = await ProjectStore.SaveAsync(scene, destination);
@@ -51,7 +62,8 @@ if (!arguments.ContainsKey("no-render"))
         receipt.RmsLeft,
         receipt.RmsRight,
         receipt.SpeedOfSoundMetresPerSecond,
-        receipt.DeterministicSeed
+        receipt.DeterministicSeed,
+        receipt.RenderReceiptPath
     }));
 }
 

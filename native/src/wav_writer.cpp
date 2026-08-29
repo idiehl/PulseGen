@@ -91,15 +91,17 @@ bool write_stereo_wav(
 
     auto random_state = dither_seed == 0U ? 1U : dither_seed;
     for (const float input : interleaved) {
-        const double sample = std::clamp(static_cast<double>(input), -1.0, 1.0);
+        const double finite_sample = std::isfinite(input) ? static_cast<double>(input) : 0.0;
         if (format == PG_SAMPLE_FLOAT32) {
-            const std::uint32_t raw = std::bit_cast<std::uint32_t>(static_cast<float>(sample));
+            const std::uint32_t raw = std::bit_cast<std::uint32_t>(static_cast<float>(finite_sample));
             write_little_endian(stream, raw);
         } else if (format == PG_SAMPLE_PCM16) {
+            const double sample = std::clamp(finite_sample, -1.0, 1.0);
             const double dither = (uniform_signed(random_state) + uniform_signed(random_state));
             const auto quantized = static_cast<std::int16_t>(std::clamp(std::llround((sample * 32767.0) + dither), -32768LL, 32767LL));
             write_little_endian(stream, quantized);
         } else {
+            const double sample = std::clamp(finite_sample, -1.0, 1.0);
             const double dither = (uniform_signed(random_state) + uniform_signed(random_state));
             const auto quantized = static_cast<std::int32_t>(std::clamp(std::llround((sample * 8388607.0) + dither), -8388608LL, 8388607LL));
             const std::uint32_t raw = static_cast<std::uint32_t>(quantized);
@@ -121,4 +123,3 @@ bool write_stereo_wav(
 }
 
 } // namespace pulsegen
-

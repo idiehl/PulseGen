@@ -2,10 +2,13 @@ using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using PulseGen.Atlas.Client;
 using PulseGen.Contracts;
 using PulseGen.Engine.Client;
 using PulseGen.ModelHost.Client;
+using PulseGen.Workspace;
 using System.Globalization;
+using System.Text.Json;
 
 namespace PulseGen.Editor;
 
@@ -16,9 +19,22 @@ public sealed partial class MainWindow : Window
     private DateTimeOffset previewStarted;
     private int selectedKeyframeIndex;
     private bool initializingControls = true;
+    private bool sceneDirty;
     private string? lastRenderDirectory;
+    private string? lastProjectDirectory;
     private CancellationTokenSource? analysisCancellation;
+    private CancellationTokenSource? syncCancellation;
     private NativeSceneRenderer.PreviewSession? audioPreview;
+    private readonly HttpClient atlasHttp = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        AutomaticDecompression = System.Net.DecompressionMethods.All
+    }) { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly WorkspaceIndex workspaceIndex = WorkspaceIndex.CreateDefault();
+    private AtlasOidcClient? atlasIdentity;
+    private AtlasLibraryClient? atlasLibrary;
+    private Guid? atlasBaseRevisionId;
+    private string? atlasBaseETag;
 
     public MainWindow()
     {
@@ -29,6 +45,7 @@ public sealed partial class MainWindow : Window
         Viewport.SceneEdited += (_, message) =>
         {
             StopPreviewTransport();
+            sceneDirty = true;
             SelectKeyframe(Viewport.SelectedKeyframeIndex);
             StatusText.Text = message;
             GestureButton.Content = "●  Record gesture";
@@ -101,6 +118,8 @@ public sealed partial class MainWindow : Window
             scene = scene with { UpdatedAtUtc = DateTimeOffset.UtcNow };
             Viewport.Scene = scene;
             var hash = await ProjectStore.SaveAsync(scene, projectDirectory);
+            lastProjectDirectory = projectDirectory;
+            sceneDirty = false;
             StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}";
         }
         catch (Exception exception)
@@ -108,6 +127,330 @@ public sealed partial class MainWindow : Window
             StatusText.Text = $"Project save failed: {exception.Message}";
         }
     }
+
+    private async void OnAtlasClicked(object? sender, RoutedEventArgs e)
+    {
+        AtlasButton.IsEnabled = false;
+        try
+        {
+            EnsureAtlasClients();
+            if (atlasIdentity!.HasMemorySession)
+            {
+                StatusText.Text = "Revoking the Atlas refresh token…";
+                try
+                {
+                    await atlasIdentity.RevokeAndForgetAsync();
+                    StatusText.Text = "Disconnected from Atlas · local credential removed";
+                }
+                catch (Exception exception)
+                {
+                    StatusText.Text = $"Disconnected locally · remote revocation could not be confirmed: {exception.Message}";
+                }
+                AtlasButton.Content = "◇  Atlas sign in";
+                AtlasStateText.Text = "PRIVATE · LOCAL ONLY";
+                return;
+            }
+
+            StatusText.Text = "Restoring the protected Atlas session…";
+            if (!await atlasIdentity.TryRestoreAsync())
+            {
+                StatusText.Text = "Complete sign-in in your browser; PulseGen is listening only on 127.0.0.1…";
+                _ = await atlasIdentity.SignInAsync();
+            }
+            var summary = await atlasLibrary!.GetSummaryAsync();
+            AtlasButton.Content = "◇  Disconnect";
+            AtlasStateText.Text = $"ATLAS · {summary.Projects} PROJECTS · {summary.Assets} ASSETS";
+            StatusText.Text = "Atlas connected · source audio remains local until you explicitly sync it";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Atlas sign-in unavailable: {exception.Message}";
+        }
+        finally
+        {
+            AtlasButton.IsEnabled = true;
+        }
+    }
+
+    private async void OnSyncClicked(object? sender, RoutedEventArgs e)
+    {
+        if (syncCancellation is not null)
+        {
+            syncCancellation.Cancel();
+            StatusText.Text = "Atlas sync cancellation requested · the server session remains resumable";
+            return;
+        }
+        if (lastProjectDirectory is null)
+        {
+            StatusText.Text = "Save this scene as a .pulseproj before explicitly syncing it";
+            return;
+        }
+        if (sceneDirty)
+        {
+            StatusText.Text = "Save the current scene changes before syncing their immutable manifest";
+            return;
+        }
+
+        syncCancellation = new CancellationTokenSource();
+        var cancellationToken = syncCancellation.Token;
+        SyncButton.Content = "■  Cancel sync";
+        AtlasButton.IsEnabled = false;
+        long? journalId = null;
+        try
+        {
+            EnsureAtlasClients();
+            _ = await atlasIdentity!.GetAccessTokenAsync(cancellationToken);
+            await workspaceIndex.InitializeAsync(cancellationToken);
+            if (atlasBaseRevisionId is null)
+            {
+                var state = await workspaceIndex.GetProjectSyncStateAsync(scene.ProjectId, cancellationToken);
+                atlasBaseRevisionId = state?.HeadRevisionId;
+                atlasBaseETag = state?.HeadETag;
+            }
+
+            var manifestPath = ProjectStore.ResolveManifestPath(lastProjectDirectory);
+            var localHash = await ProjectStore.ComputeSha256Async(manifestPath, cancellationToken);
+            var manifest = new FileInfo(manifestPath);
+            const string operation = "project.revision.create";
+            const string mediaType = "application/vnd.atlas.pulse-project+json";
+            AtlasAssetResult? asset = null;
+            AtlasUploadLease? lease = null;
+            AtlasSyncJournalPayload? payload = null;
+            var recoverable = await workspaceIndex.GetLatestRecoverableSyncAsync(scene.ProjectId, operation, cancellationToken);
+            if (recoverable is not null && TryReadSyncPayload(recoverable.PayloadJson, out var recovered) &&
+                SyncPayloadMatches(recovered, recoverable.BaseRevisionId, atlasBaseRevisionId, manifest, localHash))
+            {
+                payload = recovered;
+                journalId = recoverable.Id;
+                await workspaceIndex.MarkSyncStateAsync(journalId.Value, "inflight", cancellationToken);
+                if (payload.AssetId is not null)
+                {
+                    asset = new(payload.AssetId.Value, payload.ManifestSha256, payload.SizeBytes);
+                    StatusText.Text = "Resuming Atlas sync from the verified uploaded manifest…";
+                }
+                else if (payload.SessionId is not null)
+                {
+                    var resumeSeed = new AtlasUploadLease(
+                        payload.SessionId.Value,
+                        null,
+                        payload.ExpiresAtUtc ?? DateTimeOffset.MinValue,
+                        payload.PartSizeBytes,
+                        [],
+                        payload.ManifestPath,
+                        payload.ManifestSha256,
+                        payload.SizeBytes,
+                        Path.GetFileName(payload.ManifestPath),
+                        payload.MediaType,
+                        payload.LastWriteTimeUtc);
+                    try
+                    {
+                        lease = await atlasLibrary!.ResumeUploadAsync(resumeSeed, cancellationToken);
+                        StatusText.Text = "Resuming the interrupted Atlas multipart upload…";
+                    }
+                    catch (AtlasProtocolException exception) when (exception.StatusCode is 409 or 410)
+                    {
+                        await workspaceIndex.MarkSyncStateAsync(journalId.Value, "failed", cancellationToken);
+                        journalId = null;
+                        payload = null;
+                    }
+                }
+                else
+                {
+                    await workspaceIndex.MarkSyncStateAsync(journalId.Value, "failed", cancellationToken);
+                    journalId = null;
+                    payload = null;
+                }
+            }
+            else if (recoverable is not null)
+            {
+                await workspaceIndex.MarkSyncStateAsync(recoverable.Id, "failed", cancellationToken);
+            }
+
+            if (journalId is null)
+            {
+                payload = new(
+                    lastProjectDirectory,
+                    manifestPath,
+                    localHash,
+                    manifest.Length,
+                    manifest.LastWriteTimeUtc,
+                    mediaType,
+                    null,
+                    0,
+                    null,
+                    null);
+                journalId = await workspaceIndex.EnqueueSyncAsync(
+                    scene.ProjectId,
+                    atlasBaseRevisionId?.ToString("D"),
+                    operation,
+                    payload,
+                    cancellationToken);
+                await workspaceIndex.MarkSyncStateAsync(journalId.Value, "inflight", cancellationToken);
+            }
+
+            var progress = new Progress<(int Completed, int Total)>(value =>
+                StatusText.Text = $"Atlas upload · part {value.Completed} of {value.Total}");
+            if (asset is null)
+            {
+                if (lease is null)
+                {
+                    StatusText.Text = "Uploading the content-addressed project manifest…";
+                    lease = await atlasLibrary!.BeginUploadAsync(manifestPath, mediaType, cancellationToken);
+                    payload = payload! with
+                    {
+                        SessionId = lease.SessionId == Guid.Empty ? null : lease.SessionId,
+                        PartSizeBytes = lease.PartSizeBytes,
+                        ExpiresAtUtc = lease.ExpiresAtUtc
+                    };
+                    await workspaceIndex.UpdateSyncPayloadAsync(journalId.Value, payload, cancellationToken);
+                }
+                var completedParts = await atlasLibrary!.UploadPartsAsync(lease, progress, cancellationToken);
+                asset = await atlasLibrary.CompleteUploadAsync(lease, completedParts, cancellationToken);
+                payload = payload! with { AssetId = asset.AssetId };
+                await workspaceIndex.UpdateSyncPayloadAsync(journalId.Value, payload, cancellationToken);
+            }
+            var revision = await atlasLibrary!.CreateProjectRevisionAsync(
+                scene.ProjectId,
+                scene.Name,
+                asset.AssetId,
+                atlasBaseRevisionId,
+                atlasBaseETag,
+                $"PulseGen desktop sync {DateTimeOffset.UtcNow:O}",
+                cancellationToken);
+            if (revision.IsConflictBranch)
+            {
+                await workspaceIndex.MarkSyncStateAsync(journalId.Value, "conflict", cancellationToken);
+                StatusText.Text = $"Atlas preserved both versions · created {revision.BranchName}";
+            }
+            else
+            {
+                atlasBaseRevisionId = revision.RevisionId;
+                atlasBaseETag = revision.ETag;
+                await workspaceIndex.UpsertProjectSyncStateAsync(scene.ProjectId, revision.RevisionId, revision.ETag, cancellationToken);
+                await workspaceIndex.MarkSyncStateAsync(journalId.Value, "complete", cancellationToken);
+                AtlasStateText.Text = $"ATLAS · SYNCED {localHash[..10]}…";
+                StatusText.Text = $"Atlas revision committed · {revision.RevisionId:D}";
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (journalId is not null)
+            {
+                await TryMarkSyncStateAsync(journalId.Value, "pending");
+            }
+            StatusText.Text = "Atlas sync cancelled · local project and remote immutable parts were preserved";
+        }
+        catch (AtlasProtocolException exception) when (exception.Code == "not_signed_in")
+        {
+            if (journalId is not null)
+            {
+                await TryMarkSyncStateAsync(journalId.Value, "failed");
+            }
+            StatusText.Text = "Sign in to Atlas before syncing this project";
+        }
+        catch (Exception exception)
+        {
+            if (journalId is not null)
+            {
+                await TryMarkSyncStateAsync(journalId.Value, "failed");
+            }
+            StatusText.Text = $"Atlas sync failed without overwriting either revision: {exception.Message}";
+        }
+        finally
+        {
+            syncCancellation.Dispose();
+            syncCancellation = null;
+            SyncButton.Content = "⇧  Sync project";
+            AtlasButton.IsEnabled = true;
+        }
+    }
+
+    private static bool TryReadSyncPayload(string json, out AtlasSyncJournalPayload payload)
+    {
+        try
+        {
+            payload = JsonSerializer.Deserialize<AtlasSyncJournalPayload>(json)
+                ?? throw new JsonException("Empty sync payload.");
+            return true;
+        }
+        catch (JsonException)
+        {
+            payload = null!;
+            return false;
+        }
+    }
+
+    private bool SyncPayloadMatches(
+        AtlasSyncJournalPayload payload,
+        string? journalBaseRevisionId,
+        Guid? currentBaseRevisionId,
+        FileInfo manifest,
+        string manifestSha256)
+    {
+        try
+        {
+            var expectedBase = currentBaseRevisionId?.ToString("D");
+            return string.Equals(journalBaseRevisionId, expectedBase, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetFullPath(payload.ProjectPath), Path.GetFullPath(lastProjectDirectory!), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(Path.GetFullPath(payload.ManifestPath), manifest.FullName, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(payload.ManifestSha256, manifestSha256, StringComparison.Ordinal) &&
+                payload.SizeBytes == manifest.Length && payload.LastWriteTimeUtc == manifest.LastWriteTimeUtc &&
+                payload.MediaType == "application/vnd.atlas.pulse-project+json" &&
+                (payload.SessionId is null || payload.SessionId != Guid.Empty) &&
+                (payload.AssetId is null || payload.AssetId != Guid.Empty) &&
+                payload.PartSizeBytes >= 0;
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
+    private void EnsureAtlasClients()
+    {
+        if (atlasIdentity is not null)
+        {
+            return;
+        }
+        var options = new AtlasClientOptions
+        {
+            IdentityOrigin = ReadOrigin("PULSEGEN_IDENTITY_ORIGIN", "https://identity.atlasuniversalis.com"),
+            LibraryOrigin = ReadOrigin("PULSEGEN_LIBRARY_ORIGIN", "https://pulse.atlasuniversalis.com")
+        }.EnsureValid();
+        var credentials = new WindowsCredentialRefreshTokenStore(options.IdentityOrigin, options.ClientId);
+        atlasIdentity = new AtlasOidcClient(options, atlasHttp, credentials);
+        atlasLibrary = new AtlasLibraryClient(atlasHttp, atlasIdentity, options);
+    }
+
+    private static Uri ReadOrigin(string variableName, string fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(variableName);
+        return new Uri(string.IsNullOrWhiteSpace(value) ? fallback : value, UriKind.Absolute);
+    }
+
+    private async Task TryMarkSyncStateAsync(long journalId, string state)
+    {
+        try
+        {
+            await workspaceIndex.MarkSyncStateAsync(journalId, state, CancellationToken.None);
+        }
+        catch
+        {
+            // The original sync failure remains the actionable error; startup recovery can inspect the inflight row.
+        }
+    }
+
+    private sealed record AtlasSyncJournalPayload(
+        string ProjectPath,
+        string ManifestPath,
+        string ManifestSha256,
+        long SizeBytes,
+        DateTime LastWriteTimeUtc,
+        string MediaType,
+        Guid? SessionId,
+        int PartSizeBytes,
+        DateTimeOffset? ExpiresAtUtc,
+        Guid? AssetId);
 
     private void OnWaveformChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -129,6 +472,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         emitter.SignalGraph.Nodes[nodeIndex] = emitter.SignalGraph.Nodes[nodeIndex] with { Waveform = waveform };
+        sceneDirty = true;
         if (waveform == WaveformKind.Additive && !emitter.SignalGraph.Nodes[nodeIndex].NumericParameters.ContainsKey("partial.0.amplitude"))
         {
             var parameters = emitter.SignalGraph.Nodes[nodeIndex].NumericParameters;
@@ -158,6 +502,7 @@ public sealed partial class MainWindow : Window
         var node = emitter.SignalGraph.Nodes.First(item => item.Kind == SignalNodeKind.Oscillator);
         node.NumericParameters["frequencyHz"] = frequency;
         scene.Emitters[0] = emitter with { GainLinear = gain };
+        sceneDirty = true;
         FrequencyBox.Text = frequency.ToString("0.###", CultureInfo.InvariantCulture);
         GainBox.Text = gain.ToString("0.###", CultureInfo.InvariantCulture);
         SignalFrequencyText.Text = $"{frequency:0.00} Hz";
@@ -191,7 +536,7 @@ public sealed partial class MainWindow : Window
         {
             var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output));
             lastRenderDirectory = output;
-            StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
+            StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
         }
         catch (Exception exception)
         {
@@ -284,6 +629,10 @@ public sealed partial class MainWindow : Window
     {
         StopPreviewTransport();
         analysisCancellation?.Cancel();
+        syncCancellation?.Cancel();
+        atlasIdentity?.Dispose();
+        atlasHttp.Dispose();
+        workspaceIndex.Dispose();
         base.OnClosed(e);
     }
 

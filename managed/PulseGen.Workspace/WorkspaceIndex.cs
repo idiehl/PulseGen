@@ -7,6 +7,7 @@ namespace PulseGen.Workspace;
 public sealed record AutosaveRevision(string RevisionId, Guid ProjectId, string ManifestJson, DateTimeOffset CreatedAtUtc);
 
 public sealed record SyncJournalEntry(long Id, Guid ProjectId, string? BaseRevisionId, string Operation, string PayloadJson, string State, DateTimeOffset CreatedAtUtc);
+public sealed record ProjectSyncState(Guid ProjectId, Guid HeadRevisionId, string HeadETag, DateTimeOffset UpdatedAtUtc);
 
 public sealed class WorkspaceIndex : IDisposable
 {
@@ -62,6 +63,12 @@ public sealed class WorkspaceIndex : IDisposable
                 updated_at_utc TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS ix_sync_state_id ON sync_journal(state, id);
+            CREATE TABLE IF NOT EXISTS project_sync_state (
+                project_id TEXT PRIMARY KEY,
+                head_revision_id TEXT NOT NULL,
+                head_etag TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            );
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -188,6 +195,96 @@ public sealed class WorkspaceIndex : IDisposable
         {
             throw new KeyNotFoundException($"Sync journal entry {id} does not exist.");
         }
+    }
+
+    public async Task UpdateSyncPayloadAsync(long id, object payload, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(payload);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE sync_journal SET payload_json = $payload, updated_at_utc = $updated WHERE id = $id;";
+        command.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(payload));
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$id", id);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new KeyNotFoundException($"Sync journal entry {id} does not exist.");
+        }
+    }
+
+    public async Task<SyncJournalEntry?> GetLatestRecoverableSyncAsync(
+        Guid projectId,
+        string operation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(operation);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, base_revision_id, payload_json, state, created_at_utc
+            FROM sync_journal
+            WHERE project_id = $project AND operation = $operation AND state IN ('pending', 'inflight')
+            ORDER BY id DESC LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        command.Parameters.AddWithValue("$operation", operation);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new(
+                reader.GetInt64(0),
+                projectId,
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                operation,
+                reader.GetString(2),
+                reader.GetString(3),
+                DateTimeOffset.Parse(reader.GetString(4)))
+            : null;
+    }
+
+    public async Task<ProjectSyncState?> GetProjectSyncStateAsync(Guid projectId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT head_revision_id, head_etag, updated_at_utc FROM project_sync_state WHERE project_id = $project;";
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+        if (!Guid.TryParse(reader.GetString(0), out var revision) || string.IsNullOrWhiteSpace(reader.GetString(1)))
+        {
+            throw new InvalidDataException("The local Atlas project sync state is malformed.");
+        }
+        return new(projectId, revision, reader.GetString(1), DateTimeOffset.Parse(reader.GetString(2)));
+    }
+
+    public async Task UpsertProjectSyncStateAsync(
+        Guid projectId,
+        Guid headRevisionId,
+        string headETag,
+        CancellationToken cancellationToken = default)
+    {
+        if (projectId == Guid.Empty || headRevisionId == Guid.Empty || string.IsNullOrWhiteSpace(headETag) || headETag.Length > 256)
+        {
+            throw new ArgumentException("A bounded Atlas project head is required.");
+        }
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO project_sync_state(project_id, head_revision_id, head_etag, updated_at_utc)
+            VALUES($project, $revision, $etag, $updated)
+            ON CONFLICT(project_id) DO UPDATE SET
+                head_revision_id = excluded.head_revision_id,
+                head_etag = excluded.head_etag,
+                updated_at_utc = excluded.updated_at_utc;
+            """;
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        command.Parameters.AddWithValue("$revision", headRevisionId.ToString("D"));
+        command.Parameters.AddWithValue("$etag", headETag);
+        command.Parameters.AddWithValue("$updated", now.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async Task<SqliteConnection> OpenAsync(CancellationToken cancellationToken)

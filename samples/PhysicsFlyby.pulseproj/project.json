@@ -348,6 +348,8 @@
       "name": "Interactive 48k",
       "quality": "Interactive",
       "sampleRate": 48000,
+      "sampleFormat": "Float32",
+      "dither": "None",
       "bufferFrames": 512,
       "reflectionOrder": 1,
       "rayCount": 1024,

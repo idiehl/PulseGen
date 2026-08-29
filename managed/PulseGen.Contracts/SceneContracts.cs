@@ -324,12 +324,29 @@ public enum RenderQuality
     Final
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum RenderSampleFormat
+{
+    Pcm16,
+    Pcm24,
+    Float32
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum DitherMode
+{
+    None,
+    Tpdf
+}
+
 public sealed record RenderProfile
 {
     public required Guid Id { get; init; }
     public required string Name { get; init; }
     public RenderQuality Quality { get; init; } = RenderQuality.Interactive;
     public int SampleRate { get; init; } = 48000;
+    public RenderSampleFormat SampleFormat { get; init; } = RenderSampleFormat.Float32;
+    public DitherMode Dither { get; init; } = DitherMode.None;
     public int BufferFrames { get; init; } = 512;
     public int ReflectionOrder { get; init; } = 1;
     public int RayCount { get; init; } = 1024;

@@ -78,15 +78,73 @@ try {
         try {
             $reader = [IO.BinaryReader]::new($stream)
             $riff = [Text.Encoding]::ASCII.GetString($reader.ReadBytes(4))
+            $stream.Position = 20
+            $formatCode = $reader.ReadUInt16()
             $stream.Position = 22
             $channels = $reader.ReadUInt16()
             $sampleRate = $reader.ReadUInt32()
-            if ($riff -ne 'RIFF' -or $channels -ne 2 -or $sampleRate -ne 48000) {
+            $stream.Position = 34
+            $bitsPerSample = $reader.ReadUInt16()
+            if ($riff -ne 'RIFF' -or $formatCode -ne 3 -or $channels -ne 2 -or $sampleRate -ne 48000 -or $bitsPerSample -ne 32) {
                 throw "Invalid receiver take header: $($firstFiles[$index].Name)"
             }
         }
         finally {
             $stream.Dispose()
+        }
+    }
+    $firstReceipts = @(Get-ChildItem -LiteralPath $firstRender -Filter '*-render-receipt.json')
+    $secondReceipts = @(Get-ChildItem -LiteralPath $secondRender -Filter '*-render-receipt.json')
+    if ($firstReceipts.Count -ne 1 -or $secondReceipts.Count -ne 1) {
+        throw 'Expected exactly one provenance receipt per offline render.'
+    }
+    if ((Get-FileHash -LiteralPath $firstReceipts[0].FullName -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $secondReceipts[0].FullName -Algorithm SHA256).Hash) {
+        throw 'Deterministic render receipts differ.'
+    }
+    $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
+    if ($renderReceipt.receiptVersion -ne 1 -or $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
+        $renderReceipt.engineVersion -notmatch '^0\.1\.0-alpha' -or $renderReceipt.sampleRate -ne 48000 -or
+        $renderReceipt.sampleFormat -ne 'Float32' -or $renderReceipt.dither -ne 'None' -or
+        @($renderReceipt.takes).Count -ne 2 -or $renderReceipt.dependencies[1].name -ne 'miniaudio' -or
+        $renderReceipt.dependencies[1].version -ne '0.11.25') {
+        throw 'Render provenance receipt is incomplete or inconsistent.'
+    }
+    foreach ($take in $renderReceipt.takes) {
+        $takePath = Join-Path $firstRender $take.fileName
+        if (-not (Test-Path -LiteralPath $takePath) -or
+            (Get-FileHash -LiteralPath $takePath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $take.sha256) {
+            throw "Render receipt take hash is invalid: $($take.fileName)"
+        }
+    }
+    $pcmProfiles = @(
+        @{ Name = 'Pcm16'; Code = 1; Bits = 16 },
+        @{ Name = 'Pcm24'; Code = 1; Bits = 24 }
+    )
+    foreach ($pcmProfile in $pcmProfiles) {
+        $pcmOutput = Join-Path $outputRoot ("format-" + $pcmProfile.Name.ToLowerInvariant())
+        Remove-VerificationDirectory $pcmOutput
+        dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --output $pcmOutput --duration 0.25 --sample-format $pcmProfile.Name
+        if ($LASTEXITCODE -ne 0) { throw "$($pcmProfile.Name) render failed." }
+        $pcmTake = Get-ChildItem -LiteralPath $pcmOutput -Filter '*.wav' | Select-Object -First 1
+        $stream = [IO.File]::OpenRead($pcmTake.FullName)
+        try {
+            $reader = [IO.BinaryReader]::new($stream)
+            $stream.Position = 20
+            $formatCode = $reader.ReadUInt16()
+            $stream.Position = 34
+            $bitsPerSample = $reader.ReadUInt16()
+            if ($formatCode -ne $pcmProfile.Code -or $bitsPerSample -ne $pcmProfile.Bits) {
+                throw "$($pcmProfile.Name) render header is invalid."
+            }
+        }
+        finally {
+            $stream.Dispose()
+        }
+        $pcmReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $pcmOutput -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
+        if ($pcmReceipt.sampleFormat -ne $pcmProfile.Name -or $pcmReceipt.dither -ne 'Tpdf' -or
+            [Math]::Max($pcmReceipt.peakLeft, $pcmReceipt.peakRight) -le 0) {
+            throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
     Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable"

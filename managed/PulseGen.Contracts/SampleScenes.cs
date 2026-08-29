@@ -19,6 +19,8 @@ public static class SampleScenes
         {
             ProjectId = Guid.Parse("aaaaaaaa-0000-4000-8000-000000000000"),
             Name = "Physics Flyby",
+            CreatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero),
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero),
             Atmosphere = new AtmosphereField
             {
                 TemperatureCelsius = 20,
@@ -158,4 +160,3 @@ public static class SampleScenes
         };
     }
 }
-

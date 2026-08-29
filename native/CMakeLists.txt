@@ -72,6 +72,16 @@ if(PULSEGEN_BUILD_TESTS)
         target_compile_options(PulseGen.Engine.Tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME PulseGen.Engine.Tests COMMAND PulseGen.Engine.Tests)
+
+    add_executable(PulseGen.WavWriter.Tests tests/wav_writer_tests.cpp src/wav_writer.cpp)
+    target_compile_features(PulseGen.WavWriter.Tests PRIVATE cxx_std_20)
+    target_include_directories(PulseGen.WavWriter.Tests PRIVATE include src)
+    if(MSVC)
+        target_compile_options(PulseGen.WavWriter.Tests PRIVATE /W4 /WX /permissive- /EHsc /utf-8)
+    else()
+        target_compile_options(PulseGen.WavWriter.Tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME PulseGen.WavWriter.Tests COMMAND PulseGen.WavWriter.Tests)
 endif()
 
 install(TARGETS PulseGen.Engine

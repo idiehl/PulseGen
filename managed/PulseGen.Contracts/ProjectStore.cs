@@ -72,6 +72,13 @@ public static class ProjectStore
         return Convert.ToHexStringLower(hash);
     }
 
+    public static string ComputeSceneRevisionSha256(SceneDocument scene)
+    {
+        SceneValidator.EnsureValid(scene);
+        var manifest = JsonSerializer.SerializeToUtf8Bytes(scene, JsonOptions);
+        return Convert.ToHexStringLower(SHA256.HashData(manifest));
+    }
+
     public static async Task<AssetRef> ImportAssetAsync(
         string projectDirectory,
         string sourcePath,

@@ -61,6 +61,12 @@
               <TextBlock Grid.Row="2" Text="Receiver takes" Foreground="#8292A6" /><TextBlock Grid.Row="2" Grid.Column="1" Classes="value" Text="2 stereo" />
               <TextBlock Grid.Row="3" Text="Duration" Foreground="#8292A6" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="6.000 s" />
             </Grid>
+            <Border Height="1" Background="#2B3748" Margin="0,3" />
+            <TextBlock x:Name="AtlasStateText" Classes="sectionTitle" Text="PRIVATE · LOCAL ONLY" />
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+              <Button x:Name="AtlasButton" Content="◇  Atlas sign in" Click="OnAtlasClicked" ToolTip.Tip="Use authorization code + PKCE. The rotating refresh token is stored in Windows Credential Manager." />
+              <Button x:Name="SyncButton" Grid.Column="1" Content="⇧  Sync project" Click="OnSyncClicked" ToolTip.Tip="Explicitly upload the saved manifest and create an immutable Atlas project revision. Conflicts become named branches." />
+            </Grid>
           </StackPanel>
         </Border>
       </Grid>

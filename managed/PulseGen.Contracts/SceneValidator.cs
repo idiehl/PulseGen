@@ -139,6 +139,14 @@ public static class SceneValidator
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/sampleRate", "Unsupported render sample rate."));
             }
+            if (profile.SampleFormat == RenderSampleFormat.Float32 && profile.Dither != DitherMode.None)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/dither", "Floating-point renders must not be dithered."));
+            }
+            if (profile.SampleFormat != RenderSampleFormat.Float32 && profile.Dither != DitherMode.Tpdf)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/dither", "Integer PCM renders require an explicit TPDF dither selection."));
+            }
 
             if (profile.BufferFrames is < 64 or > 8192)
             {

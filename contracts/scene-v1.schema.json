@@ -195,7 +195,10 @@
       "required": ["id", "name", "quality", "sampleRate", "bufferFrames", "reflectionOrder", "rayCount", "impulseResponseSeconds", "atmosphereIntegrationSegments", "seed"],
       "properties": {
         "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "quality": { "enum": ["Draft", "Interactive", "Final"] },
-        "sampleRate": { "enum": [44100, 48000, 88200, 96000, 192000] }, "bufferFrames": { "type": "integer", "minimum": 64, "maximum": 8192 },
+        "sampleRate": { "enum": [44100, 48000, 88200, 96000, 192000] },
+        "sampleFormat": { "enum": ["Pcm16", "Pcm24", "Float32"], "default": "Float32" },
+        "dither": { "enum": ["None", "Tpdf"], "default": "None" },
+        "bufferFrames": { "type": "integer", "minimum": 64, "maximum": 8192 },
         "reflectionOrder": { "type": "integer", "minimum": 0 }, "rayCount": { "type": "integer", "minimum": 0 },
         "impulseResponseSeconds": { "type": "number", "minimum": 0 }, "atmosphereIntegrationSegments": { "type": "integer", "minimum": 1, "maximum": 4096 }, "seed": { "type": "integer" }
       }

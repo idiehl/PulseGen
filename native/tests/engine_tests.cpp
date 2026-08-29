@@ -2,17 +2,27 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 namespace {
+
+void require(bool condition, std::string_view expression, int line)
+{
+    if (!condition) {
+        throw std::runtime_error("Native requirement failed at line " + std::to_string(line) + ": " + std::string(expression));
+    }
+}
+
+#define REQUIRE(expression) require(static_cast<bool>(expression), #expression, __LINE__)
 
 pg_engine* create_engine()
 {
@@ -23,8 +33,8 @@ pg_engine* create_engine()
     config.max_receivers = 4;
     config.max_keyframes_per_path = 64;
     pg_engine* engine = nullptr;
-    assert(pg_engine_create(&config, &engine) == PG_STATUS_OK);
-    assert(engine != nullptr);
+    REQUIRE(pg_engine_create(&config, &engine) == PG_STATUS_OK);
+    REQUIRE(engine != nullptr);
     return engine;
 }
 
@@ -39,7 +49,7 @@ void configure_scene(pg_engine* engine, double emitter_amplitude = 0.5)
     atmosphere.uniform_wind_metres_per_second = { 0, 0, 2 };
     atmosphere.turbulence = 0.05;
     atmosphere.noise_seed = 42;
-    assert(pg_engine_set_atmosphere(engine, &atmosphere) == PG_STATUS_OK);
+    REQUIRE(pg_engine_set_atmosphere(engine, &atmosphere) == PG_STATUS_OK);
 
     pg_room_desc room{};
     room.size = sizeof(room);
@@ -51,7 +61,7 @@ void configure_scene(pg_engine* engine, double emitter_amplitude = 0.5)
     room.wall_reflection_high = 0.55;
     room.scattering = 0.15;
     room.enabled = 1;
-    assert(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
 
     const std::array<pg_motion_keyframe, 4> keyframes{
         pg_motion_keyframe{ 0.0, { -28, 1.7, 4 } },
@@ -70,7 +80,7 @@ void configure_scene(pg_engine* engine, double emitter_amplitude = 0.5)
     emitter.keyframes = keyframes.data();
     emitter.keyframe_count = static_cast<std::uint32_t>(keyframes.size());
     emitter.enabled = 1;
-    assert(pg_engine_add_sine_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_sine_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
 
     pg_receiver_rig_desc receiver{};
     receiver.size = sizeof(receiver);
@@ -82,7 +92,7 @@ void configure_scene(pg_engine* engine, double emitter_amplitude = 0.5)
     receiver.head_radius_metres = 0.09;
     receiver.polar_pattern = PG_POLAR_OMNI;
     receiver.enabled = 1;
-    assert(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
 }
 
 std::vector<float> render_primitive(pg_waveform_kind waveform)
@@ -97,7 +107,7 @@ std::vector<float> render_primitive(pg_waveform_kind waveform)
     room.wall_reflection_high = 0.5;
     room.scattering = 0.1;
     room.enabled = 0;
-    assert(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
 
     const std::array<pg_motion_keyframe, 2> keyframes{
         pg_motion_keyframe{ 0.0, { 0, 1.7, 2 } },
@@ -128,7 +138,7 @@ std::vector<float> render_primitive(pg_waveform_kind waveform)
     emitter.keyframe_count = static_cast<std::uint32_t>(keyframes.size());
     emitter.noise_seed = 1234;
     emitter.enabled = 1;
-    assert(pg_engine_add_signal_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_signal_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
 
     pg_receiver_rig_desc receiver{};
     receiver.size = sizeof(receiver);
@@ -140,28 +150,201 @@ std::vector<float> render_primitive(pg_waveform_kind waveform)
     receiver.head_radius_metres = 0.09;
     receiver.polar_pattern = PG_POLAR_OMNI;
     receiver.enabled = 1;
-    assert(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
 
     constexpr std::uint32_t frames = 4096;
     std::vector<float> output(frames * 2U);
-    assert(pg_engine_render_receiver_block(engine, 0, 0, frames, 48000, output.data(), output.size()) == PG_STATUS_OK);
+    REQUIRE(pg_engine_render_receiver_block(engine, 0, 0, frames, 48000, output.data(), output.size()) == PG_STATUS_OK);
     pg_engine_destroy(engine);
     return output;
+}
+
+struct static_render_options {
+    pg_waveform_kind waveform{ PG_WAVE_SINE };
+    double frequency_hz{ 440.0 };
+    pg_vec3 source_position{ 0.0, 0.0, 2.0 };
+    pg_polar_pattern polar_pattern{ PG_POLAR_OMNI };
+    double receiver_spacing_metres{ 0.01 };
+    double microphone_angle_degrees{};
+    double relative_humidity_percent{ 50.0 };
+    double pressure_kilopascals{ 101.325 };
+    std::uint64_t start_frame{};
+    std::uint32_t frame_count{ 4096U };
+};
+
+std::vector<float> render_static_source(const static_render_options& options)
+{
+    constexpr std::uint32_t sample_rate = 48000U;
+    pg_engine* engine = create_engine();
+
+    pg_atmosphere_desc atmosphere{};
+    atmosphere.size = sizeof(atmosphere);
+    atmosphere.version = PG_ABI_VERSION;
+    atmosphere.temperature_celsius = 20.0;
+    atmosphere.relative_humidity_percent = options.relative_humidity_percent;
+    atmosphere.pressure_kilopascals = options.pressure_kilopascals;
+    REQUIRE(pg_engine_set_atmosphere(engine, &atmosphere) == PG_STATUS_OK);
+
+    pg_room_desc room{};
+    room.size = sizeof(room);
+    room.version = PG_ABI_VERSION;
+    room.dimensions_metres = { 20.0, 8.0, 12.0 };
+    room.enabled = 0U;
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+
+    const double render_end_seconds = static_cast<double>(options.start_frame + options.frame_count) / sample_rate;
+    const std::array<pg_motion_keyframe, 2> keyframes{
+        pg_motion_keyframe{ 0.0, options.source_position },
+        pg_motion_keyframe{ std::max(2.0, render_end_seconds + 1.0), options.source_position }
+    };
+    pg_signal_emitter_desc emitter{};
+    emitter.size = sizeof(emitter);
+    emitter.version = PG_ABI_VERSION;
+    emitter.name_utf8 = "Static_Source";
+    emitter.waveform = options.waveform;
+    emitter.frequency_hz = options.frequency_hz;
+    emitter.amplitude = 1.0;
+    emitter.pulse_width = 0.5;
+    emitter.gain_linear = 1.0;
+    emitter.min_distance_metres = 0.01;
+    emitter.motion_path_kind = PG_PATH_LINEAR;
+    emitter.keyframes = keyframes.data();
+    emitter.keyframe_count = static_cast<std::uint32_t>(keyframes.size());
+    emitter.noise_seed = 99U;
+    emitter.enabled = 1U;
+    REQUIRE(pg_engine_add_signal_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
+
+    pg_receiver_rig_desc receiver{};
+    receiver.size = sizeof(receiver);
+    receiver.version = PG_ABI_VERSION;
+    receiver.name_utf8 = "Static_Microphones";
+    receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    receiver.centre_metres = { 0.0, 0.0, 0.0 };
+    receiver.spacing_metres = options.receiver_spacing_metres;
+    receiver.head_radius_metres = 0.09;
+    receiver.microphone_angle_degrees = options.microphone_angle_degrees;
+    receiver.polar_pattern = options.polar_pattern;
+    receiver.enabled = 1U;
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+
+    std::vector<float> output(static_cast<std::size_t>(options.frame_count) * 2U);
+    REQUIRE(pg_engine_render_receiver_block(
+        engine,
+        0U,
+        options.start_frame,
+        options.frame_count,
+        sample_rate,
+        output.data(),
+        output.size()) == PG_STATUS_OK);
+    pg_engine_destroy(engine);
+    return output;
+}
+
+double channel_rms(const std::vector<float>& samples, std::size_t channel)
+{
+    long double sum = 0.0;
+    std::size_t count = 0U;
+    for (std::size_t index = channel; index < samples.size(); index += 2U) {
+        sum += static_cast<long double>(samples[index]) * samples[index];
+        ++count;
+    }
+    return std::sqrt(static_cast<double>(sum / static_cast<long double>(std::max<std::size_t>(count, 1U))));
+}
+
+std::size_t first_active_frame(const std::vector<float>& samples, float threshold = 1.0e-7F)
+{
+    for (std::size_t frame = 0; frame < samples.size() / 2U; ++frame) {
+        if (std::abs(samples[frame * 2U]) > threshold || std::abs(samples[(frame * 2U) + 1U]) > threshold) {
+            return frame;
+        }
+    }
+    return samples.size() / 2U;
 }
 
 } // namespace
 
 int main(int argument_count, char** arguments)
 {
+    try {
     static_assert(PG_ABI_VERSION == 1U);
-    assert(pg_get_abi_version() == PG_ABI_VERSION);
-    assert(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
+    REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
+    REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 
     const double approaching = pg_calculate_observed_frequency(440.0, 343.42, 20.0, 0.0);
     const double receding = pg_calculate_observed_frequency(440.0, 343.42, -20.0, 0.0);
-    assert(approaching > 440.0);
-    assert(receding < 440.0);
-    assert(std::isnan(pg_calculate_observed_frequency(440.0, 343.42, 343.42, 0.0)));
+    REQUIRE(approaching > 440.0);
+    REQUIRE(receding < 440.0);
+    REQUIRE(std::isnan(pg_calculate_observed_frequency(440.0, 343.42, 343.42, 0.0)));
+    REQUIRE(std::abs(approaching - (440.0 * 343.42 / (343.42 - 20.0))) < 1.0e-12);
+
+    static_render_options frequency_test{};
+    frequency_test.source_position = { 0.0, 0.0, 1.0 };
+    frequency_test.start_frame = 24000U;
+    frequency_test.frame_count = 48000U;
+    const auto sine_one_second = render_static_source(frequency_test);
+    std::size_t upward_crossings = 0U;
+    for (std::size_t frame = 1U; frame < frequency_test.frame_count; ++frame) {
+        if (sine_one_second[(frame - 1U) * 2U] <= 0.0F && sine_one_second[frame * 2U] > 0.0F) {
+            ++upward_crossings;
+        }
+    }
+    REQUIRE(upward_crossings >= 439U && upward_crossings <= 441U);
+
+    static_render_options propagation_test{};
+    propagation_test.waveform = PG_WAVE_IMPULSE;
+    propagation_test.frequency_hz = 1.0;
+    propagation_test.source_position = { 0.0, 0.0, 10.0 };
+    propagation_test.frame_count = 4096U;
+    propagation_test.relative_humidity_percent = 0.0;
+    const auto propagated_impulse = render_static_source(propagation_test);
+    const auto measured_arrival = first_active_frame(propagated_impulse);
+    const auto expected_arrival = static_cast<std::size_t>(std::llround(10.0 / 343.42 * 48000.0));
+    REQUIRE(measured_arrival <= expected_arrival + 1U && expected_arrival <= measured_arrival + 1U);
+
+    static_render_options near_distance{};
+    near_distance.source_position = { 0.0, 0.0, 2.0 };
+    near_distance.start_frame = 24000U;
+    near_distance.frame_count = 4800U;
+    near_distance.relative_humidity_percent = 100.0;
+    auto far_distance = near_distance;
+    far_distance.source_position = { 0.0, 0.0, 4.0 };
+    const double distance_ratio = channel_rms(render_static_source(near_distance), 0U) /
+        channel_rms(render_static_source(far_distance), 0U);
+    REQUIRE(std::abs(distance_ratio - 2.0) < 0.002);
+
+    static_render_options dry_air{};
+    dry_air.frequency_hz = 8000.0;
+    dry_air.source_position = { 0.0, 0.0, 50.0 };
+    dry_air.start_frame = 24000U;
+    dry_air.frame_count = 4800U;
+    dry_air.relative_humidity_percent = 0.0;
+    auto humid_air = dry_air;
+    humid_air.relative_humidity_percent = 100.0;
+    const double measured_absorption_ratio = channel_rms(render_static_source(dry_air), 0U) /
+        channel_rms(render_static_source(humid_air), 0U);
+    const double dry_coefficient = (0.000015 + 0.000018) * 64.0;
+    const double humid_coefficient = 0.000015 * 64.0;
+    const double expected_absorption_ratio = std::exp(-(dry_coefficient - humid_coefficient) * 50.0);
+    REQUIRE(std::abs(measured_absorption_ratio - expected_absorption_ratio) < 0.002);
+
+    static_render_options rear_omni{};
+    rear_omni.source_position = { 0.0, 0.0, -2.0 };
+    rear_omni.start_frame = 24000U;
+    rear_omni.frame_count = 4800U;
+    auto rear_cardioid = rear_omni;
+    rear_cardioid.polar_pattern = PG_POLAR_CARDIOID;
+    REQUIRE(channel_rms(render_static_source(rear_cardioid), 0U) < channel_rms(render_static_source(rear_omni), 0U) * 2.0e-6);
+
+    static_render_options symmetry{};
+    symmetry.source_position = { 0.0, 0.0, 2.0 };
+    symmetry.receiver_spacing_metres = 0.18;
+    symmetry.microphone_angle_degrees = 110.0;
+    symmetry.start_frame = 24000U;
+    symmetry.frame_count = 4800U;
+    const auto symmetric_pair = render_static_source(symmetry);
+    for (std::size_t frame = 0; frame < symmetry.frame_count; ++frame) {
+        REQUIRE(symmetric_pair[frame * 2U] == symmetric_pair[(frame * 2U) + 1U]);
+    }
 
     pg_engine* engine = create_engine();
     configure_scene(engine);
@@ -169,9 +352,9 @@ int main(int argument_count, char** arguments)
     pg_device_status initial_device_status{};
     initial_device_status.size = sizeof(initial_device_status);
     initial_device_status.version = PG_ABI_VERSION;
-    assert(pg_engine_get_device_status(engine, &initial_device_status) == PG_STATUS_OK);
-    assert(initial_device_status.running == 0U);
-    assert(initial_device_status.frames_processed == 0U);
+    REQUIRE(pg_engine_get_device_status(engine, &initial_device_status) == PG_STATUS_OK);
+    REQUIRE(initial_device_status.running == 0U);
+    REQUIRE(initial_device_status.frames_processed == 0U);
 
     pg_device_config invalid_device{};
     invalid_device.size = sizeof(invalid_device);
@@ -180,20 +363,20 @@ int main(int argument_count, char** arguments)
     invalid_device.sample_rate = 48000U;
     invalid_device.period_frames = 512U;
     invalid_device.reflection_order = 1U;
-    assert(pg_engine_start_device(engine, &invalid_device) == PG_STATUS_INVALID_ARGUMENT);
+    REQUIRE(pg_engine_start_device(engine, &invalid_device) == PG_STATUS_INVALID_ARGUMENT);
     invalid_device.receiver_index = 0U;
     invalid_device.sample_rate = 1U;
-    assert(pg_engine_start_device(engine, &invalid_device) == PG_STATUS_INVALID_ARGUMENT);
-    assert(pg_engine_stop_device(engine) == PG_STATUS_OK);
+    REQUIRE(pg_engine_start_device(engine, &invalid_device) == PG_STATUS_INVALID_ARGUMENT);
+    REQUIRE(pg_engine_stop_device(engine) == PG_STATUS_OK);
 
     constexpr std::uint32_t sample_rate = 48000;
     constexpr std::uint32_t frames = 4096;
     std::vector<float> first(frames * 2U);
     std::vector<float> second(frames * 2U);
-    assert(pg_engine_render_receiver_block(engine, 0, sample_rate * 2U, frames, sample_rate, first.data(), first.size()) == PG_STATUS_OK);
-    assert(pg_engine_render_receiver_block(engine, 0, sample_rate * 2U, frames, sample_rate, second.data(), second.size()) == PG_STATUS_OK);
-    assert(first == second);
-    assert(std::any_of(first.begin(), first.end(), [](float value) { return std::abs(value) > 1.0e-5F; }));
+    REQUIRE(pg_engine_render_receiver_block(engine, 0, sample_rate * 2U, frames, sample_rate, first.data(), first.size()) == PG_STATUS_OK);
+    REQUIRE(pg_engine_render_receiver_block(engine, 0, sample_rate * 2U, frames, sample_rate, second.data(), second.size()) == PG_STATUS_OK);
+    REQUIRE(first == second);
+    REQUIRE(std::any_of(first.begin(), first.end(), [](float value) { return std::abs(value) > 1.0e-5F; }));
 
     bool channels_differ = false;
     for (std::size_t index = 0; index < first.size(); index += 2U) {
@@ -202,17 +385,17 @@ int main(int argument_count, char** arguments)
             break;
         }
     }
-    assert(channels_differ);
+    REQUIRE(channels_differ);
 
     pg_engine_destroy(engine);
 
     for (int waveform = static_cast<int>(PG_WAVE_SINE); waveform <= static_cast<int>(PG_WAVE_TURBULENCE); ++waveform) {
         const auto rendered = render_primitive(static_cast<pg_waveform_kind>(waveform));
-        assert(std::all_of(rendered.begin(), rendered.end(), [](float value) { return std::isfinite(value); }));
-        assert(std::any_of(rendered.begin(), rendered.end(), [](float value) { return std::abs(value) > 1.0e-7F; }));
+        REQUIRE(std::all_of(rendered.begin(), rendered.end(), [](float value) { return std::isfinite(value); }));
+        REQUIRE(std::any_of(rendered.begin(), rendered.end(), [](float value) { return std::abs(value) > 1.0e-7F; }));
     }
-    assert(render_primitive(PG_WAVE_WHITE_NOISE) == render_primitive(PG_WAVE_WHITE_NOISE));
-    assert(render_primitive(PG_WAVE_SINE) != render_primitive(PG_WAVE_SQUARE));
+    REQUIRE(render_primitive(PG_WAVE_WHITE_NOISE) == render_primitive(PG_WAVE_WHITE_NOISE));
+    REQUIRE(render_primitive(PG_WAVE_SINE) != render_primitive(PG_WAVE_SQUARE));
 
     pg_engine* contiguous_engine = create_engine();
     pg_engine* split_engine = create_engine();
@@ -220,10 +403,10 @@ int main(int argument_count, char** arguments)
     configure_scene(split_engine);
     std::vector<float> contiguous(frames * 2U);
     std::vector<float> split(frames * 2U);
-    assert(pg_engine_render_receiver_block(contiguous_engine, 0, 0, frames, sample_rate, contiguous.data(), contiguous.size()) == PG_STATUS_OK);
-    assert(pg_engine_render_receiver_block(split_engine, 0, 0, frames / 2U, sample_rate, split.data(), split.size() / 2U) == PG_STATUS_OK);
-    assert(pg_engine_render_receiver_block(split_engine, 0, frames / 2U, frames / 2U, sample_rate, split.data() + frames, split.size() / 2U) == PG_STATUS_OK);
-    assert(contiguous == split);
+    REQUIRE(pg_engine_render_receiver_block(contiguous_engine, 0, 0, frames, sample_rate, contiguous.data(), contiguous.size()) == PG_STATUS_OK);
+    REQUIRE(pg_engine_render_receiver_block(split_engine, 0, 0, frames / 2U, sample_rate, split.data(), split.size() / 2U) == PG_STATUS_OK);
+    REQUIRE(pg_engine_render_receiver_block(split_engine, 0, frames / 2U, frames / 2U, sample_rate, split.data() + frames, split.size() / 2U) == PG_STATUS_OK);
+    REQUIRE(contiguous == split);
     pg_engine_destroy(contiguous_engine);
     pg_engine_destroy(split_engine);
 
@@ -237,18 +420,18 @@ int main(int argument_count, char** arguments)
         device_config.sample_rate = 48000U;
         device_config.period_frames = 512U;
         device_config.reflection_order = 1U;
-        assert(pg_engine_start_device(audio_engine, &device_config) == PG_STATUS_OK);
+        REQUIRE(pg_engine_start_device(audio_engine, &device_config) == PG_STATUS_OK);
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         pg_device_status status{};
         status.size = sizeof(status);
         status.version = PG_ABI_VERSION;
-        assert(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
-        assert(status.running == 1U);
-        assert(status.frames_processed > 0U);
-        assert(status.callback_count > 0U);
-        assert(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
-        assert(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
-        assert(status.running == 0U);
+        REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
+        REQUIRE(status.running == 1U);
+        REQUIRE(status.frames_processed > 0U);
+        REQUIRE(status.callback_count > 0U);
+        REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
+        REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
+        REQUIRE(status.running == 0U);
         pg_engine_destroy(audio_engine);
         std::cout << "PULSEGEN_WASAPI_DEVICE_OK frames=" << status.frames_processed
                   << " callbacks=" << status.callback_count << '\n';
@@ -256,4 +439,9 @@ int main(int argument_count, char** arguments)
 
     std::cout << "PULSEGEN_NATIVE_ENGINE_OK\n";
     return 0;
+    }
+    catch (const std::exception& exception) {
+        std::cerr << exception.what() << '\n';
+        return 1;
+    }
 }

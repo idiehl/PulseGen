@@ -26,8 +26,21 @@ public sealed class WorkspaceIndexTests
             Assert.NotEqual(first.RevisionId, recovered.RevisionId);
 
             var journalId = await index.EnqueueSyncAsync(scene.ProjectId, "base-17", "project.revision.create", new { scene.Name });
+            await index.UpdateSyncPayloadAsync(journalId, new { scene.Name, SessionId = Guid.NewGuid() });
+            var recoverable = await index.GetLatestRecoverableSyncAsync(scene.ProjectId, "project.revision.create");
+            Assert.NotNull(recoverable);
+            Assert.Equal(journalId, recoverable.Id);
+            Assert.Contains("SessionId", recoverable.PayloadJson, StringComparison.Ordinal);
             await index.MarkSyncStateAsync(journalId, "conflict");
+            Assert.Null(await index.GetLatestRecoverableSyncAsync(scene.ProjectId, "project.revision.create"));
             await Assert.ThrowsAsync<KeyNotFoundException>(() => index.MarkSyncStateAsync(journalId + 99, "complete"));
+
+            var remoteRevision = Guid.NewGuid();
+            await index.UpsertProjectSyncStateAsync(scene.ProjectId, remoteRevision, "\"etag-one\"");
+            var syncState = await index.GetProjectSyncStateAsync(scene.ProjectId);
+            Assert.NotNull(syncState);
+            Assert.Equal(remoteRevision, syncState.HeadRevisionId);
+            Assert.Equal("\"etag-one\"", syncState.HeadETag);
         }
         finally
         {

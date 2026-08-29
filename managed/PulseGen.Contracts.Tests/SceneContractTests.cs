@@ -121,4 +121,18 @@ public sealed class SceneContractTests
         var issues = SceneValidator.Validate(scene);
         Assert.Contains(issues, issue => issue.Path.EndsWith("sofaAssetHash", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void IntegerAndFloatRenderProfilesRequireExplicitCompatibleDither()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with { SampleFormat = RenderSampleFormat.Pcm24, Dither = DitherMode.None };
+        Assert.Contains(SceneValidator.Validate(scene), issue => issue.Path.EndsWith("/dither", StringComparison.Ordinal));
+
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with { Dither = DitherMode.Tpdf };
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Path.EndsWith("/dither", StringComparison.Ordinal));
+
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with { SampleFormat = RenderSampleFormat.Float32, Dither = DitherMode.Tpdf };
+        Assert.Contains(SceneValidator.Validate(scene), issue => issue.Path.EndsWith("/dither", StringComparison.Ordinal));
+    }
 }
