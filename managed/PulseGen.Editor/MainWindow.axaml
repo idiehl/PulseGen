@@ -6,7 +6,7 @@
         Width="1420" Height="820" MinWidth="1080" MinHeight="680"
         WindowStartupLocation="CenterScreen"
         Background="#0B0F14">
-  <Grid RowDefinitions="52,*,230" ColumnDefinitions="270,*,326">
+  <Grid RowDefinitions="52,*,300" ColumnDefinitions="270,*,326">
     <Border Grid.Row="0" Grid.ColumnSpan="3" Background="#111721" BorderBrush="#273244" BorderThickness="0,0,0,1">
       <Grid ColumnDefinitions="Auto,20,Auto,*,Auto,16,Auto" Margin="14,0">
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="10">
@@ -523,12 +523,12 @@
     <Border Grid.Row="2" Grid.ColumnSpan="3" Background="#0E131B" BorderBrush="#273244" BorderThickness="0,1,0,0">
       <Grid RowDefinitions="36,*">
         <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Margin="12,0">
-          <Button Grid.Column="0" Content="SIGNAL GRAPH" Background="Transparent" Foreground="#71DCCF" />
-          <Button Grid.Column="1" Content="SPECTRUM" Background="Transparent" Foreground="#8191A6" />
-          <Button Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#8191A6" />
+          <Button x:Name="SignalWorkspaceButton" Grid.Column="0" Content="SIGNAL GRAPH" Background="Transparent" Foreground="#71DCCF" Click="OnSignalWorkspaceClicked" />
+          <Button x:Name="SpectrumWorkspaceButton" Grid.Column="1" Content="SPECTRUM" Background="Transparent" Foreground="#8191A6" Click="OnSpectrumWorkspaceClicked" />
+          <Button Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#566477" IsEnabled="False" ToolTip.Tip="The dedicated take arranger is a later milestone; isolated receiver files remain available after every render." />
           <TextBlock Grid.Column="4" x:Name="StatusText" Text="Ready · native renderer awaiting command" Foreground="#7D8DA2" VerticalAlignment="Center" />
         </Grid>
-        <Grid Grid.Row="1" ColumnDefinitions="340,*,330" Margin="10,0,10,10">
+        <Grid x:Name="SignalWorkspace" Grid.Row="1" ColumnDefinitions="340,*,330" Margin="10,0,10,10">
           <Border Classes="panel" Padding="12">
             <Canvas Height="175">
               <Border Canvas.Left="8" Canvas.Top="39" Width="108" Height="68" CornerRadius="6" Background="#172931" BorderBrush="#3A8E86" BorderThickness="1" Padding="9">
@@ -561,6 +561,62 @@
               <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="ReceiverTwoText" Text="ORTF microphone pair" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#B1A4E2"/></Grid>
               <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="51" Foreground="#8073B6"/><ProgressBar Grid.Column="1" Value="64" Foreground="#8073B6"/></Grid>
               <TextBlock Text="Each rig renders an isolated stereo take." Foreground="#697B90" FontSize="10" Margin="0,4,0,0" />
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <Grid x:Name="SpectrumWorkspace" Grid.Row="1" ColumnDefinitions="245,*,285" Margin="10,0,10,10" IsVisible="False">
+          <Border Classes="panel" Padding="11">
+            <StackPanel Spacing="7">
+              <TextBlock Classes="sectionTitle" Text="IMPORTED ANALYSIS" />
+              <ComboBox x:Name="SpectralSessionBox" SelectionChanged="OnSpectralSessionChanged" />
+              <TextBlock x:Name="SpectralSessionSummaryText" Text="Save and analyze a receiver take to populate this workspace." TextWrapping="Wrap" Foreground="#71839A" FontSize="9" />
+              <Border Height="1" Background="#2B3748" Margin="0,2" />
+              <Grid ColumnDefinitions="Auto,*,62" RowDefinitions="Auto,Auto,Auto" ColumnSpacing="5" RowSpacing="5">
+                <CheckBox x:Name="SpectralPartialsEnabled" IsChecked="True" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="Tracked tones" Foreground="#8FE4D3" VerticalAlignment="Center" />
+                <TextBox x:Name="SpectralPartialsGain" Grid.Column="2" Text="1.0" HorizontalContentAlignment="Right" />
+                <CheckBox x:Name="SpectralTransientsEnabled" Grid.Row="1" IsChecked="True" VerticalAlignment="Center" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="Impacts / attacks" Foreground="#DCC47D" VerticalAlignment="Center" />
+                <TextBox x:Name="SpectralTransientsGain" Grid.Row="1" Grid.Column="2" Text="1.0" HorizontalContentAlignment="Right" />
+                <CheckBox x:Name="SpectralStochasticEnabled" Grid.Row="2" IsChecked="True" VerticalAlignment="Center" />
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="Texture / noise" Foreground="#B1A4E2" VerticalAlignment="Center" />
+                <TextBox x:Name="SpectralStochasticGain" Grid.Row="2" Grid.Column="2" Text="1.0" HorizontalContentAlignment="Right" />
+              </Grid>
+              <TextBlock Text="Gain: 0–4 · unedited layers recombine to the original timing and stereo alignment." TextWrapping="Wrap" Foreground="#596B80" FontSize="9" />
+              <TextBlock x:Name="SpectralEditStateText" Text="No edit selected" Foreground="#83D8CD" FontSize="9" TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <Border Grid.Column="1" Classes="panel" Margin="8,0" Padding="9">
+            <Grid RowDefinitions="Auto,*">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock x:Name="SpectralPlotTitleText" Text="TIME × FREQUENCY" Classes="sectionTitle" />
+                <TextBlock Grid.Column="1" Text="L / MID     R / SIDE" Foreground="#71839A" FontSize="9" />
+              </Grid>
+              <local:SpectralTrackView x:Name="SpectralTrackPlot" Grid.Row="1" Margin="0,7,0,0" />
+            </Grid>
+          </Border>
+
+          <Border Grid.Column="2" Classes="panel" Padding="11">
+            <StackPanel Spacing="5">
+              <TextBlock Classes="sectionTitle" Text="SELECTED TONE" />
+              <TextBlock x:Name="SpectralTrackNameText" Text="Click a tone path" Foreground="#E5EDF2" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+              <TextBlock x:Name="SpectralTrackRangeText" Text="Frequency and channel details appear here." Foreground="#71839A" FontSize="9" TextWrapping="Wrap" />
+              <Grid ColumnDefinitions="*,90" RowDefinitions="Auto,Auto,Auto" RowSpacing="5">
+                <TextBlock Text="Include tone" Foreground="#8192A7" VerticalAlignment="Center" /><CheckBox x:Name="SpectralTrackEnabled" Grid.Column="1" IsChecked="True" IsEnabled="False" HorizontalAlignment="Right" />
+                <TextBlock Grid.Row="1" Text="Tone gain (0–4)" Foreground="#8192A7" VerticalAlignment="Center" /><TextBox x:Name="SpectralTrackGain" Grid.Row="1" Grid.Column="1" Text="1.0" IsEnabled="False" HorizontalContentAlignment="Right" />
+                <TextBlock Grid.Row="2" Text="Pitch (semitones)" Foreground="#8192A7" VerticalAlignment="Center" /><TextBox x:Name="SpectralTrackPitch" Grid.Row="2" Grid.Column="1" Text="0" IsEnabled="False" HorizontalContentAlignment="Right" ToolTip.Tip="Raises or lowers only this tracked tone. The stored analysis is never overwritten." />
+              </Grid>
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
+                <Button x:Name="SpectralApplyTrackButton" Content="Apply tone" IsEnabled="False" Background="#266A64" Foreground="White" Click="OnApplySpectralTrackClicked" />
+                <Button x:Name="SpectralResetTrackButton" Grid.Column="1" Content="Reset tone" IsEnabled="False" Click="OnResetSpectralTrackClicked" />
+              </Grid>
+              <Grid ColumnDefinitions="*,*,*" ColumnSpacing="5">
+                <Button x:Name="SpectralAuditionButton" Content="▶  Hear" Click="OnAuditionSpectralClicked" />
+                <Button x:Name="SpectralSaveEditButton" Grid.Column="1" Content="⌑  Save edit" Click="OnSaveSpectralEditClicked" />
+                <Button x:Name="SpectralRenderButton" Grid.Column="2" Content="⇥  WAV" Background="#353056" Foreground="#DED7FA" Click="OnRenderSpectralClicked" />
+              </Grid>
             </StackPanel>
           </Border>
         </Grid>

@@ -29,7 +29,7 @@ public readonly record struct PreviewDeviceStatus(
 
 public static unsafe class NativeSceneRenderer
 {
-    private const uint AbiVersion = 3;
+    private const uint AbiVersion = 4;
     private const string LibraryName = "PulseGen.Engine";
     private const string AcousticModel = "bounded-propagation-v6";
     private const string AtmosphereModel = "layered-bounded-wind-v1";
@@ -146,7 +146,7 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            6,
+            7,
             EngineVersion,
             AbiVersion,
             AcousticModel,
@@ -290,6 +290,58 @@ public static unsafe class NativeSceneRenderer
                 ImpulseResponseSeconds = impulseResponseSeconds
             };
             Check(Native.pg_engine_start_device(engine, &config), engine, "start WASAPI preview");
+            return new PreviewSession(engine);
+        }
+        catch
+        {
+            Native.pg_engine_destroy(engine);
+            throw;
+        }
+    }
+
+    public static PreviewSession StartBufferPreview(
+        float[] interleavedStereo,
+        uint sampleRate,
+        uint periodFrames = 512,
+        bool loop = false,
+        bool exclusiveMode = false)
+    {
+        ArgumentNullException.ThrowIfNull(interleavedStereo);
+        if (interleavedStereo.Length == 0 || (interleavedStereo.Length & 1) != 0)
+        {
+            throw new ArgumentException("A stereo preview requires a non-empty even number of interleaved samples.", nameof(interleavedStereo));
+        }
+        if (interleavedStereo.Any(sample => !float.IsFinite(sample)))
+        {
+            throw new ArgumentException("Stereo preview samples must all be finite.", nameof(interleavedStereo));
+        }
+
+        var engineConfig = new NativeEngineConfig
+        {
+            Size = (uint)sizeof(NativeEngineConfig),
+            Version = AbiVersion,
+            MaxEmitters = 1,
+            MaxReceivers = 1,
+            MaxKeyframesPerPath = 2
+        };
+        Check(Native.pg_engine_create(&engineConfig, out var engine), engine, "create buffer preview engine");
+        try
+        {
+            fixed (float* samples = interleavedStereo)
+            {
+                var config = new NativeBufferDeviceConfig
+                {
+                    Size = (uint)sizeof(NativeBufferDeviceConfig),
+                    Version = AbiVersion,
+                    InterleavedStereo = samples,
+                    FrameCount = checked((ulong)(interleavedStereo.Length / 2)),
+                    SampleRate = sampleRate,
+                    PeriodFrames = periodFrames,
+                    ExclusiveMode = exclusiveMode ? 1U : 0U,
+                    Loop = loop ? 1U : 0U
+                };
+                Check(Native.pg_engine_start_buffer_device(engine, &config), engine, "start stereo buffer preview");
+            }
             return new PreviewSession(engine);
         }
         catch
@@ -989,6 +1041,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderRequest { public uint Size, Version; public nint OutputDirectoryUtf8, FilePrefixUtf8; public double DurationSeconds; public uint SampleRate; public int SampleFormat, Quality; public uint ReflectionOrder, Seed; public nint CancellationFlag; public uint RayCount, Reserved; public double ImpulseResponseSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; public uint RayCount, Seed; public double ImpulseResponseSeconds; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeBufferDeviceConfig { public uint Size, Version; public float* InterleavedStereo; public ulong FrameCount; public uint SampleRate, PeriodFrames, ExclusiveMode, Loop; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; }
 
     private static class Native
@@ -1008,6 +1061,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_motion(nint engine, NativeReceiverMotion* motion);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_device(nint engine, NativeDeviceConfig* config);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_buffer_device(nint engine, NativeBufferDeviceConfig* config);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_stop_device(nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_get_device_status(nint engine, NativeDeviceStatus* status);
     }

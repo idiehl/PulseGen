@@ -40,12 +40,14 @@ public sealed partial class MainWindow : Window
     private double previewDurationSeconds;
     private bool previewAdvancesScene = true;
     private string previewCompletionStatus = "Preview complete · scene state preserved";
+    private string previewInterruptedStatus = "Preview stopped · the WASAPI device was removed or rerouted";
     private int selectedKeyframeIndex;
     private bool initializingControls = true;
     private bool sceneDirty;
     private string? lastRenderDirectory;
     private string? lastProjectDirectory;
     private CancellationTokenSource? analysisCancellation;
+    private CancellationTokenSource? spectralCancellation;
     private CancellationTokenSource? syncCancellation;
     private NativeSceneRenderer.PreviewSession? audioPreview;
     private SceneSelection currentSelection;
@@ -63,6 +65,14 @@ public sealed partial class MainWindow : Window
     private AtlasLibraryClient? atlasLibrary;
     private Guid? atlasBaseRevisionId;
     private string? atlasBaseETag;
+    private IReadOnlyList<SpectralAnalysisSession> spectralSessions = [];
+    private SpectralAnalysisSession? activeSpectralSession;
+    private SpectralEditState? activeSpectralEditState;
+    private SpectralPartialTrack? selectedSpectralTrack;
+    private readonly Dictionary<string, SpectralTrackEdit> pendingSpectralTrackEdits = new(StringComparer.Ordinal);
+    private int spectralLoadVersion;
+    private int spectralSelectionVersion;
+    private bool spectralAuditionPlaying;
 
     public MainWindow()
     {
@@ -78,6 +88,7 @@ public sealed partial class MainWindow : Window
             PopulateInspector(currentSelection);
         };
         Viewport.SceneEdited += (_, message) => MarkSceneEdited(message);
+        SpectralTrackPlot.TrackSelected += SelectSpectralTrack;
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
@@ -150,6 +161,7 @@ public sealed partial class MainWindow : Window
 
         RefreshReceiverSummary();
         RefreshAnalysisTakeChoices();
+        RefreshSpectralWorkspace();
         var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
         for (var index = 0; index < tickLabels.Length; index++)
         {
@@ -808,6 +820,7 @@ public sealed partial class MainWindow : Window
         previewDurationSeconds = auditionScene.Timeline.DurationSeconds;
         previewAdvancesScene = false;
         previewCompletionStatus = $"{draft.Name} audition complete · project was not changed";
+        previewInterruptedStatus = "Material audition stopped · the WASAPI device was removed or rerouted";
         PlayButton.Content = "▶  Auditioning";
         try
         {
@@ -1574,6 +1587,7 @@ public sealed partial class MainWindow : Window
         previewDurationSeconds = scene.Timeline.DurationSeconds;
         previewAdvancesScene = true;
         previewCompletionStatus = "Preview complete · scene state preserved";
+        previewInterruptedStatus = "Visual-only preview · the WASAPI device stopped or was rerouted";
         previewTimer.Start();
         PlayButton.Content = "▶  Playing";
         try
@@ -1686,6 +1700,7 @@ public sealed partial class MainWindow : Window
             var hash = await ProjectStore.SaveAsync(scene, projectDirectory);
             lastProjectDirectory = projectDirectory;
             sceneDirty = false;
+            RefreshSpectralWorkspace();
             StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}";
         }
         catch (Exception exception)
@@ -2430,6 +2445,7 @@ public sealed partial class MainWindow : Window
             scene = imported.Scene;
             Viewport.Scene = scene;
             sceneDirty = false;
+            RefreshSpectralWorkspace(imported.AnalysisReceiptSha256);
             var artifactCount = imported.DeclaredAssetCount + imported.ReusedAssetCount;
             AnalysisResultText.Text = $"{imported.PartialTrackCount:N0} tone tracks · null RMS {imported.RmsNull:0.0e+0} · {artifactCount} verified artifacts ({imported.DeclaredAssetCount} new)";
             StatusText.Text = $"Analysis imported atomically · {mode.DisplayName} · {imported.PartialTrackCount:N0} tone tracks · {output}";
@@ -2480,6 +2496,437 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnSignalWorkspaceClicked(object? sender, RoutedEventArgs e)
+    {
+        SignalWorkspace.IsVisible = true;
+        SpectrumWorkspace.IsVisible = false;
+        SignalWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#71DCCF"));
+        SpectrumWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
+    }
+
+    private void OnSpectrumWorkspaceClicked(object? sender, RoutedEventArgs e)
+    {
+        SignalWorkspace.IsVisible = false;
+        SpectrumWorkspace.IsVisible = true;
+        SignalWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
+        SpectrumWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#71DCCF"));
+        if (lastProjectDirectory is not null && spectralSessions.Count == 0)
+        {
+            RefreshSpectralWorkspace();
+        }
+    }
+
+    private async void RefreshSpectralWorkspace(string? preferredReceiptSha256 = null)
+    {
+        var version = ++spectralLoadVersion;
+        if (lastProjectDirectory is null)
+        {
+            ClearSpectralWorkspace("Save the project and analyze a receiver take to populate this workspace.");
+            return;
+        }
+
+        try
+        {
+            var sceneSnapshot = scene;
+            var projectDirectory = lastProjectDirectory;
+            var sessions = await Task.Run(() => SpectralAnalysisCatalog.LoadAsync(sceneSnapshot, projectDirectory));
+            if (version != spectralLoadVersion)
+            {
+                return;
+            }
+            spectralSessions = sessions;
+            SpectralSessionBox.ItemsSource = sessions;
+            SpectralSessionBox.IsEnabled = sessions.Count > 0;
+            if (sessions.Count == 0)
+            {
+                ClearSpectralWorkspace("No imported decomposition exists in this project yet.");
+                return;
+            }
+            var preferred = preferredReceiptSha256 ?? activeSpectralSession?.AnalysisReceiptSha256;
+            SpectralSessionBox.SelectedItem = sessions.FirstOrDefault(session =>
+                string.Equals(session.AnalysisReceiptSha256, preferred, StringComparison.OrdinalIgnoreCase)) ?? sessions[0];
+        }
+        catch (Exception exception)
+        {
+            if (version == spectralLoadVersion)
+            {
+                ClearSpectralWorkspace($"Spectral assets could not be verified: {exception.Message}");
+            }
+        }
+    }
+
+    private void ClearSpectralWorkspace(string message)
+    {
+        spectralSessions = [];
+        activeSpectralSession = null;
+        activeSpectralEditState = null;
+        selectedSpectralTrack = null;
+        pendingSpectralTrackEdits.Clear();
+        SpectralSessionBox.ItemsSource = Array.Empty<SpectralAnalysisSession>();
+        SpectralSessionBox.IsEnabled = false;
+        SpectralSessionSummaryText.Text = message;
+        SpectralEditStateText.Text = "No spectral edit loaded";
+        SpectralTrackPlot.Tracks = [];
+        SpectralTrackPlot.Edits = new Dictionary<string, SpectralTrackEdit>();
+        SpectralTrackPlot.SelectedTrackId = null;
+        SpectralTrackNameText.Text = "Click a tone path";
+        SpectralTrackRangeText.Text = "Frequency and channel details appear here.";
+        SetSpectralActionsEnabled(false);
+    }
+
+    private async void OnSpectralSessionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (SpectralSessionBox.SelectedItem is not SpectralAnalysisSession session || lastProjectDirectory is null)
+        {
+            return;
+        }
+        var selectionVersion = ++spectralSelectionVersion;
+        try
+        {
+            var editState = await SpectralEditStore.LoadLatestAsync(scene, lastProjectDirectory, session);
+            if (selectionVersion != spectralSelectionVersion || !Equals(SpectralSessionBox.SelectedItem, session))
+            {
+                return;
+            }
+            activeSpectralSession = session;
+            activeSpectralEditState = editState;
+            pendingSpectralTrackEdits.Clear();
+            foreach (var edit in editState.Document.TrackEdits)
+            {
+                pendingSpectralTrackEdits[edit.TrackId] = edit;
+            }
+
+            SpectralPartialsEnabled.IsChecked = editState.Document.Partials.Enabled;
+            SpectralPartialsGain.Text = FormatNumber(editState.Document.Partials.GainLinear);
+            SpectralTransientsEnabled.IsChecked = editState.Document.Transients.Enabled;
+            SpectralTransientsGain.Text = FormatNumber(editState.Document.Transients.GainLinear);
+            SpectralStochasticEnabled.IsChecked = editState.Document.StochasticResidual.Enabled;
+            SpectralStochasticGain.Text = FormatNumber(editState.Document.StochasticResidual.GainLinear);
+            SpectralSessionSummaryText.Text = $"{session.DurationSeconds:0.000} s · {session.SampleRate:N0} Hz · {session.ChannelModeLabel} · null RMS {session.RmsNull:0.0e+0}";
+            SpectralPlotTitleText.Text = $"{session.Tracks.Count:N0} TONE PATHS · TIME × LOG FREQUENCY";
+            SpectralEditStateText.Text = editState.AssetSha256 is null
+                ? "Fresh non-destructive edit · not saved"
+                : $"Loaded immutable edit {editState.AssetSha256[..12]}…";
+            SpectralTrackPlot.Tracks = session.Tracks;
+            SpectralTrackPlot.Edits = pendingSpectralTrackEdits;
+            SpectralTrackPlot.DurationSeconds = session.DurationSeconds;
+            SpectralTrackPlot.SampleRate = session.SampleRate;
+            SelectSpectralTrack(session.Tracks.OrderByDescending(track => track.PeakAmplitude).FirstOrDefault());
+            SetSpectralActionsEnabled(true);
+        }
+        catch (Exception exception)
+        {
+            SpectralSessionSummaryText.Text = $"This analysis could not be opened: {exception.Message}";
+            SetSpectralActionsEnabled(false);
+        }
+    }
+
+    private void SelectSpectralTrack(SpectralPartialTrack? track)
+    {
+        selectedSpectralTrack = track;
+        SpectralTrackPlot.SelectedTrackId = track?.Id;
+        if (track is null)
+        {
+            SpectralTrackNameText.Text = "No tracked tone available";
+            SpectralTrackRangeText.Text = "The residual layers can still be mixed and rendered.";
+            SpectralTrackEnabled.IsEnabled = false;
+            SpectralTrackGain.IsEnabled = false;
+            SpectralTrackPitch.IsEnabled = false;
+            return;
+        }
+
+        pendingSpectralTrackEdits.TryGetValue(track.Id, out var edit);
+        edit ??= new SpectralTrackEdit { TrackId = track.Id };
+        SpectralTrackNameText.Text = track.Id;
+        var channelLabel = activeSpectralSession?.ChannelMode == ModelHostChannelMode.MidSide
+            ? track.Channel == 0 ? "center (mid)" : "width (side)"
+            : track.Channel == 0 ? "left" : "right";
+        SpectralTrackRangeText.Text = $"{channelLabel} · {track.MinimumFrequencyHz:0.0}–{track.MaximumFrequencyHz:0.0} Hz · {track.Points.Count:N0} control points";
+        SpectralTrackEnabled.IsEnabled = true;
+        SpectralTrackGain.IsEnabled = true;
+        SpectralTrackPitch.IsEnabled = true;
+        SpectralTrackEnabled.IsChecked = edit.Enabled;
+        SpectralTrackGain.Text = FormatNumber(edit.GainLinear);
+        SpectralTrackPitch.Text = FormatNumber(edit.PitchSemitones);
+    }
+
+    private void OnApplySpectralTrackClicked(object? sender, RoutedEventArgs e)
+    {
+        if (selectedSpectralTrack is null)
+        {
+            StatusText.Text = "Select a tone path in the spectrum first";
+            return;
+        }
+        if (!TryReadNumber(SpectralTrackGain, out var gain) || gain is < 0 or > 4 ||
+            !TryReadNumber(SpectralTrackPitch, out var pitch) || pitch is < -24 or > 24)
+        {
+            StatusText.Text = "Tone edit rejected · gain must be 0–4 and pitch must be −24 to +24 semitones";
+            return;
+        }
+        var edit = new SpectralTrackEdit
+        {
+            TrackId = selectedSpectralTrack.Id,
+            Enabled = SpectralTrackEnabled.IsChecked == true,
+            GainLinear = gain,
+            PitchSemitones = pitch
+        };
+        if (edit.Enabled && Math.Abs(edit.GainLinear - 1) < 1.0e-12 && Math.Abs(edit.PitchSemitones) < 1.0e-12)
+        {
+            pendingSpectralTrackEdits.Remove(edit.TrackId);
+        }
+        else
+        {
+            pendingSpectralTrackEdits[edit.TrackId] = edit;
+        }
+        SpectralTrackPlot.Edits = new Dictionary<string, SpectralTrackEdit>(pendingSpectralTrackEdits, StringComparer.Ordinal);
+        SpectralEditStateText.Text = $"Unsaved edit · {pendingSpectralTrackEdits.Count:N0} changed tone{(pendingSpectralTrackEdits.Count == 1 ? string.Empty : "s")}";
+        StatusText.Text = $"{selectedSpectralTrack.Id} edit staged · imported analysis remains untouched";
+    }
+
+    private void OnResetSpectralTrackClicked(object? sender, RoutedEventArgs e)
+    {
+        if (selectedSpectralTrack is null)
+        {
+            return;
+        }
+        pendingSpectralTrackEdits.Remove(selectedSpectralTrack.Id);
+        SpectralTrackPlot.Edits = new Dictionary<string, SpectralTrackEdit>(pendingSpectralTrackEdits, StringComparer.Ordinal);
+        SelectSpectralTrack(selectedSpectralTrack);
+        SpectralEditStateText.Text = $"Unsaved edit · {pendingSpectralTrackEdits.Count:N0} changed tone{(pendingSpectralTrackEdits.Count == 1 ? string.Empty : "s")}";
+    }
+
+    private bool TryBuildPendingSpectralEdit(out SpectralEditDocument document, out string error)
+    {
+        document = null!;
+        if (activeSpectralSession is null || activeSpectralEditState is null)
+        {
+            error = "Select an imported analysis first.";
+            return false;
+        }
+        if (!TryReadNumber(SpectralPartialsGain, out var partialGain) || partialGain is < 0 or > 4 ||
+            !TryReadNumber(SpectralTransientsGain, out var transientGain) || transientGain is < 0 or > 4 ||
+            !TryReadNumber(SpectralStochasticGain, out var stochasticGain) || stochasticGain is < 0 or > 4)
+        {
+            error = "Each spectral layer gain must be a finite value from 0 to 4.";
+            return false;
+        }
+        document = activeSpectralEditState.Document with
+        {
+            Partials = new SpectralLayerSettings { Enabled = SpectralPartialsEnabled.IsChecked == true, GainLinear = partialGain },
+            Transients = new SpectralLayerSettings { Enabled = SpectralTransientsEnabled.IsChecked == true, GainLinear = transientGain },
+            StochasticResidual = new SpectralLayerSettings { Enabled = SpectralStochasticEnabled.IsChecked == true, GainLinear = stochasticGain },
+            TrackEdits = pendingSpectralTrackEdits.Values.OrderBy(edit => edit.TrackId, StringComparer.Ordinal).ToList()
+        };
+        try
+        {
+            SpectralEditStore.Validate(document, activeSpectralSession);
+            error = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            error = exception.Message;
+            return false;
+        }
+    }
+
+    private async void OnAuditionSpectralClicked(object? sender, RoutedEventArgs e)
+    {
+        if (spectralAuditionPlaying)
+        {
+            StopPreviewTransport();
+            StatusText.Text = "Spectral audition stopped · project was not changed";
+            return;
+        }
+        if (!TryBuildPendingSpectralEdit(out var edit, out var error) || activeSpectralSession is null)
+        {
+            StatusText.Text = $"Spectral audition unavailable · {error}";
+            return;
+        }
+        StopPreviewTransport();
+        SetSpectralBusy(true);
+        spectralCancellation = new CancellationTokenSource();
+        try
+        {
+            StatusText.Text = "Recombining verified layers and staged tone edits…";
+            var rendered = await SpectralResynthesisService.RenderAsync(activeSpectralSession, edit, spectralCancellation.Token);
+            var profile = GetActiveRenderProfile();
+            audioPreview = NativeSceneRenderer.StartBufferPreview(
+                rendered.Buffer.InterleavedSamples,
+                (uint)rendered.Buffer.SampleRate,
+                (uint)profile.BufferFrames);
+            previewStarted = DateTimeOffset.UtcNow;
+            previewDurationSeconds = rendered.Buffer.DurationSeconds;
+            previewAdvancesScene = false;
+            previewCompletionStatus = "Spectral audition complete · project was not changed";
+            previewInterruptedStatus = "Spectral audition stopped · the WASAPI device was removed or rerouted";
+            spectralAuditionPlaying = true;
+            previewTimer.Start();
+            PlayButton.Content = "▶  Auditioning";
+            SpectralAuditionButton.Content = "■  Playing";
+            StatusText.Text = $"Spectral audition · peak {rendered.Peak:0.000} · {rendered.Buffer.DurationSeconds:0.000} s · in-process WASAPI";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Spectral audition cancelled";
+        }
+        catch (Exception exception)
+        {
+            StopPreviewTransport();
+            StatusText.Text = $"Spectral audition failed: {exception.Message}";
+        }
+        finally
+        {
+            spectralCancellation.Dispose();
+            spectralCancellation = null;
+            SetSpectralBusy(false);
+        }
+    }
+
+    private async void OnSaveSpectralEditClicked(object? sender, RoutedEventArgs e)
+    {
+        if (!TryBuildPendingSpectralEdit(out var edit, out var error) ||
+            activeSpectralSession is null || activeSpectralEditState is null || lastProjectDirectory is null)
+        {
+            StatusText.Text = $"Spectral edit was not saved · {error}";
+            return;
+        }
+        SetSpectralBusy(true);
+        spectralCancellation = new CancellationTokenSource();
+        try
+        {
+            var saved = await SpectralEditStore.SaveAsync(
+                scene,
+                lastProjectDirectory,
+                activeSpectralSession,
+                activeSpectralEditState,
+                edit,
+                spectralCancellation.Token);
+            scene = saved.Scene;
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            activeSpectralEditState = saved.State;
+            SpectralEditStateText.Text = $"Saved immutable edit {saved.Asset.Sha256[..12]}… · parent retained";
+            StatusText.Text = $"Spectral edit saved atomically · {saved.Asset.Sha256[..12]}…";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Spectral edit save failed without replacing the current version: {exception.Message}";
+        }
+        finally
+        {
+            spectralCancellation.Dispose();
+            spectralCancellation = null;
+            SetSpectralBusy(false);
+        }
+    }
+
+    private async void OnRenderSpectralClicked(object? sender, RoutedEventArgs e)
+    {
+        if (!TryBuildPendingSpectralEdit(out var edit, out var error) ||
+            activeSpectralSession is null || activeSpectralEditState is null || lastProjectDirectory is null)
+        {
+            StatusText.Text = $"Spectral WAV was not rendered · {error}";
+            return;
+        }
+        StopPreviewTransport();
+        SetSpectralBusy(true);
+        spectralCancellation = new CancellationTokenSource();
+        try
+        {
+            StatusText.Text = "Saving the non-destructive edit before rendering its stereo mix…";
+            var saved = await SpectralEditStore.SaveAsync(
+                scene,
+                lastProjectDirectory,
+                activeSpectralSession,
+                activeSpectralEditState,
+                edit,
+                spectralCancellation.Token);
+            scene = saved.Scene;
+            activeSpectralEditState = saved.State;
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            var rendered = await SpectralResynthesisService.RenderAsync(activeSpectralSession, saved.State.Document, spectralCancellation.Token);
+            var outputDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "PulseGen",
+                "SpectralRenders");
+            var output = Path.Combine(
+                outputDirectory,
+                $"{SafeName(Path.GetFileNameWithoutExtension(activeSpectralSession.SourceFileName))}-spectral-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.wav");
+            await Task.Run(() => FloatWaveFile.WriteAtomic(output, rendered.Buffer), spectralCancellation.Token);
+            var imported = await ProjectStore.ImportAssetAsync(
+                lastProjectDirectory,
+                output,
+                AssetKind.ModelOutput,
+                "audio/wav",
+                $"PulseGen spectral resynthesis; analysisReceiptSha256={activeSpectralSession.AnalysisReceiptSha256}; editSha256={saved.Asset.Sha256}",
+                cancellationToken: spectralCancellation.Token);
+            imported = imported with
+            {
+                SampleRate = rendered.Buffer.SampleRate,
+                Channels = 2,
+                DurationSeconds = rendered.Buffer.DurationSeconds
+            };
+            var assets = scene.Assets.ToList();
+            var existing = assets.FirstOrDefault(asset => string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                assets.Add(imported);
+            }
+            else if (existing.Kind != imported.Kind || !string.Equals(existing.MediaType, imported.MediaType, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("Rendered spectral mix collides with an incompatible project asset.");
+            }
+            scene = scene with { Assets = assets, UpdatedAtUtc = DateTimeOffset.UtcNow };
+            await ProjectStore.SaveAsync(scene, lastProjectDirectory, spectralCancellation.Token);
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            SpectralEditStateText.Text = $"Edit {saved.Asset.Sha256[..12]}… · stereo mix {imported.Sha256[..12]}…";
+            StatusText.Text = $"Spectral stereo WAV rendered · peak {rendered.Peak:0.000} · {output}";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Spectral render cancelled";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Spectral render failed: {exception.Message}";
+        }
+        finally
+        {
+            spectralCancellation.Dispose();
+            spectralCancellation = null;
+            SetSpectralBusy(false);
+        }
+    }
+
+    private void SetSpectralBusy(bool busy)
+    {
+        var enabled = !busy && activeSpectralSession is not null;
+        SetSpectralActionsEnabled(enabled);
+        SpectralSessionBox.IsEnabled = !busy && spectralSessions.Count > 0;
+    }
+
+    private void SetSpectralActionsEnabled(bool enabled)
+    {
+        SpectralPartialsEnabled.IsEnabled = enabled;
+        SpectralPartialsGain.IsEnabled = enabled;
+        SpectralTransientsEnabled.IsEnabled = enabled;
+        SpectralTransientsGain.IsEnabled = enabled;
+        SpectralStochasticEnabled.IsEnabled = enabled;
+        SpectralStochasticGain.IsEnabled = enabled;
+        var trackEnabled = enabled && selectedSpectralTrack is not null;
+        SpectralTrackEnabled.IsEnabled = trackEnabled;
+        SpectralTrackGain.IsEnabled = trackEnabled;
+        SpectralTrackPitch.IsEnabled = trackEnabled;
+        SpectralApplyTrackButton.IsEnabled = trackEnabled;
+        SpectralResetTrackButton.IsEnabled = trackEnabled;
+        SpectralAuditionButton.IsEnabled = enabled;
+        SpectralSaveEditButton.IsEnabled = enabled;
+        SpectralRenderButton.IsEnabled = enabled;
+    }
+
     private void OnPreviewTick(object? sender, EventArgs e)
     {
         var elapsed = (DateTimeOffset.UtcNow - previewStarted).TotalSeconds;
@@ -2502,7 +2949,7 @@ public sealed partial class MainWindow : Window
             if (!previewAdvancesScene)
             {
                 StopPreviewTransport();
-                StatusText.Text = "Material audition stopped · the WASAPI device was removed or rerouted";
+                StatusText.Text = previewInterruptedStatus;
                 return;
             }
             StatusText.Text = "Visual-only preview · the WASAPI device stopped or was rerouted";
@@ -2519,13 +2966,16 @@ public sealed partial class MainWindow : Window
         previewTimer.Stop();
         audioPreview?.Dispose();
         audioPreview = null;
+        spectralAuditionPlaying = false;
         PlayButton.Content = "▶  Preview";
+        SpectralAuditionButton.Content = "▶  Hear";
     }
 
     protected override void OnClosed(EventArgs e)
     {
         StopPreviewTransport();
         analysisCancellation?.Cancel();
+        spectralCancellation?.Cancel();
         syncCancellation?.Cancel();
         atlasIdentity?.Dispose();
         atlasHttp.Dispose();

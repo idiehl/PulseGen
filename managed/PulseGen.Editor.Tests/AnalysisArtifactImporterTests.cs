@@ -41,6 +41,62 @@ public sealed class AnalysisArtifactImporterTests
             Assert.Equal(ModelHostChannelMode.IndependentChannels, imported.ChannelMode);
             Assert.True(imported.PartialTrackCount > 0);
             Assert.Equal(5, (await ProjectStore.LoadAsync(project)).Assets.Count);
+
+            var sessions = await SpectralAnalysisCatalog.LoadAsync(imported.Scene, project);
+            var session = Assert.Single(sessions);
+            Assert.Equal(imported.AnalysisReceiptSha256, session.AnalysisReceiptSha256);
+            Assert.Equal(imported.PartialTrackCount, session.Tracks.Count);
+            var defaultState = new SpectralEditState(SpectralEditDocument.CreateDefault(session), null);
+            var firstMix = await SpectralResynthesisService.RenderAsync(session, defaultState.Document);
+            var secondMix = await SpectralResynthesisService.RenderAsync(session, defaultState.Document);
+            Assert.Equal(8192, firstMix.Buffer.Frames);
+            Assert.Equal(firstMix.Buffer.InterleavedSamples, secondMix.Buffer.InterleavedSamples);
+            Assert.True(firstMix.Peak > 0);
+
+            var muted = defaultState.Document with
+            {
+                Partials = new SpectralLayerSettings { Enabled = false },
+                Transients = new SpectralLayerSettings { Enabled = false },
+                StochasticResidual = new SpectralLayerSettings { Enabled = false }
+            };
+            var silentMix = await SpectralResynthesisService.RenderAsync(session, muted);
+            Assert.All(silentMix.Buffer.InterleavedSamples, sample => Assert.Equal(0, sample));
+
+            var edited = defaultState.Document with
+            {
+                TrackEdits =
+                [
+                    new SpectralTrackEdit
+                    {
+                        TrackId = session.Tracks[0].Id,
+                        Enabled = true,
+                        GainLinear = 0.5,
+                        PitchSemitones = 7
+                    }
+                ]
+            };
+            var editedMix = await SpectralResynthesisService.RenderAsync(session, edited);
+            Assert.False(firstMix.Buffer.InterleavedSamples.SequenceEqual(editedMix.Buffer.InterleavedSamples));
+            Assert.All(editedMix.Buffer.InterleavedSamples, sample => Assert.True(float.IsFinite(sample)));
+
+            var saved = await SpectralEditStore.SaveAsync(imported.Scene, project, session, defaultState, edited);
+            Assert.Equal(6, saved.Scene.Assets.Count);
+            Assert.Equal(saved.Asset.Sha256, (await SpectralEditStore.LoadLatestAsync(saved.Scene, project, session)).AssetSha256);
+            var revisedEdit = saved.State.Document with
+            {
+                TrackEdits = [saved.State.Document.TrackEdits[0] with { GainLinear = 0.75 }]
+            };
+            var revised = await SpectralEditStore.SaveAsync(saved.Scene, project, session, saved.State, revisedEdit);
+            Assert.Equal(7, revised.Scene.Assets.Count);
+            Assert.Equal(saved.Asset.Sha256, revised.State.Document.ParentEditSha256);
+            Assert.Equal(revised.Asset.Sha256, (await SpectralEditStore.LoadLatestAsync(revised.Scene, project, session)).AssetSha256);
+
+            var wavePath = Path.Combine(root, "edited.wav");
+            FloatWaveFile.WriteAtomic(wavePath, editedMix.Buffer);
+            var reopened = FloatWaveFile.Read(wavePath);
+            Assert.Equal(editedMix.Buffer.SampleRate, reopened.SampleRate);
+            Assert.Equal(editedMix.Buffer.Channels, reopened.Channels);
+            Assert.Equal(editedMix.Buffer.InterleavedSamples, reopened.InterleavedSamples);
         }
         finally
         {

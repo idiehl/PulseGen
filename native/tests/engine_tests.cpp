@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <numbers>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -606,7 +607,7 @@ std::size_t first_active_frame(const std::vector<float>& samples, float threshol
 int main(int argument_count, char** arguments)
 {
     try {
-    static_assert(PG_ABI_VERSION == 3U);
+    static_assert(PG_ABI_VERSION == 4U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
     REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 
@@ -1134,6 +1135,17 @@ int main(int argument_count, char** arguments)
     invalid_device.receiver_index = 0U;
     invalid_device.sample_rate = 1U;
     REQUIRE(pg_engine_start_device(engine, &invalid_device) == PG_STATUS_INVALID_ARGUMENT);
+
+    pg_buffer_device_config invalid_buffer_device{};
+    invalid_buffer_device.size = sizeof(invalid_buffer_device);
+    invalid_buffer_device.version = PG_ABI_VERSION;
+    invalid_buffer_device.sample_rate = 48000U;
+    invalid_buffer_device.period_frames = 512U;
+    invalid_buffer_device.frame_count = 1U;
+    REQUIRE(pg_engine_start_buffer_device(engine, &invalid_buffer_device) == PG_STATUS_INVALID_ARGUMENT);
+    const std::array<float, 2> non_finite_preview{ std::numeric_limits<float>::quiet_NaN(), 0.0F };
+    invalid_buffer_device.interleaved_stereo = non_finite_preview.data();
+    REQUIRE(pg_engine_start_buffer_device(engine, &invalid_buffer_device) == PG_STATUS_INVALID_ARGUMENT);
     REQUIRE(pg_engine_stop_device(engine) == PG_STATUS_OK);
 
     constexpr std::uint32_t sample_rate = 48000;
@@ -1199,6 +1211,27 @@ int main(int argument_count, char** arguments)
         REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
         REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
         REQUIRE(status.running == 0U);
+
+        std::vector<float> buffer_preview(4800U * 2U);
+        for (std::size_t frame = 0U; frame < buffer_preview.size() / 2U; ++frame) {
+            const float sample = static_cast<float>(0.1 * std::sin(2.0 * std::numbers::pi * 440.0 * static_cast<double>(frame) / 48000.0));
+            buffer_preview[frame * 2U] = sample;
+            buffer_preview[(frame * 2U) + 1U] = -sample;
+        }
+        pg_buffer_device_config buffer_config{};
+        buffer_config.size = sizeof(buffer_config);
+        buffer_config.version = PG_ABI_VERSION;
+        buffer_config.interleaved_stereo = buffer_preview.data();
+        buffer_config.frame_count = buffer_preview.size() / 2U;
+        buffer_config.sample_rate = 48000U;
+        buffer_config.period_frames = 256U;
+        REQUIRE(pg_engine_start_buffer_device(audio_engine, &buffer_config) == PG_STATUS_OK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
+        REQUIRE(status.running == 1U);
+        REQUIRE(status.receiver_index == std::numeric_limits<std::uint32_t>::max());
+        REQUIRE(status.frames_processed > 0U);
+        REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
         pg_engine_destroy(audio_engine);
         std::cout << "PULSEGEN_WASAPI_DEVICE_OK frames=" << status.frames_processed
                   << " callbacks=" << status.callback_count << '\n';

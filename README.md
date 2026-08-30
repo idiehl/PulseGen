@@ -73,6 +73,17 @@ commands and reads bounded telemetry.
   layer hashes, timing/channel alignment, null error, local-only provenance, and
   partial-track count; the three audio layers, track data, and analysis receipt
   then become immutable content-addressed assets in the saved project.
+- Interactive spectral workspace with a time/log-frequency tone-path view,
+  selectable center/width or L/R tracks, independent tone mute/gain/±24-semitone
+  edits, and separate controls for tonal, transient, and stochastic layers.
+  Unedited layers retain their exact reconstruction path; edited tones use
+  phase-aware delta resynthesis against that untouched tonal layer. Edit saves
+  are immutable, parent-linked versions, and deterministic two-channel float WAV
+  mixes are content-addressed back into the project without normalization.
+- Bounded in-process stereo-buffer audition through miniaudio/WASAPI. The native
+  engine copies finite audio before device start, and its real-time callback only
+  reads the preallocated buffer—no allocation, locks, file access, or managed
+  callback occurs on the audio thread.
 - Demucs/AudioSep adapter manifests that deliberately remain unavailable until
   their weight artifacts, checksums, and licenses are audited.
 - Content-addressed project assets, guarded portable PulsePack archives, bounded

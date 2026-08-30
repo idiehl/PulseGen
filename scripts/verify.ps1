@@ -105,7 +105,7 @@ try {
     $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
     $miniaudioDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'miniaudio' })
     $assimpDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'Assimp' })
-    if ($renderReceipt.receiptVersion -ne 6 -or $renderReceipt.nativeAbiVersion -ne 3 -or
+    if ($renderReceipt.receiptVersion -ne 7 -or $renderReceipt.nativeAbiVersion -ne 4 -or
         $renderReceipt.acousticModel -ne 'bounded-propagation-v6' -or
         $renderReceipt.atmosphereModel -ne 'layered-bounded-wind-v1' -or
         $renderReceipt.roomResponseModel -ne 'eyring-three-band-v1' -or
@@ -153,7 +153,7 @@ try {
         }
     }
     $surfaceReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $surfaceFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($surfaceReceipt.receiptVersion -ne 6 -or $surfaceReceipt.acousticModel -ne 'bounded-propagation-v6' -or
+    if ($surfaceReceipt.receiptVersion -ne 7 -or $surfaceReceipt.acousticModel -ne 'bounded-propagation-v6' -or
         $surfaceReceipt.roomResponseModel -ne 'eyring-three-band-v1' -or
         $surfaceReceipt.reflectionOrder -ne 1 -or $surfaceReceipt.rayCount -ne 4096 -or
         $surfaceReceipt.impulseResponseSeconds -ne 2 -or
@@ -214,7 +214,7 @@ try {
         }
     }
     $atmosphereReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $atmosphereFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($atmosphereReceipt.receiptVersion -ne 6 -or $atmosphereReceipt.acousticModel -ne 'bounded-propagation-v6' -or
+    if ($atmosphereReceipt.receiptVersion -ne 7 -or $atmosphereReceipt.acousticModel -ne 'bounded-propagation-v6' -or
         $atmosphereReceipt.atmosphereModel -ne 'layered-bounded-wind-v1' -or
         $atmosphereReceipt.roomResponseModel -ne 'eyring-three-band-v1' -or
         $atmosphereReceipt.atmosphereLayerCount -ne 2 -or $atmosphereReceipt.windZoneCount -ne 2 -or

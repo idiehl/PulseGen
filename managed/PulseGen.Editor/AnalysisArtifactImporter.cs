@@ -13,7 +13,8 @@ internal sealed record AnalysisImportResult(
     int MaxPartials,
     double RmsNull,
     double MaxAbsoluteError,
-    string SourceFileName);
+    string SourceFileName,
+    string AnalysisReceiptSha256);
 
 internal static class AnalysisArtifactImporter
 {
@@ -245,7 +246,8 @@ internal static class AnalysisArtifactImporter
             maxPartials,
             rmsNull,
             maxAbsoluteError,
-            Path.GetFileName(sourcePath));
+            Path.GetFileName(sourcePath),
+            importedManifest.Sha256);
     }
 
     private static (string Path, string FileName, string Sha256) ReadLayer(

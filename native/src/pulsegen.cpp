@@ -18,6 +18,7 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <new>
 #include <numbers>
 #include <numeric>
 #include <span>
@@ -28,10 +29,11 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.9";
+constexpr std::string_view engine_version = "0.1.0-alpha.10";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
+constexpr std::uint64_t maximum_buffer_preview_seconds = 600U;
 constexpr std::size_t maximum_acoustic_materials = 256U;
 constexpr std::size_t maximum_acoustic_geometries = 256U;
 constexpr std::size_t maximum_imported_mesh_geometries = 64U;
@@ -377,6 +379,9 @@ struct pg_engine {
     std::uint32_t device_ray_count{ 1024U };
     std::uint32_t device_seed{ 1U };
     double device_impulse_response_seconds{ 2.0 };
+    std::vector<float> device_buffer;
+    bool device_buffer_mode{};
+    bool device_buffer_loop{};
     std::string last_error;
 };
 
@@ -1971,6 +1976,26 @@ void device_data_callback(ma_device* device, void* output, const void* input, ma
 
     const std::uint64_t start_frame = engine->device_frame_cursor.fetch_add(frame_count, std::memory_order_relaxed);
     engine->device_frames_processed.fetch_add(frame_count, std::memory_order_relaxed);
+    if (engine->device_buffer_mode) {
+        const std::uint64_t buffer_frames = static_cast<std::uint64_t>(engine->device_buffer.size() / 2U);
+        for (ma_uint32 frame = 0; frame < frame_count; ++frame) {
+            std::uint64_t source_frame = start_frame + frame;
+            if (engine->device_buffer_loop && buffer_frames > 0U) {
+                source_frame %= buffer_frames;
+            }
+            const std::size_t output_index = static_cast<std::size_t>(frame) * 2U;
+            if (source_frame < buffer_frames) {
+                const std::size_t source_index = static_cast<std::size_t>(source_frame) * 2U;
+                samples[output_index] = std::clamp(engine->device_buffer[source_index], -1.0F, 1.0F);
+                samples[output_index + 1U] = std::clamp(engine->device_buffer[source_index + 1U], -1.0F, 1.0F);
+            } else {
+                samples[output_index] = 0.0F;
+                samples[output_index + 1U] = 0.0F;
+            }
+        }
+        engine->device_callback_count.fetch_add(1U, std::memory_order_relaxed);
+        return;
+    }
     const std::uint32_t receiver_index = engine->device_receiver_index;
     const std::uint32_t sample_rate = engine->device_sample_rate;
     const std::uint32_t reflection_order = engine->device_reflection_order;
@@ -2950,6 +2975,9 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
     engine->device_ray_count = config->ray_count;
     engine->device_seed = config->seed;
     engine->device_impulse_response_seconds = config->impulse_response_seconds;
+    engine->device_buffer_mode = false;
+    engine->device_buffer_loop = false;
+    engine->device_buffer.clear();
     engine->device_frame_cursor.store(config->start_frame, std::memory_order_relaxed);
     engine->device_frames_processed.store(0U, std::memory_order_relaxed);
     engine->device_callback_count.store(0U, std::memory_order_relaxed);
@@ -3006,6 +3034,90 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
     return PG_STATUS_OK;
 }
 
+pg_status PG_CALL pg_engine_start_buffer_device(pg_engine* engine, const pg_buffer_device_config* config)
+{
+    if (engine == nullptr || config == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(config)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Buffer device configuration structure is incompatible.");
+    }
+    if (engine->device_initialized || device_running(engine)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Real-time preview is already initialized.");
+    }
+    if (config->interleaved_stereo == nullptr || config->frame_count == 0U ||
+        config->sample_rate < 8000U || config->sample_rate > maximum_supported_sample_rate ||
+        config->period_frames < 32U || config->period_frames > 8192U ||
+        config->exclusive_mode > 1U || config->loop > 1U ||
+        config->frame_count > static_cast<std::uint64_t>(config->sample_rate) * maximum_buffer_preview_seconds) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Stereo preview buffer or device settings are outside supported bounds.");
+    }
+    if (config->frame_count > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max() / 2U)) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Stereo preview buffer exceeds addressable memory.");
+    }
+
+    const std::size_t sample_count = static_cast<std::size_t>(config->frame_count) * 2U;
+    if (!std::all_of(config->interleaved_stereo, config->interleaved_stereo + sample_count,
+            [](float sample) { return std::isfinite(sample); })) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Stereo preview samples must all be finite.");
+    }
+    try {
+        engine->device_buffer.assign(config->interleaved_stereo, config->interleaved_stereo + sample_count);
+    } catch (const std::bad_alloc&) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Unable to reserve the bounded stereo preview buffer.");
+    }
+
+    engine->device_buffer_mode = true;
+    engine->device_buffer_loop = config->loop != 0U;
+    engine->device_sample_rate = config->sample_rate;
+    engine->device_period_frames = config->period_frames;
+    engine->device_receiver_index = std::numeric_limits<std::uint32_t>::max();
+    engine->device_frame_cursor.store(0U, std::memory_order_relaxed);
+    engine->device_frames_processed.store(0U, std::memory_order_relaxed);
+    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+
+    ma_device_config device_config = ma_device_config_init(ma_device_type_playback);
+    device_config.sampleRate = config->sample_rate;
+    device_config.periodSizeInFrames = config->period_frames;
+    device_config.performanceProfile = ma_performance_profile_low_latency;
+    device_config.playback.format = ma_format_f32;
+    device_config.playback.channels = 2U;
+    device_config.playback.shareMode = config->exclusive_mode != 0U ? ma_share_mode_exclusive : ma_share_mode_shared;
+    device_config.dataCallback = device_data_callback;
+    device_config.notificationCallback = device_notification_callback;
+    device_config.pUserData = engine;
+
+#if defined(_WIN32)
+    constexpr ma_backend backends[]{ ma_backend_wasapi };
+    const ma_result init_result = ma_device_init_ex(backends, 1U, nullptr, &device_config, &engine->device);
+#else
+    const ma_result init_result = ma_device_init(nullptr, &device_config, &engine->device);
+#endif
+    if (init_result != MA_SUCCESS) {
+        engine->device_buffer.clear();
+        engine->device_buffer_mode = false;
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to initialize the audio device: ") + ma_result_description(init_result));
+    }
+    engine->device_initialized = true;
+    engine->device_sample_rate = engine->device.sampleRate;
+    if (engine->device.playback.internalPeriodSizeInFrames > 0U) {
+        engine->device_period_frames = engine->device.playback.internalPeriodSizeInFrames;
+    }
+
+    engine->device_running.store(true, std::memory_order_release);
+    const ma_result start_result = ma_device_start(&engine->device);
+    if (start_result != MA_SUCCESS) {
+        engine->device_running.store(false, std::memory_order_release);
+        ma_device_uninit(&engine->device);
+        engine->device_initialized = false;
+        engine->device_buffer.clear();
+        engine->device_buffer_mode = false;
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to start the audio device: ") + ma_result_description(start_result));
+    }
+    engine->last_error.clear();
+    return PG_STATUS_OK;
+}
+
 pg_status PG_CALL pg_engine_stop_device(pg_engine* engine)
 {
     if (engine == nullptr) {
@@ -3013,12 +3125,18 @@ pg_status PG_CALL pg_engine_stop_device(pg_engine* engine)
     }
     engine->device_running.store(false, std::memory_order_release);
     if (!engine->device_initialized) {
+        engine->device_buffer.clear();
+        engine->device_buffer_mode = false;
+        engine->device_buffer_loop = false;
         return PG_STATUS_OK;
     }
 
     const ma_result stop_result = ma_device_stop(&engine->device);
     ma_device_uninit(&engine->device);
     engine->device_initialized = false;
+    engine->device_buffer.clear();
+    engine->device_buffer_mode = false;
+    engine->device_buffer_loop = false;
     if (stop_result != MA_SUCCESS && stop_result != MA_DEVICE_NOT_STARTED) {
         return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to stop the audio device cleanly: ") + ma_result_description(stop_result));
     }

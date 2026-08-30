@@ -5,7 +5,7 @@ namespace PulseGen.Contracts;
 public static class ContractVersions
 {
     public const int SceneDocument = 1;
-    public const int NativeAbi = 1;
+    public const int NativeAbi = 4;
     public const int ModelPack = 1;
 }
 

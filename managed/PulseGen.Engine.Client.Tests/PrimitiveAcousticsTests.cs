@@ -9,6 +9,14 @@ namespace PulseGen.Engine.Client.Tests;
 public sealed class PrimitiveAcousticsTests
 {
     [Fact]
+    public void BufferPreviewRejectsMalformedStereoBeforeOpeningADevice()
+    {
+        Assert.Throws<ArgumentException>(() => NativeSceneRenderer.StartBufferPreview([], 48000));
+        Assert.Throws<ArgumentException>(() => NativeSceneRenderer.StartBufferPreview([0.1F], 48000));
+        Assert.Throws<ArgumentException>(() => NativeSceneRenderer.StartBufferPreview([float.NaN, 0.0F], 48000));
+    }
+
+    [Fact]
     public void ManagedSceneActivatesMaterialTransmissionAndRecordsTheAcousticModel()
     {
         var root = Path.Combine(Path.GetTempPath(), $"pulsegen-primitive-acoustics-{Guid.NewGuid():N}");
@@ -25,11 +33,11 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.9", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.10", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal(3, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
+            Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal(4, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
             Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal("eyring-three-band-v1", receipt.RootElement.GetProperty("roomResponseModel").GetString());
@@ -77,7 +85,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal((ulong)161803, first.DeterministicSeed);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
-            Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
             Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
@@ -256,7 +264,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
             using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
             {
-                Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
                 Assert.Contains(
                     receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                     dependency => dependency.GetProperty("name").GetString() == "Assimp");

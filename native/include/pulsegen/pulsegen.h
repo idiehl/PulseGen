@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define PG_ABI_VERSION 3u
+#define PG_ABI_VERSION 4u
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
 #define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
@@ -365,6 +365,22 @@ typedef struct pg_device_config {
     double impulse_response_seconds;
 } pg_device_config;
 
+/*
+ * Starts low-latency stereo playback from caller-provided 32-bit float samples.
+ * The engine copies the complete buffer before the device starts; the pointer is
+ * never retained or accessed by the audio thread.
+ */
+typedef struct pg_buffer_device_config {
+    uint32_t size;
+    uint32_t version;
+    const float* interleaved_stereo;
+    uint64_t frame_count;
+    uint32_t sample_rate;
+    uint32_t period_frames;
+    uint32_t exclusive_mode;
+    uint32_t loop;
+} pg_buffer_device_config;
+
 typedef struct pg_device_status {
     uint32_t size;
     uint32_t version;
@@ -414,6 +430,7 @@ PG_API pg_status PG_CALL pg_engine_render_offline(
     pg_render_receipt* receipt);
 
 PG_API pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_config* config);
+PG_API pg_status PG_CALL pg_engine_start_buffer_device(pg_engine* engine, const pg_buffer_device_config* config);
 PG_API pg_status PG_CALL pg_engine_stop_device(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_get_device_status(const pg_engine* engine, pg_device_status* status);
 
