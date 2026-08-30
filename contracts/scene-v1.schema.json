@@ -52,7 +52,8 @@
         "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string", "minLength": 1 },
         "transform": { "$ref": "#/$defs/transform" }, "dimensionsMetres": { "$ref": "#/$defs/vec3" },
         "velocityMetresPerSecond": { "$ref": "#/$defs/vec3" },
-        "turbulence": { "type": "number", "minimum": 0, "maximum": 1 }, "noiseSeed": { "type": "number" }
+        "turbulence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "noiseSeed": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
       }
     },
     "atmosphere": {
@@ -63,8 +64,8 @@
         "temperatureCelsius": { "type": "number", "minimum": -80, "maximum": 80 },
         "relativeHumidityPercent": { "type": "number", "minimum": 0, "maximum": 100 },
         "pressureKilopascals": { "type": "number", "minimum": 20, "maximum": 120 },
-        "layers": { "type": "array", "items": { "$ref": "#/$defs/atmosphereLayer" } },
-        "windZones": { "type": "array", "items": { "$ref": "#/$defs/windZone" } }
+        "layers": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/atmosphereLayer" } },
+        "windZones": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/windZone" } }
       }
     },
     "atmosphereLayer": {

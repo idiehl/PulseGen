@@ -28,8 +28,9 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.5";
+constexpr std::string_view engine_version = "0.1.0-alpha.6";
 constexpr double minimum_effective_sound_speed = 40.0;
+constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
 constexpr std::size_t maximum_acoustic_materials = 256U;
 constexpr std::size_t maximum_acoustic_geometries = 256U;
@@ -158,6 +159,23 @@ public:
     void Close(Assimp::IOStream*) override { }
 };
 
+struct atmosphere_layer_state {
+    double base_altitude_metres{};
+    double top_altitude_metres{};
+    double temperature_celsius{ 20.0 };
+    double relative_humidity_percent{ 50.0 };
+    double pressure_kilopascals{ 101.325 };
+};
+
+struct wind_zone_state {
+    vec3 centre{};
+    vec3 dimensions{ 20.0, 20.0, 20.0 };
+    vec3 rotation_degrees{};
+    vec3 velocity{};
+    double turbulence{};
+    std::uint64_t noise_seed{ 1U };
+};
+
 struct atmosphere_state {
     double temperature_celsius{ 20.0 };
     double relative_humidity_percent{ 50.0 };
@@ -165,6 +183,9 @@ struct atmosphere_state {
     vec3 wind{};
     double turbulence{};
     std::uint64_t noise_seed{ 1U };
+    std::vector<atmosphere_layer_state> layers;
+    std::vector<wind_zone_state> wind_zones;
+    std::uint32_t integration_segments{ 1U };
 };
 
 struct room_state {
@@ -347,22 +368,201 @@ pg_status require_stopped_device(pg_engine* engine, std::string_view operation)
     return fail(engine, PG_STATUS_INVALID_ARGUMENT, std::string(operation) + " requires stopping real-time preview first.");
 }
 
-double speed_of_sound(const atmosphere_state& atmosphere) noexcept
+double smooth_hashed_noise(std::uint64_t seed, double position) noexcept;
+
+struct atmosphere_sample {
+    double temperature_celsius{ 20.0 };
+    double relative_humidity_percent{ 50.0 };
+    double pressure_kilopascals{ 101.325 };
+    vec3 wind{};
+};
+
+double speed_of_sound(double temperature_celsius, double relative_humidity_percent) noexcept
 {
     // Temperature dominates the first-order model. Humidity adds a deliberately
     // bounded correction so project values affect propagation without claiming
     // a full atmospheric absorption standard implementation.
-    const double temperature_speed = 331.3 + (0.606 * atmosphere.temperature_celsius);
-    const double humidity_correction = std::clamp(atmosphere.relative_humidity_percent, 0.0, 100.0) * 0.0124;
+    const double temperature_speed = 331.3 + (0.606 * temperature_celsius);
+    const double humidity_correction = std::clamp(relative_humidity_percent, 0.0, 100.0) * 0.0124;
     return temperature_speed + humidity_correction;
 }
 
-double air_absorption_per_metre(const atmosphere_state& atmosphere, double frequency_hz) noexcept
+double speed_of_sound(const atmosphere_state& atmosphere) noexcept
+{
+    return speed_of_sound(atmosphere.temperature_celsius, atmosphere.relative_humidity_percent);
+}
+
+double air_absorption_per_metre(
+    double relative_humidity_percent,
+    double pressure_kilopascals,
+    double frequency_hz) noexcept
 {
     const double normalized_frequency = std::clamp(frequency_hz / 1000.0, 0.02, 20.0);
-    const double dryness = 1.0 - (std::clamp(atmosphere.relative_humidity_percent, 0.0, 100.0) / 100.0);
-    const double pressure_factor = 101.325 / std::clamp(atmosphere.pressure_kilopascals, 20.0, 120.0);
+    const double dryness = 1.0 - (std::clamp(relative_humidity_percent, 0.0, 100.0) / 100.0);
+    const double pressure_factor = 101.325 / std::clamp(pressure_kilopascals, 20.0, 120.0);
     return (0.000015 + (0.000018 * dryness)) * normalized_frequency * normalized_frequency * pressure_factor;
+}
+
+double smoothstep(double amount) noexcept
+{
+    const double bounded = std::clamp(amount, 0.0, 1.0);
+    return bounded * bounded * (3.0 - (2.0 * bounded));
+}
+
+double wind_zone_weight(const wind_zone_state& zone, vec3 point) noexcept
+{
+    const vec3 local = inverse_rotate_euler(point - zone.centre, zone.rotation_degrees);
+    const vec3 half = zone.dimensions * 0.5;
+    const double normalized_x = std::abs(local.x) / half.x;
+    const double normalized_y = std::abs(local.y) / half.y;
+    const double normalized_z = std::abs(local.z) / half.z;
+    const double edge = std::max({ normalized_x, normalized_y, normalized_z });
+    if (edge >= 1.0) {
+        return 0.0;
+    }
+    // The inner 80% is uniform. The outer 20% is feathered so a moving path
+    // cannot cross from still air to full wind in one sample.
+    return edge <= 0.8 ? 1.0 : smoothstep((1.0 - edge) / 0.2);
+}
+
+vec3 turbulence_vector(
+    std::uint64_t seed,
+    double turbulence,
+    double reference_speed,
+    vec3 point,
+    double time_seconds) noexcept
+{
+    if (turbulence <= 0.0) {
+        return {};
+    }
+    const double amplitude = std::max(reference_speed, 1.0) * turbulence * 0.12;
+    const double spatial = (point.x * 0.071) + (point.y * 0.047) + (point.z * 0.059);
+    return {
+        smooth_hashed_noise(seed, spatial + (time_seconds * 0.61)) * amplitude,
+        smooth_hashed_noise(seed + 1U, (spatial * 1.31) + (time_seconds * 0.43)) * amplitude,
+        smooth_hashed_noise(seed + 2U, (spatial * 0.83) + (time_seconds * 0.79)) * amplitude
+    };
+}
+
+atmosphere_sample sample_atmosphere(
+    const atmosphere_state& atmosphere,
+    vec3 point,
+    double time_seconds) noexcept
+{
+    atmosphere_sample result{
+        atmosphere.temperature_celsius,
+        atmosphere.relative_humidity_percent,
+        atmosphere.pressure_kilopascals,
+        atmosphere.wind
+    };
+    for (const atmosphere_layer_state& layer : atmosphere.layers) {
+        if (point.y >= layer.base_altitude_metres && point.y < layer.top_altitude_metres) {
+            result.temperature_celsius = layer.temperature_celsius;
+            result.relative_humidity_percent = layer.relative_humidity_percent;
+            result.pressure_kilopascals = layer.pressure_kilopascals;
+            break;
+        }
+    }
+
+    result.wind = result.wind + turbulence_vector(
+        atmosphere.noise_seed,
+        atmosphere.turbulence,
+        length(atmosphere.wind),
+        point,
+        time_seconds);
+    for (const wind_zone_state& zone : atmosphere.wind_zones) {
+        const double weight = wind_zone_weight(zone, point);
+        if (weight <= 0.0) {
+            continue;
+        }
+        const vec3 local_wind = zone.velocity + turbulence_vector(
+            zone.noise_seed,
+            zone.turbulence,
+            length(zone.velocity),
+            point,
+            time_seconds);
+        result.wind = result.wind + (local_wind * weight);
+    }
+    return result;
+}
+
+struct propagation_integral {
+    double travel_time_seconds{};
+    double absorption_exponent{};
+    double distance_metres{};
+};
+
+propagation_integral integrate_propagation_segment(
+    const atmosphere_state& atmosphere,
+    vec3 start,
+    vec3 end,
+    double frequency_hz,
+    double receive_time,
+    std::uint32_t segment_count) noexcept
+{
+    const vec3 delta = end - start;
+    const double distance = length(delta);
+    if (distance <= 1.0e-12) {
+        return {};
+    }
+    const vec3 direction = delta * (1.0 / distance);
+    const std::uint32_t segments = std::clamp(segment_count, 1U, maximum_atmosphere_integration_segments);
+    const double segment_length = distance / static_cast<double>(segments);
+    propagation_integral result{};
+    result.distance_metres = distance;
+    for (std::uint32_t index = 0U; index < segments; ++index) {
+        const double amount = (static_cast<double>(index) + 0.5) / static_cast<double>(segments);
+        const vec3 point = start + (delta * amount);
+        const atmosphere_sample local = sample_atmosphere(atmosphere, point, receive_time);
+        const double local_speed = speed_of_sound(local.temperature_celsius, local.relative_humidity_percent);
+        const double effective_speed = std::clamp(
+            local_speed + dot(local.wind, direction),
+            minimum_effective_sound_speed,
+            local_speed * 1.8);
+        result.travel_time_seconds += segment_length / effective_speed;
+        result.absorption_exponent += air_absorption_per_metre(
+            local.relative_humidity_percent,
+            local.pressure_kilopascals,
+            frequency_hz) * segment_length;
+    }
+    return result;
+}
+
+template <std::size_t PointCount>
+propagation_integral integrate_propagation_path(
+    const atmosphere_state& atmosphere,
+    const std::array<vec3, PointCount>& points,
+    double frequency_hz,
+    double receive_time) noexcept
+{
+    static_assert(PointCount >= 2U);
+    std::array<double, PointCount - 1U> distances{};
+    double total_distance = 0.0;
+    for (std::size_t index = 0U; index + 1U < PointCount; ++index) {
+        distances[index] = length(points[index + 1U] - points[index]);
+        total_distance += distances[index];
+    }
+    if (total_distance <= 1.0e-12) {
+        return {};
+    }
+
+    propagation_integral result{};
+    for (std::size_t index = 0U; index + 1U < PointCount; ++index) {
+        const auto allocated = static_cast<std::uint32_t>(std::max(
+            1.0,
+            std::round(static_cast<double>(atmosphere.integration_segments) * distances[index] / total_distance)));
+        const propagation_integral segment = integrate_propagation_segment(
+            atmosphere,
+            points[index],
+            points[index + 1U],
+            frequency_hz,
+            receive_time,
+            allocated);
+        result.travel_time_seconds += segment.travel_time_seconds;
+        result.absorption_exponent += segment.absorption_exponent;
+        result.distance_metres += segment.distance_metres;
+    }
+    return result;
 }
 
 double material_band_value(
@@ -753,12 +953,6 @@ vec3 sample_motion(const receiver_state& receiver, double time_seconds) noexcept
     return sample_motion_path(receiver.motion_path_kind, receiver.keyframes, time_seconds, receiver.centre);
 }
 
-double effective_sound_speed(const atmosphere_state& atmosphere, vec3 source, vec3 receiver) noexcept
-{
-    const vec3 propagation = normalized(receiver - source);
-    return std::max(minimum_effective_sound_speed, speed_of_sound(atmosphere) + dot(atmosphere.wind, propagation));
-}
-
 double fractional(double value) noexcept
 {
     return value - std::floor(value);
@@ -901,6 +1095,59 @@ struct delayed_path_sample {
     vec3 arrival_direction{ 0.0, 0.0, 1.0 };
 };
 
+bool room_reflection_path(
+    const room_state& room,
+    vec3 source,
+    vec3 receiver,
+    int reflection_axis,
+    bool reflection_high_side,
+    vec3& image_source,
+    vec3& reflection_point) noexcept
+{
+    const std::size_t axis = static_cast<std::size_t>(reflection_axis);
+    const std::array<double, 3> centre{ room.centre.x, room.centre.y, room.centre.z };
+    const std::array<double, 3> dimensions{ room.dimensions.x, room.dimensions.y, room.dimensions.z };
+    const std::array<double, 3> source_coordinates{ source.x, source.y, source.z };
+    const std::array<double, 3> receiver_coordinates{ receiver.x, receiver.y, receiver.z };
+    std::array<double, 3> image_coordinates = source_coordinates;
+    const double wall = centre[axis] +
+        (reflection_high_side ? dimensions[axis] * 0.5 : -dimensions[axis] * 0.5);
+    image_coordinates[axis] = (2.0 * wall) - image_coordinates[axis];
+    image_source = { image_coordinates[0], image_coordinates[1], image_coordinates[2] };
+
+    const double denominator = image_coordinates[axis] - receiver_coordinates[axis];
+    if (std::abs(denominator) <= 1.0e-12) {
+        reflection_point = image_source;
+        return false;
+    }
+    const double amount = (wall - receiver_coordinates[axis]) / denominator;
+    if (amount <= 0.0 || amount >= 1.0) {
+        reflection_point = image_source;
+        return false;
+    }
+    reflection_point = receiver + ((image_source - receiver) * amount);
+    return true;
+}
+
+bool surface_reflection_point(
+    vec3 image_source,
+    vec3 receiver,
+    const reflection_surface& surface,
+    vec3& reflection_point) noexcept
+{
+    const vec3 image_direction = image_source - receiver;
+    const double denominator = dot(image_direction, surface.normal);
+    if (std::abs(denominator) <= 1.0e-12) {
+        return false;
+    }
+    const double amount = dot(surface.point - receiver, surface.normal) / denominator;
+    if (amount <= 1.0e-7 || amount >= 1.0 - 1.0e-7) {
+        return false;
+    }
+    reflection_point = receiver + (image_direction * amount);
+    return true;
+}
+
 delayed_path_sample sample_delayed_path(
     const pg_engine& engine,
     const emitter_state& emitter,
@@ -914,28 +1161,75 @@ delayed_path_sample sample_delayed_path(
     double emission_time = receive_time;
     vec3 source_position = sample_motion(emitter, emission_time);
     vec3 apparent_source = source_position;
+    vec3 reflection_point = source_position;
+    propagation_integral propagation{};
 
     for (int iteration = 0; iteration < 6; ++iteration) {
         source_position = sample_motion(emitter, emission_time);
         apparent_source = source_position;
         if (reflected && engine.room.enabled) {
-            const std::array<double, 3> centre{ engine.room.centre.x, engine.room.centre.y, engine.room.centre.z };
-            const std::array<double, 3> dimensions{ engine.room.dimensions.x, engine.room.dimensions.y, engine.room.dimensions.z };
-            std::array<double, 3> coordinates{ apparent_source.x, apparent_source.y, apparent_source.z };
-            const double wall = centre[static_cast<std::size_t>(reflection_axis)] +
-                (reflection_high_side ? dimensions[static_cast<std::size_t>(reflection_axis)] * 0.5 : -dimensions[static_cast<std::size_t>(reflection_axis)] * 0.5);
-            coordinates[static_cast<std::size_t>(reflection_axis)] = (2.0 * wall) - coordinates[static_cast<std::size_t>(reflection_axis)];
-            apparent_source = { coordinates[0], coordinates[1], coordinates[2] };
+            const bool has_reflection_point = room_reflection_path(
+                engine.room,
+                source_position,
+                receiver_position,
+                reflection_axis,
+                reflection_high_side,
+                apparent_source,
+                reflection_point);
+            propagation = has_reflection_point
+                ? integrate_propagation_path(
+                    engine.atmosphere,
+                    std::array{ source_position, reflection_point, receiver_position },
+                    emitter.frequency_hz,
+                    receive_time)
+                : integrate_propagation_path(
+                    engine.atmosphere,
+                    std::array{ apparent_source, receiver_position },
+                    emitter.frequency_hz,
+                    receive_time);
+        } else {
+            propagation = integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ source_position, receiver_position },
+                emitter.frequency_hz,
+                receive_time);
         }
-
-        const double distance = length(receiver_position - apparent_source);
-        const double propagation_speed = effective_sound_speed(engine.atmosphere, apparent_source, receiver_position);
-        emission_time = receive_time - (distance / propagation_speed);
+        emission_time = receive_time - propagation.travel_time_seconds;
     }
 
-    const double distance = length(receiver_position - apparent_source);
+    source_position = sample_motion(emitter, emission_time);
+    apparent_source = source_position;
+    if (reflected && engine.room.enabled) {
+        const bool has_reflection_point = room_reflection_path(
+            engine.room,
+            source_position,
+            receiver_position,
+            reflection_axis,
+            reflection_high_side,
+            apparent_source,
+            reflection_point);
+        propagation = has_reflection_point
+            ? integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ source_position, reflection_point, receiver_position },
+                emitter.frequency_hz,
+                receive_time)
+            : integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ apparent_source, receiver_position },
+                emitter.frequency_hz,
+                receive_time);
+    } else {
+        propagation = integrate_propagation_path(
+            engine.atmosphere,
+            std::array{ source_position, receiver_position },
+            emitter.frequency_hz,
+            receive_time);
+    }
+
+    const double distance = propagation.distance_metres;
     const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
-    const double absorption = std::exp(-air_absorption_per_metre(engine.atmosphere, emitter.frequency_hz) * distance);
+    const double absorption = std::exp(-propagation.absorption_exponent);
     double reflection = 1.0;
     if (reflected) {
         const double frequency_mix = std::clamp((emitter.frequency_hz - 250.0) / 3750.0, 0.0, 1.0);
@@ -948,7 +1242,8 @@ delayed_path_sample sample_delayed_path(
         : occlusion_transmission_gain(engine, source_position, receiver_position, emitter.frequency_hz);
     const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
         absorption * reflection * transmission / attenuation_distance;
-    return { sample, distance, source_position, apparent_source - receiver_position };
+    const vec3 arrival_point = reflected ? reflection_point : source_position;
+    return { sample, distance, source_position, arrival_point - receiver_position };
 }
 
 delayed_path_sample sample_geometry_reflection(
@@ -971,30 +1266,39 @@ delayed_path_sample sample_geometry_reflection(
     double emission_time = receive_time;
     vec3 source_position = sample_motion(emitter, emission_time);
     vec3 image_source = source_position;
+    vec3 reflection_point = source_position;
+    propagation_integral propagation{};
     for (int iteration = 0; iteration < 6; ++iteration) {
         source_position = sample_motion(emitter, emission_time);
         const double source_plane_distance = dot(source_position - surface.point, surface.normal);
         image_source = source_position - (surface.normal * (2.0 * source_plane_distance));
-        const double distance = length(receiver_position - image_source);
-        const double propagation_speed = effective_sound_speed(engine.atmosphere, image_source, receiver_position);
-        emission_time = receive_time - (distance / propagation_speed);
+        const bool has_reflection_point = surface_reflection_point(image_source, receiver_position, surface, reflection_point);
+        propagation = has_reflection_point
+            ? integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ source_position, reflection_point, receiver_position },
+                emitter.frequency_hz,
+                receive_time)
+            : integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ image_source, receiver_position },
+                emitter.frequency_hz,
+                receive_time);
+        emission_time = receive_time - propagation.travel_time_seconds;
     }
+
+    source_position = sample_motion(emitter, emission_time);
+    const double source_plane_distance = dot(source_position - surface.point, surface.normal);
+    image_source = source_position - (surface.normal * (2.0 * source_plane_distance));
 
     const double source_side = dot(source_position - surface.point, surface.normal);
     const double receiver_side = dot(receiver_position - surface.point, surface.normal);
     if (source_side * receiver_side <= 1.0e-10) {
         return {};
     }
-    const vec3 image_direction = image_source - receiver_position;
-    const double denominator = dot(image_direction, surface.normal);
-    if (std::abs(denominator) <= 1.0e-12) {
+    if (!surface_reflection_point(image_source, receiver_position, surface, reflection_point)) {
         return {};
     }
-    const double amount = dot(surface.point - receiver_position, surface.normal) / denominator;
-    if (amount <= 1.0e-7 || amount >= 1.0 - 1.0e-7) {
-        return {};
-    }
-    const vec3 reflection_point = receiver_position + (image_direction * amount);
     if (!point_within_surface(surface, reflection_point)) {
         return {};
     }
@@ -1004,9 +1308,14 @@ delayed_path_sample sample_geometry_reflection(
         return {};
     }
 
-    const double distance = length(source_position - reflection_point) + length(reflection_point - receiver_position);
+    propagation = integrate_propagation_path(
+        engine.atmosphere,
+        std::array{ source_position, reflection_point, receiver_position },
+        emitter.frequency_hz,
+        receive_time);
+    const double distance = propagation.distance_metres;
     const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
-    const double absorption = std::exp(-air_absorption_per_metre(engine.atmosphere, emitter.frequency_hz) * distance);
+    const double absorption = std::exp(-propagation.absorption_exponent);
     const acoustic_material_state& material = engine.acoustic_materials[geometry.material_index];
     const double material_absorption = material_band_value(material, material.absorption, emitter.frequency_hz);
     const double material_transmission = material_band_value(material, material.transmission, emitter.frequency_hz);
@@ -1390,6 +1699,89 @@ pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmospher
         atmosphere->noise_seed
     };
     return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_set_atmosphere_field(pg_engine* engine, const pg_atmosphere_field_desc* atmosphere)
+{
+    if (engine == nullptr || atmosphere == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(atmosphere)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Atmosphere field structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Changing the atmosphere field") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!std::isfinite(atmosphere->temperature_celsius) || atmosphere->temperature_celsius < -80.0 || atmosphere->temperature_celsius > 80.0 ||
+        !std::isfinite(atmosphere->relative_humidity_percent) || atmosphere->relative_humidity_percent < 0.0 || atmosphere->relative_humidity_percent > 100.0 ||
+        !std::isfinite(atmosphere->pressure_kilopascals) || atmosphere->pressure_kilopascals < 20.0 || atmosphere->pressure_kilopascals > 120.0 ||
+        atmosphere->layer_count > PG_MAX_ATMOSPHERE_LAYERS || atmosphere->wind_zone_count > PG_MAX_WIND_ZONES ||
+        (atmosphere->layer_count > 0U && atmosphere->layers == nullptr) ||
+        (atmosphere->wind_zone_count > 0U && atmosphere->wind_zones == nullptr) ||
+        atmosphere->integration_segments < 1U || atmosphere->integration_segments > maximum_atmosphere_integration_segments) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Atmosphere field values or bounded counts are invalid.");
+    }
+
+    try {
+        std::vector<atmosphere_layer_state> layers;
+        layers.reserve(atmosphere->layer_count);
+        double minimum_sound_speed = speed_of_sound(
+            atmosphere->temperature_celsius,
+            atmosphere->relative_humidity_percent);
+        for (std::uint32_t index = 0U; index < atmosphere->layer_count; ++index) {
+            const pg_atmosphere_layer_desc& layer = atmosphere->layers[index];
+            if (!valid_struct(&layer) ||
+                !std::isfinite(layer.base_altitude_metres) || !std::isfinite(layer.top_altitude_metres) ||
+                layer.top_altitude_metres <= layer.base_altitude_metres ||
+                !std::isfinite(layer.temperature_celsius) || layer.temperature_celsius < -80.0 || layer.temperature_celsius > 80.0 ||
+                !std::isfinite(layer.relative_humidity_percent) || layer.relative_humidity_percent < 0.0 || layer.relative_humidity_percent > 100.0 ||
+                !std::isfinite(layer.pressure_kilopascals) || layer.pressure_kilopascals < 20.0 || layer.pressure_kilopascals > 120.0 ||
+                (index > 0U && layer.base_altitude_metres < atmosphere->layers[index - 1U].top_altitude_metres)) {
+                return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Atmosphere layers must be versioned, finite, altitude-ordered, and non-overlapping.");
+            }
+            layers.push_back({
+                layer.base_altitude_metres,
+                layer.top_altitude_metres,
+                layer.temperature_celsius,
+                layer.relative_humidity_percent,
+                layer.pressure_kilopascals
+            });
+            minimum_sound_speed = std::min(
+                minimum_sound_speed,
+                speed_of_sound(layer.temperature_celsius, layer.relative_humidity_percent));
+        }
+
+        std::vector<wind_zone_state> wind_zones;
+        wind_zones.reserve(atmosphere->wind_zone_count);
+        for (std::uint32_t index = 0U; index < atmosphere->wind_zone_count; ++index) {
+            const pg_wind_zone_desc& zone = atmosphere->wind_zones[index];
+            const vec3 centre = from_c(zone.centre_metres);
+            const vec3 dimensions = from_c(zone.dimensions_metres);
+            const vec3 rotation = from_c(zone.rotation_degrees);
+            const vec3 velocity = from_c(zone.velocity_metres_per_second);
+            if (!valid_struct(&zone) || !finite(centre) || !finite(dimensions) || !finite(rotation) || !finite(velocity) ||
+                dimensions.x <= 0.0 || dimensions.y <= 0.0 || dimensions.z <= 0.0 ||
+                !std::isfinite(zone.turbulence) || zone.turbulence < 0.0 || zone.turbulence > 1.0 ||
+                length(velocity) >= minimum_sound_speed * 0.8) {
+                return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Wind zones must be versioned, finite, positively bounded, and subsonic.");
+            }
+            wind_zones.push_back({ centre, dimensions, rotation, velocity, zone.turbulence, zone.noise_seed });
+        }
+
+        atmosphere_state state{};
+        state.temperature_celsius = atmosphere->temperature_celsius;
+        state.relative_humidity_percent = atmosphere->relative_humidity_percent;
+        state.pressure_kilopascals = atmosphere->pressure_kilopascals;
+        state.layers = std::move(layers);
+        state.wind_zones = std::move(wind_zones);
+        state.integration_segments = atmosphere->integration_segments;
+        engine->atmosphere = std::move(state);
+        return PG_STATUS_OK;
+    } catch (const std::exception& exception) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Atmosphere field setup failed: ") + exception.what());
+    } catch (...) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, "Atmosphere field setup failed with an unknown error.");
+    }
 }
 
 pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room)

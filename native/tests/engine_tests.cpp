@@ -259,6 +259,86 @@ std::vector<float> render_static_source(const static_render_options& options)
     return output;
 }
 
+struct atmosphere_impulse_options {
+    pg_vec3 source_position{ 0.0, -50.0, 0.0 };
+    pg_vec3 receiver_position{ 0.0, 50.0, 0.0 };
+    std::vector<pg_atmosphere_layer_desc> layers;
+    std::vector<pg_wind_zone_desc> wind_zones;
+    std::uint32_t integration_segments{ 100U };
+    std::uint32_t frame_count{ 24000U };
+};
+
+std::vector<float> render_atmosphere_impulse(const atmosphere_impulse_options& options)
+{
+    constexpr std::uint32_t sample_rate = 48000U;
+    pg_engine* engine = create_engine();
+
+    pg_atmosphere_field_desc atmosphere{};
+    atmosphere.size = sizeof(atmosphere);
+    atmosphere.version = PG_ABI_VERSION;
+    atmosphere.temperature_celsius = 20.0;
+    atmosphere.relative_humidity_percent = 0.0;
+    atmosphere.pressure_kilopascals = 101.325;
+    atmosphere.layers = options.layers.empty() ? nullptr : options.layers.data();
+    atmosphere.layer_count = static_cast<std::uint32_t>(options.layers.size());
+    atmosphere.wind_zones = options.wind_zones.empty() ? nullptr : options.wind_zones.data();
+    atmosphere.wind_zone_count = static_cast<std::uint32_t>(options.wind_zones.size());
+    atmosphere.integration_segments = options.integration_segments;
+    REQUIRE(pg_engine_set_atmosphere_field(engine, &atmosphere) == PG_STATUS_OK);
+
+    pg_room_desc room{};
+    room.size = sizeof(room);
+    room.version = PG_ABI_VERSION;
+    room.dimensions_metres = { 20.0, 8.0, 12.0 };
+    room.enabled = 0U;
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+
+    const std::array<pg_motion_keyframe, 2> keyframes{
+        pg_motion_keyframe{ 0.0, options.source_position },
+        pg_motion_keyframe{ 1.0, options.source_position }
+    };
+    pg_signal_emitter_desc emitter{};
+    emitter.size = sizeof(emitter);
+    emitter.version = PG_ABI_VERSION;
+    emitter.name_utf8 = "Atmosphere_Impulse";
+    emitter.waveform = PG_WAVE_IMPULSE;
+    emitter.frequency_hz = 1.0;
+    emitter.amplitude = 1.0;
+    emitter.pulse_width = 0.5;
+    emitter.gain_linear = 1.0;
+    emitter.min_distance_metres = 0.01;
+    emitter.motion_path_kind = PG_PATH_LINEAR;
+    emitter.keyframes = keyframes.data();
+    emitter.keyframe_count = static_cast<std::uint32_t>(keyframes.size());
+    emitter.noise_seed = 17U;
+    emitter.enabled = 1U;
+    REQUIRE(pg_engine_add_signal_emitter(engine, &emitter, nullptr) == PG_STATUS_OK);
+
+    pg_receiver_rig_desc receiver{};
+    receiver.size = sizeof(receiver);
+    receiver.version = PG_ABI_VERSION;
+    receiver.name_utf8 = "Atmosphere_Microphones";
+    receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    receiver.centre_metres = options.receiver_position;
+    receiver.spacing_metres = 0.01;
+    receiver.head_radius_metres = 0.09;
+    receiver.polar_pattern = PG_POLAR_OMNI;
+    receiver.enabled = 1U;
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+
+    std::vector<float> output(static_cast<std::size_t>(options.frame_count) * 2U);
+    REQUIRE(pg_engine_render_receiver_block(
+        engine,
+        0U,
+        0U,
+        options.frame_count,
+        sample_rate,
+        output.data(),
+        output.size()) == PG_STATUS_OK);
+    pg_engine_destroy(engine);
+    return output;
+}
+
 struct surface_render_options {
     bool add_surface{ true };
     bool use_imported_mesh{};
@@ -565,6 +645,53 @@ int main(int argument_count, char** arguments)
     const auto expected_arrival = static_cast<std::size_t>(std::llround(10.0 / 343.42 * 48000.0));
     REQUIRE(measured_arrival <= expected_arrival + 1U && expected_arrival <= measured_arrival + 1U);
 
+    atmosphere_impulse_options layered_atmosphere{};
+    pg_atmosphere_layer_desc cold_layer{};
+    cold_layer.size = sizeof(cold_layer);
+    cold_layer.version = PG_ABI_VERSION;
+    cold_layer.base_altitude_metres = -60.0;
+    cold_layer.top_altitude_metres = 0.0;
+    cold_layer.temperature_celsius = 0.0;
+    cold_layer.relative_humidity_percent = 0.0;
+    cold_layer.pressure_kilopascals = 101.325;
+    pg_atmosphere_layer_desc warm_layer = cold_layer;
+    warm_layer.base_altitude_metres = 0.0;
+    warm_layer.top_altitude_metres = 60.0;
+    warm_layer.temperature_celsius = 40.0;
+    layered_atmosphere.layers = { cold_layer, warm_layer };
+    const auto layered_impulse = render_atmosphere_impulse(layered_atmosphere);
+    const auto layered_arrival = first_active_frame(layered_impulse);
+    const double expected_layered_travel = (50.0 / 331.3) + (50.0 / 355.54);
+    const auto expected_layered_arrival = static_cast<std::size_t>(std::llround(expected_layered_travel * 48000.0));
+    REQUIRE(layered_arrival <= expected_layered_arrival + 1U && expected_layered_arrival <= layered_arrival + 1U);
+
+    atmosphere_impulse_options still_field{};
+    still_field.source_position = { -50.0, 0.0, 0.0 };
+    still_field.receiver_position = { 50.0, 0.0, 0.0 };
+    still_field.integration_segments = 200U;
+    const auto still_field_impulse = render_atmosphere_impulse(still_field);
+    pg_wind_zone_desc tailwind_zone{};
+    tailwind_zone.size = sizeof(tailwind_zone);
+    tailwind_zone.version = PG_ABI_VERSION;
+    tailwind_zone.centre_metres = { 0.0, 50.0, 0.0 };
+    tailwind_zone.dimensions_metres = { 40.0, 10.0, 10.0 };
+    tailwind_zone.velocity_metres_per_second = { 30.0, 0.0, 0.0 };
+    tailwind_zone.noise_seed = 88U;
+    auto outside_field = still_field;
+    outside_field.wind_zones = { tailwind_zone };
+    REQUIRE(render_atmosphere_impulse(outside_field) == still_field_impulse);
+
+    auto tailwind_field = outside_field;
+    tailwind_field.wind_zones[0].centre_metres = { 0.0, 0.0, 0.0 };
+    const auto tailwind_impulse = render_atmosphere_impulse(tailwind_field);
+    REQUIRE(first_active_frame(tailwind_impulse) < first_active_frame(still_field_impulse));
+    auto headwind_field = tailwind_field;
+    headwind_field.wind_zones[0].velocity_metres_per_second = { -30.0, 0.0, 0.0 };
+    const auto headwind_impulse = render_atmosphere_impulse(headwind_field);
+    REQUIRE(first_active_frame(headwind_impulse) > first_active_frame(still_field_impulse));
+    tailwind_field.wind_zones[0].turbulence = 0.2;
+    REQUIRE(render_atmosphere_impulse(tailwind_field) == render_atmosphere_impulse(tailwind_field));
+
     static_render_options near_distance{};
     near_distance.source_position = { 0.0, 0.0, 2.0 };
     near_distance.start_frame = 24000U;
@@ -624,6 +751,32 @@ int main(int argument_count, char** arguments)
     invalid_atmosphere.pressure_kilopascals = 101.325;
     invalid_atmosphere.turbulence = std::numeric_limits<double>::quiet_NaN();
     REQUIRE(pg_engine_set_atmosphere(atmosphere_validation_engine, &invalid_atmosphere) == PG_STATUS_INVALID_ARGUMENT);
+
+    pg_atmosphere_field_desc invalid_field{};
+    invalid_field.size = sizeof(invalid_field);
+    invalid_field.version = PG_ABI_VERSION;
+    invalid_field.temperature_celsius = 20.0;
+    invalid_field.relative_humidity_percent = 50.0;
+    invalid_field.pressure_kilopascals = 101.325;
+    invalid_field.integration_segments = 0U;
+    REQUIRE(pg_engine_set_atmosphere_field(atmosphere_validation_engine, &invalid_field) == PG_STATUS_INVALID_ARGUMENT);
+    invalid_field.integration_segments = 1U;
+    invalid_field.layer_count = 1U;
+    REQUIRE(pg_engine_set_atmosphere_field(atmosphere_validation_engine, &invalid_field) == PG_STATUS_INVALID_ARGUMENT);
+    const std::array<pg_atmosphere_layer_desc, 2> overlapping_layers{ cold_layer, cold_layer };
+    invalid_field.layers = overlapping_layers.data();
+    invalid_field.layer_count = static_cast<std::uint32_t>(overlapping_layers.size());
+    REQUIRE(pg_engine_set_atmosphere_field(atmosphere_validation_engine, &invalid_field) == PG_STATUS_INVALID_ARGUMENT);
+    invalid_field.layers = nullptr;
+    invalid_field.layer_count = 0U;
+    pg_wind_zone_desc invalid_zone = tailwind_zone;
+    invalid_zone.dimensions_metres.y = 0.0;
+    invalid_field.wind_zones = &invalid_zone;
+    invalid_field.wind_zone_count = 1U;
+    REQUIRE(pg_engine_set_atmosphere_field(atmosphere_validation_engine, &invalid_field) == PG_STATUS_INVALID_ARGUMENT);
+    invalid_zone.dimensions_metres.y = 10.0;
+    invalid_zone.velocity_metres_per_second = { 300.0, 0.0, 0.0 };
+    REQUIRE(pg_engine_set_atmosphere_field(atmosphere_validation_engine, &invalid_field) == PG_STATUS_INVALID_ARGUMENT);
     pg_engine_destroy(atmosphere_validation_engine);
 
     pg_engine* receiver_motion_validation_engine = create_engine();

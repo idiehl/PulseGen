@@ -24,6 +24,8 @@ extern "C" {
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
 #define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
+#define PG_MAX_ATMOSPHERE_LAYERS 64u
+#define PG_MAX_WIND_ZONES 64u
 
 typedef struct pg_engine pg_engine;
 
@@ -114,6 +116,46 @@ typedef struct pg_atmosphere_desc {
     double turbulence;
     uint64_t noise_seed;
 } pg_atmosphere_desc;
+
+typedef struct pg_atmosphere_layer_desc {
+    uint32_t size;
+    uint32_t version;
+    double base_altitude_metres;
+    double top_altitude_metres;
+    double temperature_celsius;
+    double relative_humidity_percent;
+    double pressure_kilopascals;
+} pg_atmosphere_layer_desc;
+
+/*
+ * Wind zones are bounded, transformed boxes. Dimensions are full extents and
+ * rotation is applied in X/Y/Z order. A short edge feather prevents an
+ * authored hard boundary from creating an instantaneous propagation jump.
+ */
+typedef struct pg_wind_zone_desc {
+    uint32_t size;
+    uint32_t version;
+    pg_vec3 centre_metres;
+    pg_vec3 dimensions_metres;
+    pg_vec3 rotation_degrees;
+    pg_vec3 velocity_metres_per_second;
+    double turbulence;
+    uint64_t noise_seed;
+} pg_wind_zone_desc;
+
+typedef struct pg_atmosphere_field_desc {
+    uint32_t size;
+    uint32_t version;
+    double temperature_celsius;
+    double relative_humidity_percent;
+    double pressure_kilopascals;
+    const pg_atmosphere_layer_desc* layers;
+    uint32_t layer_count;
+    const pg_wind_zone_desc* wind_zones;
+    uint32_t wind_zone_count;
+    uint32_t integration_segments;
+    uint32_t reserved;
+} pg_atmosphere_field_desc;
 
 typedef struct pg_room_desc {
     uint32_t size;
@@ -321,6 +363,7 @@ PG_API pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_eng
 PG_API void PG_CALL pg_engine_destroy(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_set_atmosphere(pg_engine* engine, const pg_atmosphere_desc* atmosphere);
+PG_API pg_status PG_CALL pg_engine_set_atmosphere_field(pg_engine* engine, const pg_atmosphere_field_desc* atmosphere);
 PG_API pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room);
 PG_API pg_status PG_CALL pg_engine_add_acoustic_material(pg_engine* engine, const pg_acoustic_material_desc* material, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_desc* geometry, uint32_t* out_index);

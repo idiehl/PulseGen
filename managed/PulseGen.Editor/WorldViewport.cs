@@ -15,6 +15,8 @@ public sealed class WorldViewport : Control
     private static readonly IBrush PathPointBrush = new SolidColorBrush(Color.Parse("#8CF0E2"));
     private static readonly IBrush EmitterBrush = new SolidColorBrush(Color.Parse("#F2B766"));
     private static readonly IBrush ReceiverBrush = new SolidColorBrush(Color.Parse("#A899DE"));
+    private static readonly Pen WindZonePen = new(new SolidColorBrush(Color.FromArgb(120, 74, 169, 226)), 1.1, new DashStyle([5, 4], 0));
+    private static readonly Pen WindArrowPen = new(new SolidColorBrush(Color.Parse("#62BEEB")), 2.0);
     private static readonly IBrush RoomBrush = new SolidColorBrush(Color.Parse("#121D27"));
     private static readonly Pen RoomPen = new(new SolidColorBrush(Color.Parse("#34465B")), 1.3);
     private double timeSeconds;
@@ -69,6 +71,7 @@ public sealed class WorldViewport : Control
             return;
         }
 
+        DrawWindZones(context);
         DrawRoom(context);
         DrawAcousticGeometry(context);
         foreach (var path in Scene.MotionPaths)
@@ -221,6 +224,54 @@ public sealed class WorldViewport : Control
         }
 
         context.DrawLine(AxisPen, new Point(0, horizon), new Point(Bounds.Width, horizon));
+    }
+
+    private void DrawWindZones(DrawingContext context)
+    {
+        if (Scene is null)
+        {
+            return;
+        }
+        foreach (var zone in Scene.Atmosphere.WindZones)
+        {
+            var dimensions = new Vector3d(
+                zone.DimensionsMetres.X * zone.Transform.Scale.X,
+                zone.DimensionsMetres.Y * zone.Transform.Scale.Y,
+                zone.DimensionsMetres.Z * zone.Transform.Scale.Z);
+            var half = dimensions * 0.5;
+            var localCorners = new[]
+            {
+                new Vector3d(-half.X, -half.Y, -half.Z), new Vector3d(half.X, -half.Y, -half.Z),
+                new Vector3d(half.X, half.Y, -half.Z), new Vector3d(-half.X, half.Y, -half.Z),
+                new Vector3d(-half.X, -half.Y, half.Z), new Vector3d(half.X, -half.Y, half.Z),
+                new Vector3d(half.X, half.Y, half.Z), new Vector3d(-half.X, half.Y, half.Z)
+            };
+            var corners = localCorners
+                .Select(corner => Project(Rotate(corner, zone.Transform.RotationDegrees) + zone.Transform.PositionMetres))
+                .ToArray();
+            int[][] edges =
+            [
+                [0, 1], [1, 2], [2, 3], [3, 0],
+                [4, 5], [5, 6], [6, 7], [7, 4],
+                [0, 4], [1, 5], [2, 6], [3, 7]
+            ];
+            foreach (var edge in edges)
+            {
+                context.DrawLine(WindZonePen, corners[edge[0]], corners[edge[1]]);
+            }
+
+            var speed = zone.VelocityMetresPerSecond.Length;
+            if (speed <= 1.0e-9)
+            {
+                continue;
+            }
+            var arrowLength = Math.Min(8, Math.Max(1.5, speed * 0.3));
+            var arrowVector = zone.VelocityMetresPerSecond * (arrowLength / speed);
+            var start = Project(zone.Transform.PositionMetres);
+            var end = Project(zone.Transform.PositionMetres + arrowVector);
+            context.DrawLine(WindArrowPen, start, end);
+            context.DrawEllipse(WindArrowPen.Brush, null, end, 3, 3);
+        }
     }
 
     private void DrawRoom(DrawingContext context)

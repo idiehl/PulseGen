@@ -33,6 +33,43 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void AtmosphereFieldSceneIsValidAndUsesBoundedFinalIntegration()
+    {
+        var scene = SampleScenes.CreateAtmosphereField();
+
+        Assert.Empty(SceneValidator.Validate(scene));
+        Assert.Equal(2, scene.Atmosphere.Layers.Count);
+        Assert.Equal(2, scene.Atmosphere.WindZones.Count);
+        Assert.Equal(RenderQuality.Final, scene.RenderProfiles[0].Quality);
+        Assert.Equal(48, scene.RenderProfiles[0].AtmosphereIntegrationSegments);
+    }
+
+    [Fact]
+    public void AtmosphereFieldsRejectNonFiniteBoundsSeedsAndOverlaps()
+    {
+        var scene = SampleScenes.CreateAtmosphereField();
+        scene.Atmosphere.WindZones[0] = scene.Atmosphere.WindZones[0] with
+        {
+            DimensionsMetres = new(double.NaN, 1, 1),
+            Transform = new Transform { Scale = new(1, 0, 1) },
+            NoiseSeed = 1.5
+        };
+        scene.Atmosphere.Layers[1] = scene.Atmosphere.Layers[1] with
+        {
+            BaseAltitudeMetres = 6,
+            PressureKilopascals = double.NaN
+        };
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/dimensionsMetres", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/transform", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/noiseSeed", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path == "atmosphere/layers/1" && issue.Message.Contains("bounded", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path == "atmosphere/layers/1" && issue.Message.Contains("overlap", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void UnsupportedUnitsAreRejected()
     {
         var scene = SampleScenes.CreateFlyby() with { Units = "feet" };
@@ -128,6 +165,12 @@ public sealed class SceneContractTests
     public void SpeedOfSoundUsesTemperature(double temperature, double expected)
     {
         Assert.Equal(expected, SceneValidator.SpeedOfSound(temperature), precision: 6);
+    }
+
+    [Fact]
+    public void EffectiveSpeedOfSoundAddsTheBoundedHumidityCorrection()
+    {
+        Assert.Equal(344.04, SceneValidator.EffectiveSpeedOfSound(20, 50), precision: 6);
     }
 
     [Fact]

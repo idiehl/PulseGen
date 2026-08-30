@@ -124,16 +124,19 @@
           <Border Classes="panel" Padding="12">
             <StackPanel Spacing="8">
               <TextBlock Classes="sectionTitle" Text="ATMOSPHERE" />
-              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
+              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="5">
                 <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock x:Name="TemperatureText" Grid.Column="1" Classes="value" Text="20.0 °C" />
                 <TextBlock Grid.Row="1" Text="Humidity" Foreground="#8192A7" /><TextBlock x:Name="HumidityText" Grid.Row="1" Grid.Column="1" Classes="value" Text="50.0 %" />
-                <TextBlock Grid.Row="2" Text="Wind" Foreground="#8192A7" /><TextBlock x:Name="WindText" Grid.Row="2" Grid.Column="1" Classes="value" Text="2.00 m/s +Z" />
-                <TextBlock Grid.Row="3" Text="Effective c" Foreground="#8192A7" /><TextBlock x:Name="EffectiveSpeedText" Grid.Row="3" Grid.Column="1" Classes="value" Text="343.42 m/s" />
+                <TextBlock Grid.Row="2" Text="Pressure" Foreground="#8192A7" /><TextBlock x:Name="PressureText" Grid.Row="2" Grid.Column="1" Classes="value" Text="101.325 kPa" />
+                <TextBlock Grid.Row="3" Text="Altitude layers" Foreground="#8192A7" /><TextBlock x:Name="LayerCountText" Grid.Row="3" Grid.Column="1" Classes="value" Text="0 · base air" />
+                <TextBlock Grid.Row="4" Text="Wind zones" Foreground="#8192A7" /><TextBlock x:Name="WindText" Grid.Row="4" Grid.Column="1" Classes="value" Text="1 bounded · 2.00 m/s" />
+                <TextBlock Grid.Row="5" Text="Base sound speed" Foreground="#8192A7" /><TextBlock x:Name="EffectiveSpeedText" Grid.Row="5" Grid.Column="1" Classes="value" Text="344.04 m/s" />
+                <TextBlock Grid.Row="6" Text="Preview sampling" Foreground="#8192A7" /><TextBlock x:Name="FieldQualityText" Grid.Row="6" Grid.Column="1" Classes="value" Text="1 / path leg" />
               </Grid>
             </StackPanel>
           </Border>
           <Border Background="#101F20" BorderBrush="#22544E" BorderThickness="1" CornerRadius="6" Padding="11">
-            <TextBlock TextWrapping="Wrap" Foreground="#83D8CD" FontSize="11" Text="Direct sound uses retarded emission time. First-order image reflections share the same propagation model." />
+            <TextBlock TextWrapping="Wrap" Foreground="#83D8CD" FontSize="11" Text="Preview samples each propagation leg once. Final profiles subdivide every direct and reflected path through authored air and wind fields." />
           </Border>
         </StackPanel>
       </ScrollViewer>

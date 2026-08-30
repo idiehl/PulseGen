@@ -225,31 +225,68 @@ public static class SceneValidator
 
     private static void ValidateAtmosphere(AtmosphereField atmosphere, List<ValidationIssue> issues)
     {
-        if (atmosphere.TemperatureCelsius is < -80 or > 80)
+        if (!double.IsFinite(atmosphere.TemperatureCelsius) || atmosphere.TemperatureCelsius is < -80 or > 80)
         {
             issues.Add(new("atmosphere/temperatureCelsius", "Temperature is outside the supported acoustic range."));
         }
 
-        if (atmosphere.RelativeHumidityPercent is < 0 or > 100)
+        if (!double.IsFinite(atmosphere.RelativeHumidityPercent) || atmosphere.RelativeHumidityPercent is < 0 or > 100)
         {
             issues.Add(new("atmosphere/relativeHumidityPercent", "Humidity must be between 0 and 100 percent."));
         }
 
-        if (atmosphere.PressureKilopascals is < 20 or > 120)
+        if (!double.IsFinite(atmosphere.PressureKilopascals) || atmosphere.PressureKilopascals is < 20 or > 120)
         {
             issues.Add(new("atmosphere/pressureKilopascals", "Pressure is outside the supported range."));
         }
 
+        if (atmosphere.Layers.Count > 64)
+        {
+            issues.Add(new("atmosphere/layers", "The bounded native field supports at most 64 atmosphere layers."));
+        }
+        if (atmosphere.WindZones.Count > 64)
+        {
+            issues.Add(new("atmosphere/windZones", "The bounded native field supports at most 64 wind zones."));
+        }
+
+        var minimumSoundSpeed = EffectiveSpeedOfSound(
+            atmosphere.TemperatureCelsius,
+            atmosphere.RelativeHumidityPercent);
+        foreach (var layer in atmosphere.Layers)
+        {
+            if (double.IsFinite(layer.TemperatureCelsius) && double.IsFinite(layer.RelativeHumidityPercent))
+            {
+                minimumSoundSpeed = Math.Min(
+                    minimumSoundSpeed,
+                    EffectiveSpeedOfSound(layer.TemperatureCelsius, layer.RelativeHumidityPercent));
+            }
+        }
+
         foreach (var zone in atmosphere.WindZones)
         {
-            if (zone.VelocityMetresPerSecond.Length >= 0.8 * SpeedOfSound(atmosphere.TemperatureCelsius))
+            if (!Finite(zone.Transform.PositionMetres) || !Finite(zone.Transform.RotationDegrees) || !Finite(zone.Transform.Scale) ||
+                zone.Transform.Scale.X <= 0 || zone.Transform.Scale.Y <= 0 || zone.Transform.Scale.Z <= 0)
+            {
+                issues.Add(new($"atmosphere/windZones/{zone.Id}/transform", "Wind-zone transforms must be finite and use positive scale."));
+            }
+            if (!Finite(zone.DimensionsMetres) || zone.DimensionsMetres.X <= 0 ||
+                zone.DimensionsMetres.Y <= 0 || zone.DimensionsMetres.Z <= 0)
+            {
+                issues.Add(new($"atmosphere/windZones/{zone.Id}/dimensionsMetres", "Wind zones require finite positive dimensions."));
+            }
+            if (!Finite(zone.VelocityMetresPerSecond) || zone.VelocityMetresPerSecond.Length >= 0.8 * minimumSoundSpeed)
             {
                 issues.Add(new($"atmosphere/windZones/{zone.Id}/velocity", "Wind velocity must remain below 80% of local sound speed."));
             }
 
-            if (zone.Turbulence is < 0 or > 1)
+            if (!double.IsFinite(zone.Turbulence) || zone.Turbulence is < 0 or > 1)
             {
                 issues.Add(new($"atmosphere/windZones/{zone.Id}/turbulence", "Turbulence must be normalized to 0..1."));
+            }
+            if (!double.IsFinite(zone.NoiseSeed) || zone.NoiseSeed < 0 ||
+                zone.NoiseSeed > 9_007_199_254_740_991d || zone.NoiseSeed != Math.Truncate(zone.NoiseSeed))
+            {
+                issues.Add(new($"atmosphere/windZones/{zone.Id}/noiseSeed", "Wind-zone noise seeds must be non-negative whole numbers with exact numeric representation."));
             }
         }
 
@@ -257,8 +294,11 @@ public static class SceneValidator
         for (var index = 0; index < orderedLayers.Count; index++)
         {
             var layer = orderedLayers[index];
-            if (layer.TopAltitudeMetres <= layer.BaseAltitudeMetres || layer.TemperatureCelsius is < -80 or > 80 ||
-                layer.RelativeHumidityPercent is < 0 or > 100 || layer.PressureKilopascals is < 20 or > 120)
+            if (!double.IsFinite(layer.BaseAltitudeMetres) || !double.IsFinite(layer.TopAltitudeMetres) ||
+                layer.TopAltitudeMetres <= layer.BaseAltitudeMetres ||
+                !double.IsFinite(layer.TemperatureCelsius) || layer.TemperatureCelsius is < -80 or > 80 ||
+                !double.IsFinite(layer.RelativeHumidityPercent) || layer.RelativeHumidityPercent is < 0 or > 100 ||
+                !double.IsFinite(layer.PressureKilopascals) || layer.PressureKilopascals is < 20 or > 120)
             {
                 issues.Add(new($"atmosphere/layers/{index}", "Atmosphere layers require increasing altitude and bounded temperature, humidity, and pressure."));
             }
@@ -277,6 +317,7 @@ public static class SceneValidator
                 .Concat(scene.MotionPaths.Select(value => (value.Id, "motionPaths")))
                 .Concat(scene.Materials.Select(value => (value.Id, "materials")))
                 .Concat(scene.Geometry.Select(value => (value.Id, "geometry")))
+                .Concat(scene.Atmosphere.WindZones.Select(value => (value.Id, "atmosphere/windZones")))
                 .Concat(scene.ReceiverRigs.Select(value => (value.Id, "receiverRigs")))
                 .Concat(scene.RenderProfiles.Select(value => (value.Id, "renderProfiles")))
                 .Concat(scene.CaptureTakes.Select(value => (value.Id, "captureTakes")));
@@ -441,6 +482,9 @@ public static class SceneValidator
     }
 
     public static double SpeedOfSound(double temperatureCelsius) => 331.3 + (0.606 * temperatureCelsius);
+
+    public static double EffectiveSpeedOfSound(double temperatureCelsius, double relativeHumidityPercent) =>
+        SpeedOfSound(temperatureCelsius) + (Math.Clamp(relativeHumidityPercent, 0, 100) * 0.0124);
 }
 
 public sealed class SceneValidationException(IReadOnlyList<ValidationIssue> issues)

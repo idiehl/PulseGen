@@ -105,7 +105,10 @@ try {
     $renderReceipt = Get-Content -LiteralPath $firstReceipts[0].FullName -Raw | ConvertFrom-Json
     $miniaudioDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'miniaudio' })
     $assimpDependency = @($renderReceipt.dependencies | Where-Object { $_.name -eq 'Assimp' })
-    if ($renderReceipt.receiptVersion -ne 3 -or $renderReceipt.acousticModel -ne 'bounded-propagation-v3' -or
+    if ($renderReceipt.receiptVersion -ne 4 -or $renderReceipt.acousticModel -ne 'bounded-propagation-v4' -or
+        $renderReceipt.atmosphereModel -ne 'layered-bounded-wind-v1' -or
+        $renderReceipt.atmosphereLayerCount -ne 0 -or $renderReceipt.windZoneCount -ne 1 -or
+        $renderReceipt.atmosphereIntegrationSegments -ne 1 -or
         $renderReceipt.sceneRevisionSha256.Length -ne 64 -or
         $renderReceipt.engineVersion -notmatch '^0\.1\.0-alpha' -or $renderReceipt.sampleRate -ne 48000 -or
         $renderReceipt.sampleFormat -ne 'Float32' -or $renderReceipt.dither -ne 'None' -or
@@ -146,7 +149,7 @@ try {
         }
     }
     $surfaceReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $surfaceFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($surfaceReceipt.receiptVersion -ne 3 -or $surfaceReceipt.acousticModel -ne 'bounded-propagation-v3' -or
+    if ($surfaceReceipt.receiptVersion -ne 4 -or $surfaceReceipt.acousticModel -ne 'bounded-propagation-v4' -or
         @($surfaceReceipt.takes).Count -ne 2 -or [Math]::Max($surfaceReceipt.peakLeft, $surfaceReceipt.peakRight) -le 0) {
         throw 'Surface-echo receipt is incomplete or records silent output.'
     }
@@ -177,10 +180,40 @@ try {
         throw 'Static and moving receiver takes unexpectedly match.'
     }
     $movingReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $movingFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
-    if ($movingReceipt.acousticModel -ne 'bounded-propagation-v3' -or $movingReceipt.seed -ne 271828 -or
+    if ($movingReceipt.acousticModel -ne 'bounded-propagation-v4' -or $movingReceipt.seed -ne 271828 -or
         @($movingReceipt.takes).Count -ne 2 -or [Math]::Max($movingReceipt.peakLeft, $movingReceipt.peakRight) -le 0) {
         throw 'Moving-receiver receipt is incomplete or records silent output.'
     }
+
+    $atmosphereFirst = Join-Path $outputRoot 'atmosphere-field-a'
+    $atmosphereSecond = Join-Path $outputRoot 'atmosphere-field-b'
+    Remove-VerificationDirectory $atmosphereFirst
+    Remove-VerificationDirectory $atmosphereSecond
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample atmosphere-field --output $atmosphereFirst
+    if ($LASTEXITCODE -ne 0) { throw 'First atmosphere-field render failed.' }
+    dotnet run --project managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj -c $Configuration --no-build -- --sample atmosphere-field --output $atmosphereSecond
+    if ($LASTEXITCODE -ne 0) { throw 'Second atmosphere-field render failed.' }
+    $atmosphereFirstFiles = @(Get-ChildItem -LiteralPath $atmosphereFirst -File | Sort-Object Name)
+    $atmosphereSecondFiles = @(Get-ChildItem -LiteralPath $atmosphereSecond -File | Sort-Object Name)
+    if ($atmosphereFirstFiles.Count -ne 3 -or $atmosphereSecondFiles.Count -ne 3) {
+        throw 'Expected two stereo takes and one receipt for each atmosphere-field render.'
+    }
+    for ($index = 0; $index -lt $atmosphereFirstFiles.Count; $index++) {
+        if ($atmosphereFirstFiles[$index].Name -ne $atmosphereSecondFiles[$index].Name -or
+            (Get-FileHash -LiteralPath $atmosphereFirstFiles[$index].FullName -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $atmosphereSecondFiles[$index].FullName -Algorithm SHA256).Hash) {
+            throw "Atmosphere-field artifact is not bit-stable: $($atmosphereFirstFiles[$index].Name)"
+        }
+    }
+    $atmosphereReceipt = Get-Content -LiteralPath (Get-ChildItem -LiteralPath $atmosphereFirst -Filter '*-render-receipt.json').FullName -Raw | ConvertFrom-Json
+    if ($atmosphereReceipt.receiptVersion -ne 4 -or $atmosphereReceipt.acousticModel -ne 'bounded-propagation-v4' -or
+        $atmosphereReceipt.atmosphereModel -ne 'layered-bounded-wind-v1' -or
+        $atmosphereReceipt.atmosphereLayerCount -ne 2 -or $atmosphereReceipt.windZoneCount -ne 2 -or
+        $atmosphereReceipt.atmosphereIntegrationSegments -ne 48 -or $atmosphereReceipt.seed -ne 161803 -or
+        @($atmosphereReceipt.takes).Count -ne 2 -or [Math]::Max($atmosphereReceipt.peakLeft, $atmosphereReceipt.peakRight) -le 0) {
+        throw 'Atmosphere-field receipt is incomplete or records silent output.'
+    }
+
     $pcmProfiles = @(
         @{ Name = 'Pcm16'; Code = 1; Bits = 16 },
         @{ Name = 'Pcm24'; Code = 1; Bits = 24 }
@@ -211,7 +244,7 @@ try {
             throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
-    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed receiver-motion=passed"
+    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed receiver-motion=passed atmosphere-fields=passed"
 }
 finally {
     Set-Location -LiteralPath $originalLocation

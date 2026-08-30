@@ -25,15 +25,62 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.5", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.6", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(3, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v3", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v4", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Contains(
                 receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                 dependency => dependency.GetProperty("name").GetString() == "Assimp" &&
                     dependency.GetProperty("version").GetString() == "6.0.5");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void LayeredBoundedWindFieldChangesTransitTimeAndRendersDeterministically()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-atmosphere-field-{Guid.NewGuid():N}");
+        try
+        {
+            var scene = SampleScenes.CreateAtmosphereField();
+            var firstDirectory = Path.Combine(root, "first");
+            var secondDirectory = Path.Combine(root, "second");
+            var first = NativeSceneRenderer.Render(scene, firstDirectory);
+            NativeSceneRenderer.Render(scene, secondDirectory);
+
+            var firstFiles = Directory.GetFiles(firstDirectory, "*.wav").Order(StringComparer.Ordinal).ToArray();
+            var secondFiles = Directory.GetFiles(secondDirectory, "*.wav").Order(StringComparer.Ordinal).ToArray();
+            Assert.Equal(2, firstFiles.Length);
+            Assert.Equal(firstFiles.Select(Path.GetFileName), secondFiles.Select(Path.GetFileName));
+            for (var index = 0; index < firstFiles.Length; index++)
+            {
+                Assert.Equal(ReadFloatSamples(firstFiles[index]), ReadFloatSamples(secondFiles[index]));
+            }
+
+            var warm = ReadFloatSamples(firstFiles.Single(path => path.Contains("Warm_tailwind", StringComparison.Ordinal)));
+            var cold = ReadFloatSamples(firstFiles.Single(path => path.Contains("Cold_headwind", StringComparison.Ordinal)));
+            var warmArrival = FirstActiveFrame(warm);
+            var coldArrival = FirstActiveFrame(cold);
+            Assert.True(warmArrival < coldArrival, $"Expected tailwind arrival {warmArrival} before headwind arrival {coldArrival}.");
+            Assert.True(coldArrival - warmArrival > 100, "The bounded layer-and-wind comparison should produce a clearly resolved transit-time difference.");
+            Assert.Equal((ulong)161803, first.DeterministicSeed);
+
+            using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
+            Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v4", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
+            Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
+            Assert.Equal(2, receipt.RootElement.GetProperty("windZoneCount").GetInt32());
+            Assert.Equal(48, receipt.RootElement.GetProperty("atmosphereIntegrationSegments").GetInt32());
         }
         finally
         {
@@ -138,7 +185,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
             using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
             {
-                Assert.Equal(3, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
                 Assert.Contains(
                     receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                     dependency => dependency.GetProperty("name").GetString() == "Assimp");
@@ -315,6 +362,18 @@ public sealed class PrimitiveAcousticsTests
             count++;
         }
         return Math.Sqrt(sum / count);
+    }
+
+    private static int FirstActiveFrame(IReadOnlyList<float> samples, float threshold = 1.0e-7f)
+    {
+        for (var frame = 0; frame < samples.Count / 2; frame++)
+        {
+            if (Math.Abs(samples[frame * 2]) > threshold || Math.Abs(samples[(frame * 2) + 1]) > threshold)
+            {
+                return frame;
+            }
+        }
+        return samples.Count / 2;
     }
 
     private static double EstimateFrequency(

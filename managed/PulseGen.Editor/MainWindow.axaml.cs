@@ -92,11 +92,18 @@ public sealed partial class MainWindow : Window
 
         TemperatureText.Text = $"{scene.Atmosphere.TemperatureCelsius:0.0} °C";
         HumidityText.Text = $"{scene.Atmosphere.RelativeHumidityPercent:0.0} %";
-        var wind = scene.Atmosphere.WindZones.FirstOrDefault();
-        WindText.Text = wind is null
+        PressureText.Text = $"{scene.Atmosphere.PressureKilopascals:0.###} kPa";
+        LayerCountText.Text = scene.Atmosphere.Layers.Count == 0
+            ? "0 · base air"
+            : $"{scene.Atmosphere.Layers.Count} active";
+        var strongestWind = scene.Atmosphere.WindZones.Count == 0
+            ? null
+            : scene.Atmosphere.WindZones.MaxBy(zone => zone.VelocityMetresPerSecond.Length);
+        WindText.Text = strongestWind is null
             ? "Still"
-            : $"{wind.VelocityMetresPerSecond.Length:0.00} m/s";
-        EffectiveSpeedText.Text = $"{SceneValidator.SpeedOfSound(scene.Atmosphere.TemperatureCelsius):0.00} m/s";
+            : $"{scene.Atmosphere.WindZones.Count} bounded · {strongestWind.VelocityMetresPerSecond.Length:0.00} m/s";
+        EffectiveSpeedText.Text = $"{SceneValidator.EffectiveSpeedOfSound(scene.Atmosphere.TemperatureCelsius, scene.Atmosphere.RelativeHumidityPercent):0.00} m/s";
+        FieldQualityText.Text = "1 / path leg";
 
         ReceiverOneText.Text = scene.ReceiverRigs.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
         ReceiverTwoText.Text = scene.ReceiverRigs.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";

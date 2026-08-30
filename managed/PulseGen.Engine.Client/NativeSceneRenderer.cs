@@ -31,7 +31,8 @@ public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 1;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "bounded-propagation-v3";
+    private const string AcousticModel = "bounded-propagation-v4";
+    private const string AtmosphereModel = "layered-bounded-wind-v1";
     private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
     private const uint MaximumImportedMeshTriangles = 250_000;
     private static readonly double[] NativeBandCentresHz = [125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -54,7 +55,10 @@ public static unsafe class NativeSceneRenderer
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
 
-        var engine = CreateConfiguredEngine(scene, projectDirectory);
+        var appliedAtmosphereSegments = profile.Quality == RenderQuality.Final
+            ? profile.AtmosphereIntegrationSegments
+            : 1;
+        var engine = CreateConfiguredEngine(scene, projectDirectory, appliedAtmosphereSegments);
         try
         {
             var outputPointer = Marshal.StringToCoTaskMemUTF8(Path.GetFullPath(outputDirectory));
@@ -89,7 +93,7 @@ public static unsafe class NativeSceneRenderer
                     receipt.SpeedOfSoundMetresPerSecond,
                     receipt.DeterministicSeed,
                     string.Empty);
-                var receiptPath = WriteRenderReceipt(scene, profile, outputDirectory, summary);
+                var receiptPath = WriteRenderReceipt(scene, profile, appliedAtmosphereSegments, outputDirectory, summary);
                 return summary with { RenderReceiptPath = receiptPath };
             }
             finally
@@ -107,6 +111,7 @@ public static unsafe class NativeSceneRenderer
     private static string WriteRenderReceipt(
         SceneDocument scene,
         RenderProfile profile,
+        int appliedAtmosphereSegments,
         string outputDirectory,
         RenderSummary summary)
     {
@@ -133,10 +138,11 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            3,
+            4,
             EngineVersion,
             AbiVersion,
             AcousticModel,
+            AtmosphereModel,
             scene.ProjectId,
             scene.Name,
             ProjectStore.ComputeSceneRevisionSha256(scene),
@@ -150,7 +156,9 @@ public static unsafe class NativeSceneRenderer
             profile.ReflectionOrder,
             profile.RayCount,
             profile.ImpulseResponseSeconds,
-            profile.AtmosphereIntegrationSegments,
+            scene.Atmosphere.Layers.Count,
+            scene.Atmosphere.WindZones.Count,
+            appliedAtmosphereSegments,
             summary.DeterministicSeed,
             summary.FramesRendered,
             summary.FilesWritten,
@@ -203,6 +211,7 @@ public static unsafe class NativeSceneRenderer
         string EngineVersion,
         uint NativeAbiVersion,
         string AcousticModel,
+        string AtmosphereModel,
         Guid ProjectId,
         string SceneName,
         string SceneRevisionSha256,
@@ -216,6 +225,8 @@ public static unsafe class NativeSceneRenderer
         int ReflectionOrder,
         int RayCount,
         double ImpulseResponseSeconds,
+        int AtmosphereLayerCount,
+        int WindZoneCount,
         int AtmosphereIntegrationSegments,
         ulong Seed,
         ulong FramesRendered,
@@ -247,7 +258,7 @@ public static unsafe class NativeSceneRenderer
         {
             throw new ArgumentOutOfRangeException(nameof(startTimeSeconds));
         }
-        var engine = CreateConfiguredEngine(scene, projectDirectory);
+        var engine = CreateConfiguredEngine(scene, projectDirectory, atmosphereIntegrationSegments: 1);
         try
         {
             var config = new NativeDeviceConfig
@@ -271,7 +282,10 @@ public static unsafe class NativeSceneRenderer
         }
     }
 
-    private static nint CreateConfiguredEngine(SceneDocument scene, string? projectDirectory)
+    private static nint CreateConfiguredEngine(
+        SceneDocument scene,
+        string? projectDirectory,
+        int atmosphereIntegrationSegments)
     {
         var config = new NativeEngineConfig
         {
@@ -282,7 +296,7 @@ public static unsafe class NativeSceneRenderer
         Check(Native.pg_engine_create(&config, out var engine), engine, "create engine");
         try
         {
-            ConfigureAtmosphere(scene, engine);
+            ConfigureAtmosphere(scene, engine, atmosphereIntegrationSegments);
             var materialIndexes = ConfigureMaterials(scene, engine);
             ConfigureRoom(scene, engine);
             ConfigureGeometry(scene, engine, materialIndexes, projectDirectory);
@@ -345,20 +359,61 @@ public static unsafe class NativeSceneRenderer
         }
     }
 
-    private static void ConfigureAtmosphere(SceneDocument scene, nint engine)
+    private static void ConfigureAtmosphere(SceneDocument scene, nint engine, int integrationSegments)
     {
-        var wind = scene.Atmosphere.WindZones.FirstOrDefault();
-        var descriptor = new NativeAtmosphere
+        if (scene.Atmosphere.Layers.Count > 64 || scene.Atmosphere.WindZones.Count > 64)
         {
-            Size = (uint)sizeof(NativeAtmosphere), Version = AbiVersion,
-            TemperatureCelsius = scene.Atmosphere.TemperatureCelsius,
-            RelativeHumidityPercent = scene.Atmosphere.RelativeHumidityPercent,
-            PressureKilopascals = scene.Atmosphere.PressureKilopascals,
-            UniformWindMetresPerSecond = ToNative(wind?.VelocityMetresPerSecond ?? Vector3d.Zero),
-            Turbulence = wind?.Turbulence ?? 0,
-            NoiseSeed = (ulong)(wind?.NoiseSeed ?? 1)
-        };
-        Check(Native.pg_engine_set_atmosphere(engine, &descriptor), engine, "set atmosphere");
+            throw new InvalidOperationException("The native atmosphere field supports at most 64 layers and 64 wind zones.");
+        }
+
+        var layers = scene.Atmosphere.Layers
+            .OrderBy(layer => layer.BaseAltitudeMetres)
+            .Select(layer => new NativeAtmosphereLayer
+            {
+                Size = (uint)sizeof(NativeAtmosphereLayer),
+                Version = AbiVersion,
+                BaseAltitudeMetres = layer.BaseAltitudeMetres,
+                TopAltitudeMetres = layer.TopAltitudeMetres,
+                TemperatureCelsius = layer.TemperatureCelsius,
+                RelativeHumidityPercent = layer.RelativeHumidityPercent,
+                PressureKilopascals = layer.PressureKilopascals
+            })
+            .ToArray();
+        var windZones = scene.Atmosphere.WindZones
+            .Select(zone => new NativeWindZone
+            {
+                Size = (uint)sizeof(NativeWindZone),
+                Version = AbiVersion,
+                CentreMetres = ToNative(zone.Transform.PositionMetres),
+                DimensionsMetres = ToNative(new Vector3d(
+                    zone.DimensionsMetres.X * zone.Transform.Scale.X,
+                    zone.DimensionsMetres.Y * zone.Transform.Scale.Y,
+                    zone.DimensionsMetres.Z * zone.Transform.Scale.Z)),
+                RotationDegrees = ToNative(zone.Transform.RotationDegrees),
+                VelocityMetresPerSecond = ToNative(zone.VelocityMetresPerSecond),
+                Turbulence = zone.Turbulence,
+                NoiseSeed = checked((ulong)zone.NoiseSeed)
+            })
+            .ToArray();
+
+        fixed (NativeAtmosphereLayer* layerPointer = layers)
+        fixed (NativeWindZone* windZonePointer = windZones)
+        {
+            var descriptor = new NativeAtmosphereField
+            {
+                Size = (uint)sizeof(NativeAtmosphereField),
+                Version = AbiVersion,
+                TemperatureCelsius = scene.Atmosphere.TemperatureCelsius,
+                RelativeHumidityPercent = scene.Atmosphere.RelativeHumidityPercent,
+                PressureKilopascals = scene.Atmosphere.PressureKilopascals,
+                Layers = layerPointer,
+                LayerCount = (uint)layers.Length,
+                WindZones = windZonePointer,
+                WindZoneCount = (uint)windZones.Length,
+                IntegrationSegments = checked((uint)integrationSegments)
+            };
+            Check(Native.pg_engine_set_atmosphere_field(engine, &descriptor), engine, "set layered atmosphere field");
+        }
     }
 
     private static Dictionary<Guid, uint> ConfigureMaterials(SceneDocument scene, nint engine)
@@ -827,6 +882,7 @@ public static unsafe class NativeSceneRenderer
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_set_atmosphere_field", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_receiver_motion", out _))
             {
                 return false;
@@ -866,7 +922,9 @@ public static unsafe class NativeSceneRenderer
 
     [StructLayout(LayoutKind.Sequential)] private struct NativeVector { public double X, Y, Z; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeEngineConfig { public uint Size, Version, MaxEmitters, MaxReceivers, MaxKeyframesPerPath, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphere { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeVector UniformWindMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereLayer { public uint Size, Version; public double BaseAltitudeMetres, TopAltitudeMetres, TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeWindZone { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees, VelocityMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereField { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeAtmosphereLayer* Layers; public uint LayerCount; public NativeWindZone* WindZones; public uint WindZoneCount, IntegrationSegments, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
@@ -888,7 +946,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_create(NativeEngineConfig* config, out nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern void pg_engine_destroy(nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern nint pg_get_last_error(nint engine);
-        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_atmosphere(nint engine, NativeAtmosphere* atmosphere);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_atmosphere_field(nint engine, NativeAtmosphereField* atmosphere);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_room(nint engine, NativeRoom* room);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_acoustic_material(nint engine, NativeAcousticMaterial* material, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_geometry(nint engine, NativeGeometry* geometry, out uint index);

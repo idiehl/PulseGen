@@ -371,4 +371,134 @@ public static class SampleScenes
             UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
         };
     }
+
+    public static SceneDocument CreateAtmosphereField()
+    {
+        var scene = CreateFlyby();
+        var sourcePosition = new Vector3d(-30, 7, 0);
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Name = "Stationary atmospheric impulse source",
+            Kind = MotionPathKind.Linear,
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = sourcePosition },
+                new MotionKeyframe { TimeSeconds = 2, PositionMetres = sourcePosition }
+            ]
+        };
+        var sourceNodeIndex = scene.Emitters[0].SignalGraph.Nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+        scene.Emitters[0].SignalGraph.Nodes[sourceNodeIndex] = scene.Emitters[0].SignalGraph.Nodes[sourceNodeIndex] with
+        {
+            Name = "One hertz atmospheric impulse",
+            Waveform = WaveformKind.Impulse,
+            NumericParameters = new Dictionary<string, double>
+            {
+                ["frequencyHz"] = 1,
+                ["amplitude"] = 1,
+                ["seed"] = 161803
+            }
+        };
+        scene.Emitters[0] = scene.Emitters[0] with
+        {
+            Name = "Atmospheric timing impulse",
+            GainLinear = 1,
+            MinDistanceMetres = 0.25
+        };
+        scene.Geometry.Clear();
+        scene.ReceiverRigs.Clear();
+        scene.ReceiverRigs.AddRange(
+        [
+            new ReceiverRig
+            {
+                Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000001"),
+                Name = "Warm tailwind microphones",
+                Kind = ReceiverRigKind.StereoMicrophone,
+                Transform = new Transform { PositionMetres = new(30, 4, 0) },
+                SpacingMetres = 0.1,
+                PolarPattern = PolarPattern.Omni
+            },
+            new ReceiverRig
+            {
+                Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000002"),
+                Name = "Cold headwind microphones",
+                Kind = ReceiverRigKind.StereoMicrophone,
+                Transform = new Transform { PositionMetres = new(30, 10, 0) },
+                SpacingMetres = 0.1,
+                PolarPattern = PolarPattern.Omni
+            }
+        ]);
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            Name = "Final layered atmosphere 48k",
+            Quality = RenderQuality.Final,
+            ReflectionOrder = 0,
+            RayCount = 0,
+            ImpulseResponseSeconds = 0,
+            AtmosphereIntegrationSegments = 48,
+            Seed = 161803
+        };
+        return scene with
+        {
+            ProjectId = Guid.Parse("eeeeeeee-0000-4000-8000-000000000000"),
+            Name = "Layered Atmosphere Transit",
+            Atmosphere = new AtmosphereField
+            {
+                TemperatureCelsius = 20,
+                RelativeHumidityPercent = 50,
+                PressureKilopascals = 101.325,
+                Layers =
+                [
+                    new AtmosphereLayer
+                    {
+                        BaseAltitudeMetres = 0,
+                        TopAltitudeMetres = 6.5,
+                        TemperatureCelsius = 32,
+                        RelativeHumidityPercent = 80,
+                        PressureKilopascals = 100
+                    },
+                    new AtmosphereLayer
+                    {
+                        BaseAltitudeMetres = 7.5,
+                        TopAltitudeMetres = 14,
+                        TemperatureCelsius = 5,
+                        RelativeHumidityPercent = 25,
+                        PressureKilopascals = 90
+                    }
+                ],
+                WindZones =
+                [
+                    new WindZone
+                    {
+                        Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000003"),
+                        Name = "Warm tailwind corridor",
+                        Transform = new Transform { PositionMetres = new(0, 4, 0) },
+                        DimensionsMetres = new(70, 5, 10),
+                        VelocityMetresPerSecond = new(15, 0, 0),
+                        Turbulence = 0.15,
+                        NoiseSeed = 101
+                    },
+                    new WindZone
+                    {
+                        Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000004"),
+                        Name = "Cold headwind corridor",
+                        Transform = new Transform { PositionMetres = new(0, 10, 0) },
+                        DimensionsMetres = new(70, 5, 10),
+                        VelocityMetresPerSecond = new(-10, 0, 0),
+                        Turbulence = 0.05,
+                        NoiseSeed = 202
+                    }
+                ]
+            },
+            Timeline = new EventTimeline
+            {
+                DurationSeconds = 2,
+                Events =
+                [
+                    new TimelineEvent { Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000005"), Kind = TimelineEventKind.StartEmitter, TimeSeconds = 0, TargetId = scene.Emitters[0].Id },
+                    new TimelineEvent { Id = Guid.Parse("eeeeeeee-0000-4000-8000-000000000006"), Kind = TimelineEventKind.EndCapture, TimeSeconds = 2, Label = "End atmosphere comparison" }
+                ]
+            },
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
+        };
+    }
 }
