@@ -120,8 +120,21 @@ public static class SceneValidator
             }
         }
 
+        if (scene.ReceiverRigs.Count is 0 or > 16)
+        {
+            issues.Add(new("receiverRigs", "A renderable scene requires between 1 and 16 stereo receiver rigs."));
+        }
+        else if (!scene.ReceiverRigs.Any(rig => rig.Enabled))
+        {
+            issues.Add(new("receiverRigs", "At least one stereo receiver rig must be enabled."));
+        }
+
         foreach (var rig in scene.ReceiverRigs)
         {
+            if (string.IsNullOrWhiteSpace(rig.Name))
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/name", "Receiver name is required."));
+            }
             if (!Finite(rig.Transform.PositionMetres) || !Finite(rig.Transform.RotationDegrees))
             {
                 issues.Add(new($"receiverRigs/{rig.Id}/transform", "Receiver position and orientation must be finite."));
@@ -140,6 +153,10 @@ public static class SceneValidator
             {
                 issues.Add(new($"receiverRigs/{rig.Id}", "Receiver angle, sensitivity, and self-noise must be finite."));
             }
+            else if (rig.SelfNoiseDbSpl is < 0 or > 200)
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/selfNoiseDbSpl", "Receiver self-noise must remain between 0 and 200 dB SPL."));
+            }
             if (!Finite(rig.HeadDimensionsMetres) || rig.HeadDimensionsMetres.X <= 0 ||
                 rig.HeadDimensionsMetres.Y <= 0 || rig.HeadDimensionsMetres.Z <= 0)
             {
@@ -149,8 +166,18 @@ public static class SceneValidator
             {
                 issues.Add(new($"receiverRigs/{rig.Id}/sofaAssetHash", "Exact SOFA mode requires an imported dataset asset."));
             }
+            if (!string.IsNullOrWhiteSpace(rig.SofaAssetHash) && !scene.Assets.Any(asset =>
+                    string.Equals(asset.Sha256, rig.SofaAssetHash, StringComparison.OrdinalIgnoreCase) &&
+                    asset.Kind == AssetKind.Hrtf))
+            {
+                issues.Add(new($"receiverRigs/{rig.Id}/sofaAssetHash", "The selected SOFA dataset must reference a declared HRTF asset."));
+            }
             if (rig.Kind == ReceiverRigKind.StereoMicrophone)
             {
+                if ((rig.LeftCapsule is null) != (rig.RightCapsule is null))
+                {
+                    issues.Add(new($"receiverRigs/{rig.Id}", "A stereo microphone rig must define both independent capsules or use the linked-pair fallback."));
+                }
                 ValidateCapsule(rig.LeftCapsule, $"receiverRigs/{rig.Id}/leftCapsule", issues);
                 ValidateCapsule(rig.RightCapsule, $"receiverRigs/{rig.Id}/rightCapsule", issues);
             }
@@ -474,10 +501,22 @@ public static class SceneValidator
         {
             issues.Add(new(path, "Microphone response frequency and gain arrays must be finite, non-empty, and equal length."));
         }
+        else if (capsule.ResponseCentresHz.Zip(capsule.ResponseCentresHz.Skip(1), (left, right) => right > left).Any(increasing => !increasing))
+        {
+            issues.Add(new(path, "Microphone response frequencies must increase strictly."));
+        }
         if (!Finite(capsule.RelativeTransform.PositionMetres) || !Finite(capsule.RelativeTransform.RotationDegrees) ||
             !double.IsFinite(capsule.SensitivityDb) || !double.IsFinite(capsule.SelfNoiseDbSpl))
         {
             issues.Add(new(path, "Microphone capsule transform, sensitivity, and self-noise must be finite."));
+        }
+        else if (capsule.RelativeTransform.PositionMetres.Length > 5)
+        {
+            issues.Add(new(path, "Microphone capsule offsets must remain within 5 m of the receiver centre."));
+        }
+        else if (capsule.SelfNoiseDbSpl is < 0 or > 200)
+        {
+            issues.Add(new(path, "Microphone capsule self-noise must remain between 0 and 200 dB SPL."));
         }
     }
 

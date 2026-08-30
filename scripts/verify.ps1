@@ -244,7 +244,7 @@ try {
             throw "$($pcmProfile.Name) receipt does not record explicit TPDF dither."
         }
     }
-    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed receiver-motion=passed atmosphere-fields=passed"
+    Write-Output "PULSEGEN_VERIFY_OK configuration=$Configuration native=passed managed=passed modelhost=passed renders=bit-stable surfaces=passed meshes=passed receiver-motion=passed receiver-capsules=passed atmosphere-fields=passed"
 }
 finally {
     Set-Location -LiteralPath $originalLocation

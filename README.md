@@ -20,7 +20,10 @@ commands and reads bounded telemetry.
   bounded wind/turbulence zones. Preview samples the field once per propagation
   leg; final rendering subdivides each leg for higher-accuracy travel time and
   tonal loss. First-order shoebox reflections, bounded modal resonances,
-  late-field feedback delays, and receiver-pair modelling are also active.
+  late-field feedback delays, analytic binaural head shadowing, and receiver-pair
+  modelling are also active. Stereo microphone capsules can carry independent
+  three-axis offsets and aim, pickup patterns, and sensitivity into both preview
+  and final rendering.
   Receiver rigs can follow the same editable absolute-coordinate paths as
   emitters; their arrival-time motion produces listener-side Doppler in every
   isolated stereo take.
@@ -39,11 +42,14 @@ commands and reads bounded telemetry.
   with scene/profile/dependency and per-take SHA-256 identities.
 - Avalonia editor with linked World, Signal, Physics, Timeline, Receiver, and
   Library views; hierarchical scene selection; validated add/edit/remove flows
-  for rooms, acoustic surfaces, atmosphere layers, and bounded wind zones;
-  numerical SI editing; synchronized world highlighting and X/Z manipulation;
-  selection-aware source paths; rollback of physically invalid edits; a guarded
-  acoustic-mesh picker; raw gesture retention; audible preview; atomic save;
-  isolated-take rendering; and analysis import.
+  for rooms, acoustic surfaces, atmosphere layers, bounded wind zones, binaural
+  listeners, and independent microphone pairs; numerical SI editing;
+  synchronized world highlighting and safe X/Z manipulation; receiver motion-path
+  assignment; rollback of physically invalid edits; guarded acoustic-mesh and
+  SOFA asset pickers; raw gesture retention; audible preview; atomic save;
+  isolated-take rendering; and analysis import. Imported measured SOFA selections
+  are content-addressed and deliberately render-gated until their Steam Audio
+  adapter is active, so the analytic head model is never mislabeled as measured.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.

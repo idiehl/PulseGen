@@ -33,10 +33,30 @@ internal readonly record struct SceneSelection(
 
     public static SceneSelection Receiver(Guid id) => new(SceneSelectionKind.Receiver, id);
 
-    public bool IsSpatial => Kind is SceneSelectionKind.Geometry or SceneSelectionKind.WindZone;
+    public bool IsSpatial => Kind is SceneSelectionKind.Geometry or SceneSelectionKind.WindZone or SceneSelectionKind.Receiver;
 }
 
 internal sealed record MaterialChoice(Guid Id, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record MotionPathChoice(Guid? Id, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record HrtfModeChoice(HrtfMode Mode, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record HrtfAssetChoice(string? Sha256, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record PolarPatternChoice(PolarPattern Pattern, string Name)
 {
     public override string ToString() => Name;
 }
@@ -118,6 +138,12 @@ internal static class SceneAuthoringOperations
         out ValidationIssue? error) =>
         TryAdd(scene.Atmosphere.Layers, layer, scene, out error);
 
+    public static bool TryAddReceiverRig(
+        SceneDocument scene,
+        ReceiverRig receiver,
+        out ValidationIssue? error) =>
+        TryAdd(scene.ReceiverRigs, receiver, scene, out error);
+
     public static bool TryReplaceEmitter(
         SceneDocument scene,
         Guid id,
@@ -145,6 +171,26 @@ internal static class SceneAuthoringOperations
         WindZone replacement,
         out ValidationIssue? error) =>
         TryReplace(scene.Atmosphere.WindZones, item => item.Id == id, replacement, scene, out error);
+
+    public static bool TryReplaceReceiverRig(
+        SceneDocument scene,
+        Guid id,
+        ReceiverRig replacement,
+        out ValidationIssue? error)
+    {
+        var original = scene.ReceiverRigs.FirstOrDefault(item => item.Id == id);
+        if (original is null)
+        {
+            error = new ValidationIssue("scene/selection", "The selected receiver no longer exists.");
+            return false;
+        }
+        if (original.Enabled && !replacement.Enabled && scene.ReceiverRigs.Count(item => item.Enabled) == 1)
+        {
+            error = new ValidationIssue("receiverRigs", "At least one receiver must remain enabled for preview and rendering.");
+            return false;
+        }
+        return TryReplace(scene.ReceiverRigs, item => item.Id == id, replacement, scene, out error);
+    }
 
     public static bool TryReplaceAtmosphereLayer(
         SceneDocument scene,

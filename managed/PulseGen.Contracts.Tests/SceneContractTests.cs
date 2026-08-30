@@ -208,6 +208,50 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void ExactSofaModeRequiresADeclaredHrtfAsset()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var hash = new string('c', 64);
+        scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with { HrtfMode = HrtfMode.ExactSofa, SofaAssetHash = hash };
+        scene.Assets.Add(new AssetRef
+        {
+            Sha256 = hash,
+            Kind = AssetKind.Audio,
+            FileName = "listener.sofa",
+            MediaType = "application/sofa",
+            SizeBytes = 1024
+        });
+
+        Assert.Contains(SceneValidator.Validate(scene), issue =>
+            issue.Path.EndsWith("sofaAssetHash", StringComparison.Ordinal) &&
+            issue.Message.Contains("HRTF", StringComparison.Ordinal));
+
+        scene.Assets[0] = scene.Assets[0] with { Kind = AssetKind.Hrtf };
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
+    }
+
+    [Fact]
+    public void StereoCapsulesMustBePairedAndUseIncreasingCalibrationFrequencies()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var microphones = scene.ReceiverRigs[1];
+        scene.ReceiverRigs[1] = microphones with
+        {
+            LeftCapsule = new MicrophoneCapsule
+            {
+                ResponseCentresHz = [1000, 100],
+                ResponseDb = [0, 0]
+            },
+            RightCapsule = null
+        };
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Message.Contains("both independent capsules", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Message.Contains("increase strictly", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ReceiverMotionUsesAValidatedFiniteScenePath()
     {
         var scene = SampleScenes.CreateFlyby();

@@ -76,7 +76,6 @@ public sealed partial class MainWindow : Window
         Title = $"PulseGen — {scene.Name}";
         SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion}";
         EmitterCountText.Text = $"{scene.Emitters.Count} source{(scene.Emitters.Count == 1 ? string.Empty : "s")}";
-        ReceiverCountText.Text = $"{scene.ReceiverRigs.Count} stereo";
         DurationSummaryText.Text = $"{scene.Timeline.DurationSeconds:0.000} s";
         AtlasStateText.Text = "PRIVATE · LOCAL ONLY";
 
@@ -99,8 +98,7 @@ public sealed partial class MainWindow : Window
 
         RefreshAtmosphereSummary();
 
-        ReceiverOneText.Text = scene.ReceiverRigs.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
-        ReceiverTwoText.Text = scene.ReceiverRigs.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";
+        RefreshReceiverSummary();
         var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
         for (var index = 0; index < tickLabels.Length; index++)
         {
@@ -214,6 +212,7 @@ public sealed partial class MainWindow : Window
             WindInspectorPanel.IsVisible = false;
             LayerInspectorPanel.IsVisible = false;
             BaseAtmosphereInspectorPanel.IsVisible = false;
+            ReceiverInspectorPanel.IsVisible = false;
             ReadOnlyInspectorPanel.IsVisible = false;
 
             switch (selection.Kind)
@@ -325,9 +324,52 @@ public sealed partial class MainWindow : Window
                         var receiver = scene.ReceiverRigs.First(item => item.Id == selection.Id);
                         InspectorSelectionText.Text = receiver.Name;
                         InspectorKindBadge.Text = "RECEIVER";
-                        ReadOnlySelectionTitle.Text = receiver.Kind == ReceiverRigKind.BinauralHead ? "Binaural head receiver" : "Stereo microphone receiver";
-                        ReadOnlySelectionMessage.Text = "This rig remains active and visible. Detailed capsule and HRTF authoring is the next receiver-focused milestone.";
-                        ReadOnlyInspectorPanel.IsVisible = true;
+                        ReceiverKindText.Text = receiver.Kind == ReceiverRigKind.BinauralHead
+                            ? "Binaural head receiver"
+                            : "Independent stereo microphones";
+                        ReceiverNameBox.Text = receiver.Name;
+                        ReceiverEnabledBox.IsChecked = receiver.Enabled;
+                        SetVectorFields(receiver.Transform.PositionMetres, ReceiverPositionX, ReceiverPositionY, ReceiverPositionZ);
+                        ReceiverYaw.Text = FormatNumber(receiver.Transform.RotationDegrees.Y);
+                        var motionPaths = new List<MotionPathChoice> { new(null, "Static / no path") };
+                        motionPaths.AddRange(scene.MotionPaths.Select(path => new MotionPathChoice(path.Id, path.Name)));
+                        ReceiverMotionPathBox.ItemsSource = motionPaths;
+                        ReceiverMotionPathBox.SelectedItem = motionPaths.First(item => item.Id == receiver.MotionPathId);
+                        ReceiverMotionHint.Text = receiver.MotionPathId is null
+                            ? "Drag this static rig in the world for X/Z movement, or assign an authored motion path."
+                            : "This rig follows its motion path. Edit the highlighted path points to change its travel through the sound world.";
+
+                        BinauralReceiverPanel.IsVisible = receiver.Kind == ReceiverRigKind.BinauralHead;
+                        MicrophoneReceiverPanel.IsVisible = receiver.Kind == ReceiverRigKind.StereoMicrophone;
+                        if (receiver.Kind == ReceiverRigKind.BinauralHead)
+                        {
+                            ReceiverEarSpacing.Text = FormatNumber(receiver.SpacingMetres);
+                            ReceiverHeadRadius.Text = FormatNumber(receiver.HeadRadiusMetres);
+                            SetVectorFields(receiver.HeadDimensionsMetres, ReceiverHeadDimensionX, ReceiverHeadDimensionY, ReceiverHeadDimensionZ);
+                            var modes = new List<HrtfModeChoice>
+                            {
+                                new(HrtfMode.Parametric, "Analytic head"),
+                                new(HrtfMode.ExactSofa, "Measured SOFA"),
+                                new(HrtfMode.BoundedHybrid, "Bounded hybrid")
+                            };
+                            ReceiverHrtfModeBox.ItemsSource = modes;
+                            ReceiverHrtfModeBox.SelectedItem = modes.First(item => item.Mode == receiver.HrtfMode);
+                            var sofaAssets = new List<HrtfAssetChoice> { new(null, "No dataset") };
+                            sofaAssets.AddRange(scene.Assets
+                                .Where(asset => asset.Kind == AssetKind.Hrtf)
+                                .Select(asset => new HrtfAssetChoice(asset.Sha256, asset.FileName)));
+                            ReceiverSofaAssetBox.ItemsSource = sofaAssets;
+                            ReceiverSofaAssetBox.SelectedItem = sofaAssets.FirstOrDefault(item =>
+                                string.Equals(item.Sha256, receiver.SofaAssetHash, StringComparison.OrdinalIgnoreCase)) ?? sofaAssets[0];
+                            UpdateReceiverHrtfControls();
+                        }
+                        else
+                        {
+                            var (left, right) = ReceiverRigGeometry.EffectiveMicrophoneCapsules(receiver);
+                            PopulateCapsuleControls(left, isLeft: true);
+                            PopulateCapsuleControls(right, isLeft: false);
+                        }
+                        ReceiverInspectorPanel.IsVisible = true;
                         break;
                     }
                 default:
@@ -361,6 +403,58 @@ public sealed partial class MainWindow : Window
             : $"{scene.Atmosphere.WindZones.Count} bounded · {strongestWind.VelocityMetresPerSecond.Length:0.00} m/s";
         EffectiveSpeedText.Text = $"{SceneValidator.EffectiveSpeedOfSound(scene.Atmosphere.TemperatureCelsius, scene.Atmosphere.RelativeHumidityPercent):0.00} m/s";
         FieldQualityText.Text = "1 / path leg";
+    }
+
+    private void RefreshReceiverSummary()
+    {
+        var enabled = scene.ReceiverRigs.Where(receiver => receiver.Enabled).ToList();
+        ReceiverCountText.Text = enabled.Count == scene.ReceiverRigs.Count
+            ? $"{enabled.Count} stereo"
+            : $"{enabled.Count}/{scene.ReceiverRigs.Count} active";
+        ReceiverOneText.Text = enabled.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
+        ReceiverTwoText.Text = enabled.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";
+    }
+
+    private void PopulateCapsuleControls(MicrophoneCapsule capsule, bool isLeft)
+    {
+        var positionX = isLeft ? LeftCapsulePositionX : RightCapsulePositionX;
+        var positionY = isLeft ? LeftCapsulePositionY : RightCapsulePositionY;
+        var positionZ = isLeft ? LeftCapsulePositionZ : RightCapsulePositionZ;
+        var rotationX = isLeft ? LeftCapsuleRotationX : RightCapsuleRotationX;
+        var rotationY = isLeft ? LeftCapsuleRotationY : RightCapsuleRotationY;
+        var rotationZ = isLeft ? LeftCapsuleRotationZ : RightCapsuleRotationZ;
+        var patternBox = isLeft ? LeftCapsulePatternBox : RightCapsulePatternBox;
+        var sensitivity = isLeft ? LeftCapsuleSensitivity : RightCapsuleSensitivity;
+        var selfNoise = isLeft ? LeftCapsuleSelfNoise : RightCapsuleSelfNoise;
+
+        SetVectorFields(capsule.RelativeTransform.PositionMetres, positionX, positionY, positionZ);
+        SetVectorFields(capsule.RelativeTransform.RotationDegrees, rotationX, rotationY, rotationZ);
+        var patterns = Enum.GetValues<PolarPattern>()
+            .Select(pattern => new PolarPatternChoice(pattern, PolarPatternName(pattern)))
+            .ToList();
+        patternBox.ItemsSource = patterns;
+        patternBox.SelectedItem = patterns.First(item => item.Pattern == capsule.PolarPattern);
+        sensitivity.Text = FormatNumber(capsule.SensitivityDb);
+        selfNoise.Text = FormatNumber(capsule.SelfNoiseDbSpl);
+    }
+
+    private static string PolarPatternName(PolarPattern pattern) => pattern switch
+    {
+        PolarPattern.Omni => "Omnidirectional",
+        PolarPattern.FigureEight => "Figure-eight",
+        _ => pattern.ToString()
+    };
+
+    private void UpdateReceiverHrtfControls()
+    {
+        var mode = (ReceiverHrtfModeBox.SelectedItem as HrtfModeChoice)?.Mode ?? HrtfMode.Parametric;
+        ReceiverSofaAssetBox.IsEnabled = mode != HrtfMode.Parametric;
+        ReceiverHrtfStatusText.Text = mode switch
+        {
+            HrtfMode.Parametric => "Active now: analytic ear timing and head-shadow filtering.",
+            HrtfMode.ExactSofa => "The selected measured response is saved as a content-addressed project asset, but preview and final rendering will stop clearly until the Steam Audio SOFA adapter is active.",
+            _ => "Bounded hybrid response settings are saved, but preview and final rendering will stop clearly until the Steam Audio HRTF adapter is active."
+        };
     }
 
     private void MarkSceneEdited(string message)
@@ -519,6 +613,83 @@ public sealed partial class MainWindow : Window
         PopulateInspector(currentSelection);
     }
 
+    private void OnAddBinauralReceiverClicked(object? sender, RoutedEventArgs e) =>
+        AddReceiver(ReceiverRigKind.BinauralHead);
+
+    private void OnAddMicrophoneReceiverClicked(object? sender, RoutedEventArgs e) =>
+        AddReceiver(ReceiverRigKind.StereoMicrophone);
+
+    private void AddReceiver(ReceiverRigKind kind)
+    {
+        if (scene.ReceiverRigs.Count >= 16)
+        {
+            StatusText.Text = "Receiver add rejected · the current real-time engine supports at most 16 simultaneous stereo rigs";
+            return;
+        }
+
+        var microphone = kind == ReceiverRigKind.StereoMicrophone;
+        var spacing = microphone ? 0.17 : 0.18;
+        var angle = microphone ? 110 : 0;
+        var sensitivity = microphone ? -6 : 0;
+        var receiver = new ReceiverRig
+        {
+            Id = Guid.NewGuid(),
+            Name = SceneSelectionResolver.UniqueName(
+                microphone ? "Stereo microphones" : "Binaural listener",
+                scene.ReceiverRigs.Select(item => item.Name)),
+            Kind = kind,
+            Transform = new Transform
+            {
+                PositionMetres = new Vector3d((scene.ReceiverRigs.Count - 1) * 0.75, 1.7, 0)
+            },
+            SpacingMetres = spacing,
+            AngleDegrees = angle,
+            HeadRadiusMetres = 0.09,
+            HeadDimensionsMetres = new Vector3d(0.18, 0.22, 0.24),
+            HrtfMode = HrtfMode.Parametric,
+            PolarPattern = microphone ? PolarPattern.Cardioid : PolarPattern.Omni,
+            SensitivityDb = sensitivity,
+            SelfNoiseDbSpl = microphone ? 18 : 0,
+            LeftCapsule = microphone
+                ? CreateMicrophoneCapsule(-spacing * 0.5, -angle * 0.5, sensitivity)
+                : null,
+            RightCapsule = microphone
+                ? CreateMicrophoneCapsule(spacing * 0.5, angle * 0.5, sensitivity)
+                : null
+        };
+        if (!SceneAuthoringOperations.TryAddReceiverRig(scene, receiver, out var error))
+        {
+            RejectSceneEdit($"Add {receiver.Name}", error);
+            return;
+        }
+        currentSelection = SceneSelection.Receiver(receiver.Id);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit($"{receiver.Name} added as an isolated stereo take");
+        RefreshReceiverSummary();
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private static MicrophoneCapsule CreateMicrophoneCapsule(double xMetres, double yawDegrees, double sensitivityDb) => new()
+    {
+        RelativeTransform = new Transform
+        {
+            PositionMetres = new Vector3d(xMetres, 0, 0),
+            RotationDegrees = new Vector3d(0, yawDegrees, 0)
+        },
+        PolarPattern = PolarPattern.Cardioid,
+        SensitivityDb = sensitivityDb,
+        SelfNoiseDbSpl = 18
+    };
+
+    private void OnReceiverHrtfModeChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (!initializingControls)
+        {
+            UpdateReceiverHrtfControls();
+        }
+    }
+
     private void OnApplyGeometryClicked(object? sender, RoutedEventArgs e)
     {
         var index = scene.Geometry.FindIndex(item => item.Id == currentSelection.Id);
@@ -664,10 +835,133 @@ public sealed partial class MainWindow : Window
         PopulateInspector(currentSelection);
     }
 
+    private void OnApplyReceiverClicked(object? sender, RoutedEventArgs e)
+    {
+        var index = scene.ReceiverRigs.FindIndex(item => item.Id == currentSelection.Id);
+        if (currentSelection.Kind != SceneSelectionKind.Receiver || index < 0)
+        {
+            return;
+        }
+        var name = ReceiverNameBox.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(name) ||
+            !TryReadVector(ReceiverPositionX, ReceiverPositionY, ReceiverPositionZ, out var position) ||
+            !TryReadNumber(ReceiverYaw, out var yaw))
+        {
+            StatusText.Text = "Receiver edit rejected · enter a take name and finite position/yaw values";
+            return;
+        }
+
+        var original = scene.ReceiverRigs[index];
+        var replacement = original with
+        {
+            Name = name,
+            Transform = original.Transform with
+            {
+                PositionMetres = position,
+                RotationDegrees = new Vector3d(
+                    original.Transform.RotationDegrees.X,
+                    yaw,
+                    original.Transform.RotationDegrees.Z)
+            },
+            MotionPathId = (ReceiverMotionPathBox.SelectedItem as MotionPathChoice)?.Id,
+            Enabled = ReceiverEnabledBox.IsChecked == true
+        };
+
+        if (original.Kind == ReceiverRigKind.BinauralHead)
+        {
+            if (!TryReadNumber(ReceiverEarSpacing, out var spacing) ||
+                !TryReadNumber(ReceiverHeadRadius, out var radius) ||
+                !TryReadVector(ReceiverHeadDimensionX, ReceiverHeadDimensionY, ReceiverHeadDimensionZ, out var dimensions))
+            {
+                StatusText.Text = "Binaural edit rejected · ear spacing, head radius, and dimensions must be finite SI values";
+                return;
+            }
+            var mode = (ReceiverHrtfModeBox.SelectedItem as HrtfModeChoice)?.Mode ?? HrtfMode.Parametric;
+            var sofaHash = mode == HrtfMode.Parametric
+                ? null
+                : (ReceiverSofaAssetBox.SelectedItem as HrtfAssetChoice)?.Sha256;
+            replacement = replacement with
+            {
+                SpacingMetres = spacing,
+                HeadRadiusMetres = radius,
+                HeadDimensionsMetres = dimensions,
+                HrtfMode = mode,
+                SofaAssetHash = sofaHash
+            };
+        }
+        else
+        {
+            var (originalLeft, originalRight) = ReceiverRigGeometry.EffectiveMicrophoneCapsules(original);
+            if (!TryReadCapsule(originalLeft, isLeft: true, out var left) ||
+                !TryReadCapsule(originalRight, isLeft: false, out var right))
+            {
+                StatusText.Text = "Microphone edit rejected · capsule offsets, rotations, sensitivity, and self-noise must be finite values";
+                return;
+            }
+            var spacing = (right.RelativeTransform.PositionMetres - left.RelativeTransform.PositionMetres).Length;
+            replacement = replacement with
+            {
+                SpacingMetres = Math.Max(0.01, spacing),
+                AngleDegrees = right.RelativeTransform.RotationDegrees.Y - left.RelativeTransform.RotationDegrees.Y,
+                PolarPattern = left.PolarPattern == right.PolarPattern ? left.PolarPattern : original.PolarPattern,
+                SensitivityDb = 0.5 * (left.SensitivityDb + right.SensitivityDb),
+                SelfNoiseDbSpl = 0.5 * (left.SelfNoiseDbSpl + right.SelfNoiseDbSpl),
+                LeftCapsule = left,
+                RightCapsule = right
+            };
+        }
+
+        if (!SceneAuthoringOperations.TryReplaceReceiverRig(scene, original.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{original.Name} receiver", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+        CommitSceneEdit($"{replacement.Name} receiver rig");
+        RefreshReceiverSummary();
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private bool TryReadCapsule(MicrophoneCapsule original, bool isLeft, out MicrophoneCapsule capsule)
+    {
+        var positionX = isLeft ? LeftCapsulePositionX : RightCapsulePositionX;
+        var positionY = isLeft ? LeftCapsulePositionY : RightCapsulePositionY;
+        var positionZ = isLeft ? LeftCapsulePositionZ : RightCapsulePositionZ;
+        var rotationX = isLeft ? LeftCapsuleRotationX : RightCapsuleRotationX;
+        var rotationY = isLeft ? LeftCapsuleRotationY : RightCapsuleRotationY;
+        var rotationZ = isLeft ? LeftCapsuleRotationZ : RightCapsuleRotationZ;
+        var patternBox = isLeft ? LeftCapsulePatternBox : RightCapsulePatternBox;
+        var sensitivity = isLeft ? LeftCapsuleSensitivity : RightCapsuleSensitivity;
+        var selfNoise = isLeft ? LeftCapsuleSelfNoise : RightCapsuleSelfNoise;
+        if (!TryReadVector(positionX, positionY, positionZ, out var position) ||
+            !TryReadVector(rotationX, rotationY, rotationZ, out var rotation) ||
+            !TryReadNumber(sensitivity, out var sensitivityDb) ||
+            !TryReadNumber(selfNoise, out var selfNoiseDbSpl) ||
+            patternBox.SelectedItem is not PolarPatternChoice pattern)
+        {
+            capsule = original;
+            return false;
+        }
+        capsule = original with
+        {
+            RelativeTransform = original.RelativeTransform with
+            {
+                PositionMetres = position,
+                RotationDegrees = rotation
+            },
+            PolarPattern = pattern.Pattern,
+            SensitivityDb = sensitivityDb,
+            SelfNoiseDbSpl = selfNoiseDbSpl
+        };
+        return true;
+    }
+
     private void OnRemoveSelectedClicked(object? sender, RoutedEventArgs e)
     {
         StopPreviewTransport();
         string? removedName = null;
+        var nextSelection = SceneSelection.BaseAtmosphere();
         switch (currentSelection.Kind)
         {
             case SceneSelectionKind.Geometry:
@@ -691,11 +985,34 @@ public sealed partial class MainWindow : Window
                 removedName = $"Atmosphere layer {currentSelection.Index + 1}";
                 scene.Atmosphere.Layers.RemoveAt(currentSelection.Index);
                 break;
+            case SceneSelectionKind.Receiver:
+                {
+                    var index = scene.ReceiverRigs.FindIndex(item => item.Id == currentSelection.Id);
+                    if (index < 0) return;
+                    var receiver = scene.ReceiverRigs[index];
+                    if (scene.ReceiverRigs.Count == 1 ||
+                        (receiver.Enabled && scene.ReceiverRigs.Count(item => item.Enabled) == 1))
+                    {
+                        StatusText.Text = "Receiver removal rejected · at least one enabled stereo take must remain";
+                        return;
+                    }
+                    if (scene.CaptureTakes.Any(take => take.ReceiverRigId == receiver.Id))
+                    {
+                        StatusText.Text = "Receiver removal rejected · recorded takes still reference this rig";
+                        return;
+                    }
+                    removedName = receiver.Name;
+                    scene.ReceiverRigs.RemoveAt(index);
+                    var remaining = scene.ReceiverRigs.FirstOrDefault(item => item.Enabled) ?? scene.ReceiverRigs[0];
+                    nextSelection = SceneSelection.Receiver(remaining.Id);
+                    break;
+                }
             default:
                 return;
         }
-        currentSelection = SceneSelection.BaseAtmosphere();
+        currentSelection = nextSelection;
         MarkSceneEdited($"{removedName} removed from the scene · save to persist this change");
+        RefreshReceiverSummary();
         RefreshSceneTree();
         PopulateInspector(currentSelection);
     }
@@ -818,6 +1135,98 @@ public sealed partial class MainWindow : Window
         catch (Exception exception)
         {
             StatusText.Text = $"Project save failed: {exception.Message}";
+        }
+    }
+
+    private async void OnImportSofaClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Receiver)
+        {
+            return;
+        }
+        var receiver = scene.ReceiverRigs.FirstOrDefault(item => item.Id == currentSelection.Id);
+        if (receiver is null || receiver.Kind != ReceiverRigKind.BinauralHead)
+        {
+            return;
+        }
+        if (lastProjectDirectory is null)
+        {
+            StatusText.Text = "Save this project before importing a SOFA dataset so its private asset store has a stable location";
+            return;
+        }
+
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = "Import a measured SOFA HRTF dataset",
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType("SOFA HRTF datasets") { Patterns = ["*.sofa"] }
+            ]
+        });
+        if (files.Count == 0)
+        {
+            return;
+        }
+
+        ImportSofaButton.IsEnabled = false;
+        string? newlyDeclaredAssetHash = null;
+        try
+        {
+            StopPreviewTransport();
+            var sourcePath = files[0].Path.LocalPath;
+            var source = new FileInfo(sourcePath);
+            if (!source.Exists || !string.Equals(source.Extension, ".sofa", StringComparison.OrdinalIgnoreCase) ||
+                source.Length is <= 0 or > 256L * 1024 * 1024)
+            {
+                throw new InvalidDataException("SOFA datasets must use the .sofa extension and contain between 1 byte and 256 MiB.");
+            }
+            StatusText.Text = "Hashing and copying the SOFA dataset into the private project asset store…";
+            var imported = await ProjectStore.ImportAssetAsync(
+                lastProjectDirectory,
+                sourcePath,
+                AssetKind.Hrtf,
+                "application/sofa",
+                provenance: "PulseGen editor local SOFA import");
+            var existing = scene.Assets.FirstOrDefault(asset =>
+                string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null && existing.Kind != AssetKind.Hrtf)
+            {
+                throw new InvalidDataException("The same content hash is already declared as a non-HRTF asset.");
+            }
+            if (existing is null)
+            {
+                scene.Assets.Add(imported);
+                newlyDeclaredAssetHash = imported.Sha256;
+            }
+
+            var replacement = receiver with
+            {
+                HrtfMode = HrtfMode.ExactSofa,
+                SofaAssetHash = imported.Sha256
+            };
+            if (!SceneAuthoringOperations.TryReplaceReceiverRig(scene, receiver.Id, replacement, out var error))
+            {
+                if (newlyDeclaredAssetHash is not null)
+                {
+                    scene.Assets.RemoveAll(asset => string.Equals(
+                        asset.Sha256,
+                        newlyDeclaredAssetHash,
+                        StringComparison.OrdinalIgnoreCase));
+                }
+                throw new InvalidDataException(error?.Message ?? "The SOFA dataset could not be assigned to this receiver.");
+            }
+            CommitSceneEdit($"Imported measured dataset {imported.FileName}");
+            PopulateInspector(currentSelection);
+            StatusText.Text = $"Imported {imported.FileName} · exact SOFA selection saved · rendering remains gated until the Steam Audio adapter is active";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"SOFA import failed without changing the receiver: {exception.Message}";
+        }
+        finally
+        {
+            ImportSofaButton.IsEnabled = true;
         }
     }
 

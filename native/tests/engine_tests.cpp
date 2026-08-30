@@ -172,6 +172,15 @@ struct static_render_options {
     pg_vec3 receiver_motion_start{};
     pg_vec3 receiver_motion_end{};
     double receiver_motion_end_seconds{ 2.0 };
+    bool use_explicit_capsules{};
+    pg_vec3 left_capsule_position{ -0.005, 0.0, 0.0 };
+    pg_vec3 right_capsule_position{ 0.005, 0.0, 0.0 };
+    pg_vec3 left_capsule_rotation{};
+    pg_vec3 right_capsule_rotation{};
+    pg_polar_pattern left_capsule_pattern{ PG_POLAR_OMNI };
+    pg_polar_pattern right_capsule_pattern{ PG_POLAR_OMNI };
+    double left_capsule_sensitivity_db{};
+    double right_capsule_sensitivity_db{};
     std::uint64_t start_frame{};
     std::uint32_t frame_count{ 4096U };
 };
@@ -231,6 +240,23 @@ std::vector<float> render_static_source(const static_render_options& options)
     receiver.enabled = 1U;
     std::uint32_t receiver_index = 0U;
     REQUIRE(pg_engine_add_receiver(engine, &receiver, &receiver_index) == PG_STATUS_OK);
+    if (options.use_explicit_capsules) {
+        pg_microphone_capsule_desc left_capsule{};
+        left_capsule.size = sizeof(left_capsule);
+        left_capsule.version = PG_ABI_VERSION;
+        left_capsule.relative_position_metres = options.left_capsule_position;
+        left_capsule.relative_rotation_degrees = options.left_capsule_rotation;
+        left_capsule.polar_pattern = options.left_capsule_pattern;
+        left_capsule.sensitivity_db = options.left_capsule_sensitivity_db;
+        pg_microphone_capsule_desc right_capsule{};
+        right_capsule.size = sizeof(right_capsule);
+        right_capsule.version = PG_ABI_VERSION;
+        right_capsule.relative_position_metres = options.right_capsule_position;
+        right_capsule.relative_rotation_degrees = options.right_capsule_rotation;
+        right_capsule.polar_pattern = options.right_capsule_pattern;
+        right_capsule.sensitivity_db = options.right_capsule_sensitivity_db;
+        REQUIRE(pg_engine_set_receiver_capsules(engine, receiver_index, &left_capsule, &right_capsule) == PG_STATUS_OK);
+    }
     if (options.receiver_moves) {
         const std::array<pg_motion_keyframe, 2> receiver_keyframes{
             pg_motion_keyframe{ 0.0, options.receiver_motion_start },
@@ -725,6 +751,22 @@ int main(int argument_count, char** arguments)
     auto rear_cardioid = rear_omni;
     rear_cardioid.polar_pattern = PG_POLAR_CARDIOID;
     REQUIRE(channel_rms(render_static_source(rear_cardioid), 0U) < channel_rms(render_static_source(rear_omni), 0U) * 2.0e-6);
+
+    auto independent_patterns = rear_omni;
+    independent_patterns.use_explicit_capsules = true;
+    independent_patterns.left_capsule_pattern = PG_POLAR_CARDIOID;
+    independent_patterns.right_capsule_pattern = PG_POLAR_OMNI;
+    const auto independent_pattern_pair = render_static_source(independent_patterns);
+    REQUIRE(channel_rms(independent_pattern_pair, 0U) < channel_rms(independent_pattern_pair, 1U) * 2.0e-6);
+
+    auto independent_sensitivity = rear_omni;
+    independent_sensitivity.source_position = { 0.0, 0.0, 2.0 };
+    independent_sensitivity.use_explicit_capsules = true;
+    independent_sensitivity.left_capsule_sensitivity_db = -6.020599913279624;
+    const auto independent_sensitivity_pair = render_static_source(independent_sensitivity);
+    const double independent_sensitivity_ratio = channel_rms(independent_sensitivity_pair, 0U) /
+        channel_rms(independent_sensitivity_pair, 1U);
+    REQUIRE(std::abs(independent_sensitivity_ratio - 0.5) < 0.002);
 
     static_render_options symmetry{};
     symmetry.source_position = { 0.0, 0.0, 2.0 };

@@ -41,7 +41,7 @@
       <Grid RowDefinitions="Auto,*,Auto">
         <Grid Margin="14,13,14,8" ColumnDefinitions="*,Auto">
           <TextBlock Classes="sectionTitle" Text="SCENE WORLD" />
-          <Button x:Name="AddEntityButton" Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add a room, acoustic surface, wind zone, or atmosphere layer">
+          <Button x:Name="AddEntityButton" Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add an acoustic object, atmosphere field, or stereo receiver rig">
             <Button.Flyout>
               <MenuFlyout>
                 <MenuItem Header="Reflective plane" Click="OnAddPlaneClicked" />
@@ -49,6 +49,8 @@
                 <MenuItem Header="Parametric room" Click="OnAddRoomClicked" />
                 <MenuItem Header="Bounded wind zone" Click="OnAddWindZoneClicked" />
                 <MenuItem Header="Atmosphere layer" Click="OnAddAtmosphereLayerClicked" />
+                <MenuItem Header="Binaural head receiver" Click="OnAddBinauralReceiverClicked" />
+                <MenuItem Header="Stereo microphone pair" Click="OnAddMicrophoneReceiverClicked" />
               </MenuFlyout>
             </Button.Flyout>
           </Button>
@@ -270,6 +272,104 @@
                 <Button Content="Apply base air" Background="#266A64" Foreground="White" Click="OnApplyBaseAtmosphereClicked" />
               </StackPanel>
             </Border>
+          </StackPanel>
+
+          <StackPanel x:Name="ReceiverInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock x:Name="ReceiverKindText" Text="Stereo receiver rig" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                  <CheckBox x:Name="ReceiverEnabledBox" Grid.Column="1" Content="Enabled" />
+                </Grid>
+                <Grid ColumnDefinitions="*,120" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Take name" Foreground="#8192A7" /><TextBox x:Name="ReceiverNameBox" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Motion" Foreground="#8192A7" /><ComboBox x:Name="ReceiverMotionPathBox" Grid.Row="1" Grid.Column="1" />
+                  <TextBlock Grid.Row="2" Text="Rig yaw (degrees)" Foreground="#8192A7" /><TextBox x:Name="ReceiverYaw" Grid.Row="2" Grid.Column="1" />
+                </Grid>
+                <TextBlock Text="Static centre position (m)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverPositionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverPositionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverPositionZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock x:Name="ReceiverMotionHint" Text="Drag this static rig in the world for X/Z movement, or assign an authored motion path." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+
+            <Border x:Name="BinauralReceiverPanel" Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Binaural head model" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Ear spacing (m)" Foreground="#8192A7" /><TextBox x:Name="ReceiverEarSpacing" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Head radius (m)" Foreground="#8192A7" /><TextBox x:Name="ReceiverHeadRadius" Grid.Row="1" Grid.Column="1" />
+                </Grid>
+                <TextBlock Text="Head dimensions (m, project metadata)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverHeadDimensionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverHeadDimensionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="ReceiverHeadDimensionZ" Grid.Column="5" />
+                </Grid>
+                <Grid ColumnDefinitions="*,130" RowDefinitions="Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Head response" Foreground="#8192A7" /><ComboBox x:Name="ReceiverHrtfModeBox" Grid.Column="1" SelectionChanged="OnReceiverHrtfModeChanged" />
+                  <TextBlock Grid.Row="1" Text="SOFA dataset" Foreground="#8192A7" /><ComboBox x:Name="ReceiverSofaAssetBox" Grid.Row="1" Grid.Column="1" />
+                </Grid>
+                <Button x:Name="ImportSofaButton" Content="Import SOFA dataset" Click="OnImportSofaClicked" ToolTip.Tip="Copy a measured .sofa HRTF dataset into this project's private content-addressed asset store." />
+                <TextBlock x:Name="ReceiverHrtfStatusText" Text="The analytic head model is active. Measured SOFA modes are authorable but remain render-gated until the Steam Audio adapter is active." TextWrapping="Wrap" Foreground="#A99B67" FontSize="9" />
+              </StackPanel>
+            </Border>
+
+            <StackPanel x:Name="MicrophoneReceiverPanel" Spacing="8">
+              <Border Classes="panel" Padding="12">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Left microphone capsule" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                  <TextBlock Text="Offset from rig centre (m)" Foreground="#8192A7" />
+                  <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                    <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsulePositionX" Grid.Column="1" />
+                    <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsulePositionY" Grid.Column="3" />
+                    <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsulePositionZ" Grid.Column="5" />
+                  </Grid>
+                  <TextBlock Text="Aim rotation (degrees)" Foreground="#8192A7" />
+                  <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                    <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsuleRotationX" Grid.Column="1" />
+                    <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsuleRotationY" Grid.Column="3" />
+                    <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="LeftCapsuleRotationZ" Grid.Column="5" />
+                  </Grid>
+                  <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                    <TextBlock Text="Pickup pattern" Foreground="#8192A7" /><ComboBox x:Name="LeftCapsulePatternBox" Grid.Column="1" />
+                    <TextBlock Grid.Row="1" Text="Sensitivity (dB)" Foreground="#8192A7" /><TextBox x:Name="LeftCapsuleSensitivity" Grid.Row="1" Grid.Column="1" />
+                    <TextBlock Grid.Row="2" Text="Self-noise (dB SPL)" Foreground="#8192A7" /><TextBox x:Name="LeftCapsuleSelfNoise" Grid.Row="2" Grid.Column="1" />
+                  </Grid>
+                </StackPanel>
+              </Border>
+              <Border Classes="panel" Padding="12">
+                <StackPanel Spacing="8">
+                  <TextBlock Text="Right microphone capsule" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                  <TextBlock Text="Offset from rig centre (m)" Foreground="#8192A7" />
+                  <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                    <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsulePositionX" Grid.Column="1" />
+                    <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsulePositionY" Grid.Column="3" />
+                    <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsulePositionZ" Grid.Column="5" />
+                  </Grid>
+                  <TextBlock Text="Aim rotation (degrees)" Foreground="#8192A7" />
+                  <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                    <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsuleRotationX" Grid.Column="1" />
+                    <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsuleRotationY" Grid.Column="3" />
+                    <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="RightCapsuleRotationZ" Grid.Column="5" />
+                  </Grid>
+                  <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                    <TextBlock Text="Pickup pattern" Foreground="#8192A7" /><ComboBox x:Name="RightCapsulePatternBox" Grid.Column="1" />
+                    <TextBlock Grid.Row="1" Text="Sensitivity (dB)" Foreground="#8192A7" /><TextBox x:Name="RightCapsuleSensitivity" Grid.Row="1" Grid.Column="1" />
+                    <TextBlock Grid.Row="2" Text="Self-noise (dB SPL)" Foreground="#8192A7" /><TextBox x:Name="RightCapsuleSelfNoise" Grid.Row="2" Grid.Column="1" />
+                  </Grid>
+                </StackPanel>
+              </Border>
+              <TextBlock Text="Capsule position, aim, pickup pattern, and sensitivity are active in preview and final rendering. Self-noise and saved calibration curves remain metadata until calibrated response processing lands." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+            </StackPanel>
+
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <Button Content="Apply receiver" Background="#266A64" Foreground="White" Click="OnApplyReceiverClicked" />
+              <Button Grid.Column="1" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
+            </Grid>
           </StackPanel>
 
           <Border x:Name="ReadOnlyInspectorPanel" IsVisible="False" Classes="panel" Padding="12">

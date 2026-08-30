@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.6";
+constexpr std::string_view engine_version = "0.1.0-alpha.7";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -289,6 +289,14 @@ struct emitter_state {
     bool enabled{ true };
 };
 
+struct microphone_capsule_state {
+    vec3 relative_position{};
+    vec3 relative_rotation{};
+    pg_polar_pattern polar_pattern{ PG_POLAR_OMNI };
+    double sensitivity_linear{ 1.0 };
+    double self_noise_db_spl{};
+};
+
 struct receiver_state {
     std::string name;
     pg_receiver_kind kind{ PG_RECEIVER_BINAURAL_HEAD };
@@ -300,6 +308,9 @@ struct receiver_state {
     pg_polar_pattern polar_pattern{ PG_POLAR_OMNI };
     double sensitivity_linear{ 1.0 };
     double self_noise_db_spl{};
+    microphone_capsule_state left_capsule{};
+    microphone_capsule_state right_capsule{};
+    bool has_explicit_capsules{};
     pg_motion_path_kind motion_path_kind{ PG_PATH_LINEAR };
     std::vector<keyframe_state> keyframes;
     bool enabled{ true };
@@ -1448,13 +1459,24 @@ std::pair<float, float> render_frame(
     const vec3 receiver_centre = sample_motion(receiver, receive_time);
     const vec3 right = normalized(rotate_yaw({ 1.0, 0.0, 0.0 }, receiver.yaw_degrees));
     const vec3 forward = normalized(rotate_yaw({ 0.0, 0.0, 1.0 }, receiver.yaw_degrees));
-    const vec3 left_position = receiver_centre - (right * (receiver.spacing_metres * 0.5));
-    const vec3 right_position = receiver_centre + (right * (receiver.spacing_metres * 0.5));
-    const vec3 left_forward = rotate_yaw(forward, -receiver.microphone_angle_degrees * 0.5);
-    const vec3 right_forward = rotate_yaw(forward, receiver.microphone_angle_degrees * 0.5);
-    const auto receiver_path_sample = [&](const delayed_path_sample& path, vec3 capsule_forward) noexcept {
+    const bool explicit_microphones = receiver.kind == PG_RECEIVER_STEREO_MICROPHONE && receiver.has_explicit_capsules;
+    const vec3 left_position = explicit_microphones
+        ? receiver_centre + rotate_yaw(receiver.left_capsule.relative_position, receiver.yaw_degrees)
+        : receiver_centre - (right * (receiver.spacing_metres * 0.5));
+    const vec3 right_position = explicit_microphones
+        ? receiver_centre + rotate_yaw(receiver.right_capsule.relative_position, receiver.yaw_degrees)
+        : receiver_centre + (right * (receiver.spacing_metres * 0.5));
+    const vec3 left_forward = explicit_microphones
+        ? normalized(rotate_yaw(rotate_euler({ 0.0, 0.0, 1.0 }, receiver.left_capsule.relative_rotation), receiver.yaw_degrees))
+        : rotate_yaw(forward, -receiver.microphone_angle_degrees * 0.5);
+    const vec3 right_forward = explicit_microphones
+        ? normalized(rotate_yaw(rotate_euler({ 0.0, 0.0, 1.0 }, receiver.right_capsule.relative_rotation), receiver.yaw_degrees))
+        : rotate_yaw(forward, receiver.microphone_angle_degrees * 0.5);
+    const pg_polar_pattern left_pattern = explicit_microphones ? receiver.left_capsule.polar_pattern : receiver.polar_pattern;
+    const pg_polar_pattern right_pattern = explicit_microphones ? receiver.right_capsule.polar_pattern : receiver.polar_pattern;
+    const auto receiver_path_sample = [&](const delayed_path_sample& path, vec3 capsule_forward, pg_polar_pattern pattern) noexcept {
         return receiver.kind == PG_RECEIVER_STEREO_MICROPHONE
-            ? path.value * microphone_pattern_gain(receiver.polar_pattern, capsule_forward, path.arrival_direction)
+            ? path.value * microphone_pattern_gain(pattern, capsule_forward, path.arrival_direction)
             : path.value;
     };
 
@@ -1468,8 +1490,8 @@ std::pair<float, float> render_frame(
 
         const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, false, 0, false);
         const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, false, 0, false);
-        double left_sample = receiver_path_sample(left_direct, left_forward);
-        double right_sample = receiver_path_sample(right_direct, right_forward);
+        double left_sample = receiver_path_sample(left_direct, left_forward, left_pattern);
+        double right_sample = receiver_path_sample(right_direct, right_forward, right_pattern);
         source_lateral += dot(normalized(left_direct.source_position - receiver_centre), right);
 
         if (engine.room.enabled && reflection_order > 0U) {
@@ -1477,8 +1499,8 @@ std::pair<float, float> render_frame(
                 for (int side = 0; side < 2; ++side) {
                     const auto left_reflection = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, true, axis, side != 0);
                     const auto right_reflection = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, true, axis, side != 0);
-                    left_sample += receiver_path_sample(left_reflection, left_forward);
-                    right_sample += receiver_path_sample(right_reflection, right_forward);
+                    left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                    right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
                 }
             }
         }
@@ -1508,8 +1530,8 @@ std::pair<float, float> render_frame(
                         sample_rate,
                         geometry_index,
                         surface);
-                    left_sample += receiver_path_sample(left_reflection, left_forward);
-                    right_sample += receiver_path_sample(right_reflection, right_forward);
+                    left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                    right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
                 }
             }
         }
@@ -1543,8 +1565,8 @@ std::pair<float, float> render_frame(
         }
     }
 
-    left_total *= receiver.sensitivity_linear;
-    right_total *= receiver.sensitivity_linear;
+    left_total *= explicit_microphones ? receiver.left_capsule.sensitivity_linear : receiver.sensitivity_linear;
+    right_total *= explicit_microphones ? receiver.right_capsule.sensitivity_linear : receiver.sensitivity_linear;
     return {
         static_cast<float>(std::clamp(left_total, -4.0, 4.0)),
         static_cast<float>(std::clamp(right_total, -4.0, 4.0))
@@ -2208,7 +2230,7 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
         !std::isfinite(receiver->spacing_metres) || receiver->spacing_metres < 0.01 || receiver->spacing_metres > 5.0 ||
         !std::isfinite(receiver->head_radius_metres) || receiver->head_radius_metres < 0.04 || receiver->head_radius_metres > 0.2 ||
         !std::isfinite(receiver->microphone_angle_degrees) || !std::isfinite(receiver->sensitivity_db) ||
-        !std::isfinite(receiver->self_noise_db_spl) ||
+        !std::isfinite(receiver->self_noise_db_spl) || receiver->self_noise_db_spl < 0.0 || receiver->self_noise_db_spl > 200.0 ||
         (receiver->kind != PG_RECEIVER_BINAURAL_HEAD && receiver->kind != PG_RECEIVER_STEREO_MICROPHONE) ||
         receiver->polar_pattern < PG_POLAR_OMNI || receiver->polar_pattern > PG_POLAR_FIGURE_EIGHT) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver position, spacing, head radius, or sensitivity is invalid.");
@@ -2233,6 +2255,53 @@ pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_ri
     if (out_index != nullptr) {
         *out_index = static_cast<std::uint32_t>(engine->receivers.size() - 1U);
     }
+    return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_engine_set_receiver_capsules(
+    pg_engine* engine,
+    uint32_t receiver_index,
+    const pg_microphone_capsule_desc* left_capsule,
+    const pg_microphone_capsule_desc* right_capsule)
+{
+    if (engine == nullptr || left_capsule == nullptr || right_capsule == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(left_capsule) || !valid_struct(right_capsule)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Microphone capsule structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Setting receiver capsules") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (receiver_index >= engine->receivers.size()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Receiver index does not exist.");
+    }
+    receiver_state& receiver = engine->receivers[receiver_index];
+    if (receiver.kind != PG_RECEIVER_STEREO_MICROPHONE) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Independent capsules apply only to stereo microphone receivers.");
+    }
+    const auto valid_capsule = [](const pg_microphone_capsule_desc& capsule) noexcept {
+        const vec3 position = from_c(capsule.relative_position_metres);
+        return finite(position) && length(position) <= 5.0 && finite(from_c(capsule.relative_rotation_degrees)) &&
+            capsule.polar_pattern >= PG_POLAR_OMNI && capsule.polar_pattern <= PG_POLAR_FIGURE_EIGHT &&
+            std::isfinite(capsule.sensitivity_db) && std::isfinite(capsule.self_noise_db_spl) &&
+            capsule.self_noise_db_spl >= 0.0 && capsule.self_noise_db_spl <= 200.0;
+    };
+    if (!valid_capsule(*left_capsule) || !valid_capsule(*right_capsule)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Microphone capsule position, orientation, pattern, sensitivity, or self-noise is invalid.");
+    }
+    const auto copy_capsule = [](const pg_microphone_capsule_desc& source) noexcept {
+        microphone_capsule_state result{};
+        result.relative_position = from_c(source.relative_position_metres);
+        result.relative_rotation = from_c(source.relative_rotation_degrees);
+        result.polar_pattern = source.polar_pattern;
+        result.sensitivity_linear = std::pow(10.0, source.sensitivity_db / 20.0);
+        result.self_noise_db_spl = source.self_noise_db_spl;
+        return result;
+    };
+    receiver.left_capsule = copy_capsule(*left_capsule);
+    receiver.right_capsule = copy_capsule(*right_capsule);
+    receiver.has_explicit_capsules = true;
     return PG_STATUS_OK;
 }
 

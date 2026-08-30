@@ -163,4 +163,100 @@ public sealed class SceneAuthoringTests
         Assert.Contains("unique", error?.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(originalCount, scene.Geometry.Count);
     }
+
+    [Fact]
+    public void ReceiverEditsRollBackInvalidCapsulesAndProtectTheLastEnabledTake()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var microphones = scene.ReceiverRigs.First(item => item.Kind == ReceiverRigKind.StereoMicrophone);
+        var (left, right) = ReceiverRigGeometry.EffectiveMicrophoneCapsules(microphones);
+        var invalidCapsules = microphones with
+        {
+            LeftCapsule = left with
+            {
+                RelativeTransform = left.RelativeTransform with { PositionMetres = new Vector3d(6, 0, 0) }
+            },
+            RightCapsule = right
+        };
+
+        var capsuleAccepted = SceneAuthoringOperations.TryReplaceReceiverRig(
+            scene,
+            microphones.Id,
+            invalidCapsules,
+            out var capsuleError);
+
+        Assert.False(capsuleAccepted);
+        Assert.Contains("within 5 m", capsuleError?.Message, StringComparison.Ordinal);
+        Assert.Equal(microphones, scene.ReceiverRigs.First(item => item.Id == microphones.Id));
+
+        scene.ReceiverRigs[1] = scene.ReceiverRigs[1] with { Enabled = false };
+        var listener = scene.ReceiverRigs[0];
+        var disableAccepted = SceneAuthoringOperations.TryReplaceReceiverRig(
+            scene,
+            listener.Id,
+            listener with { Enabled = false },
+            out var disableError);
+
+        Assert.False(disableAccepted);
+        Assert.Contains("one receiver", disableError?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(scene.ReceiverRigs[0].Enabled);
+    }
+
+    [Fact]
+    public void IndependentMicrophoneEditsCommitWithMotionAndPreserveCalibrationCurves()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var microphones = scene.ReceiverRigs.First(item => item.Kind == ReceiverRigKind.StereoMicrophone);
+        var (originalLeft, originalRight) = ReceiverRigGeometry.EffectiveMicrophoneCapsules(microphones);
+        var left = originalLeft with
+        {
+            RelativeTransform = originalLeft.RelativeTransform with
+            {
+                PositionMetres = new Vector3d(-0.12, 0.02, 0.03),
+                RotationDegrees = new Vector3d(5, -35, 0)
+            },
+            PolarPattern = PolarPattern.Supercardioid,
+            SensitivityDb = -8
+        };
+        var right = originalRight with
+        {
+            RelativeTransform = originalRight.RelativeTransform with
+            {
+                PositionMetres = new Vector3d(0.2, -0.01, -0.04),
+                RotationDegrees = new Vector3d(-3, 52, 1)
+            },
+            PolarPattern = PolarPattern.FigureEight,
+            SensitivityDb = -3
+        };
+        var replacement = microphones with
+        {
+            Name = "Asymmetric field pair",
+            Transform = microphones.Transform with { RotationDegrees = new Vector3d(0, 90, 0) },
+            SpacingMetres = (right.RelativeTransform.PositionMetres - left.RelativeTransform.PositionMetres).Length,
+            LeftCapsule = left,
+            RightCapsule = right,
+            MotionPathId = scene.MotionPaths[0].Id
+        };
+
+        var accepted = SceneAuthoringOperations.TryReplaceReceiverRig(
+            scene,
+            microphones.Id,
+            replacement,
+            out var error);
+
+        Assert.True(accepted, error?.Message);
+        var committed = scene.ReceiverRigs.First(item => item.Id == microphones.Id);
+        Assert.Equal("Asymmetric field pair", committed.Name);
+        Assert.Equal(PolarPattern.Supercardioid, committed.LeftCapsule?.PolarPattern);
+        Assert.Equal(PolarPattern.FigureEight, committed.RightCapsule?.PolarPattern);
+        Assert.Same(originalLeft.ResponseDb, committed.LeftCapsule?.ResponseDb);
+        Assert.Equal(scene.MotionPaths[0].Id, SceneSelectionResolver.MotionPath(scene, SceneSelection.Receiver(committed.Id))?.Id);
+        var worldPosition = ReceiverRigGeometry.CapsuleWorldPosition(
+            committed,
+            committed.LeftCapsule!,
+            committed.Transform.PositionMetres);
+        Assert.InRange(Math.Abs(worldPosition.X - 0.03), 0, 1e-12);
+        Assert.InRange(Math.Abs(worldPosition.Y - 1.72), 0, 1e-12);
+        Assert.InRange(Math.Abs(worldPosition.Z - -0.88), 0, 1e-12);
+    }
 }

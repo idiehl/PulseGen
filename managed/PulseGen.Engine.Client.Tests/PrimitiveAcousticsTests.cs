@@ -25,7 +25,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.6", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.7", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
@@ -123,6 +123,75 @@ public sealed class PrimitiveAcousticsTests
             {
                 Assert.Equal(firstSamples[frame * 2], firstSamples[(frame * 2) + 1]);
             }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ManagedIndependentCapsulesDriveSeparateChannelsAndMeasuredHrtfModesFailClearly()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-independent-capsules-{Guid.NewGuid():N}");
+        try
+        {
+            var scene = CreateScene(withSurface: false);
+            scene.MotionPaths[0] = scene.MotionPaths[0] with
+            {
+                Keyframes =
+                [
+                    new MotionKeyframe { TimeSeconds = 0, PositionMetres = new Vector3d(0, 0, -2) },
+                    new MotionKeyframe { TimeSeconds = 1, PositionMetres = new Vector3d(0, 0, -2) }
+                ]
+            };
+            var microphones = scene.ReceiverRigs[0];
+            scene.ReceiverRigs[0] = microphones with
+            {
+                SpacingMetres = 0.01,
+                LeftCapsule = new MicrophoneCapsule
+                {
+                    RelativeTransform = new Transform { PositionMetres = new Vector3d(-0.005, 0, 0) },
+                    PolarPattern = PolarPattern.Cardioid
+                },
+                RightCapsule = new MicrophoneCapsule
+                {
+                    RelativeTransform = new Transform { PositionMetres = new Vector3d(0.005, 0, 0) },
+                    PolarPattern = PolarPattern.Omni
+                }
+            };
+            NativeSceneRenderer.Render(scene, Path.Combine(root, "capsules"));
+            var samples = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "capsules"), "*.wav").Single());
+            var leftRms = ChannelRms(samples, 0);
+            var rightRms = ChannelRms(samples, 1);
+            Assert.True(leftRms < rightRms * 2.0e-6, $"Expected rear-cardioid rejection; left={leftRms:R}, right={rightRms:R}.");
+
+            var hrtfHash = new string('d', 64);
+            var gatedScene = CreateScene(withSurface: false);
+            gatedScene.Assets.Add(new AssetRef
+            {
+                Sha256 = hrtfHash,
+                Kind = AssetKind.Hrtf,
+                FileName = "measured.sofa",
+                MediaType = "application/sofa",
+                SizeBytes = 2048
+            });
+            gatedScene.ReceiverRigs[0] = new ReceiverRig
+            {
+                Id = gatedScene.ReceiverRigs[0].Id,
+                Name = "Measured listener",
+                Kind = ReceiverRigKind.BinauralHead,
+                Transform = gatedScene.ReceiverRigs[0].Transform,
+                HrtfMode = HrtfMode.ExactSofa,
+                SofaAssetHash = hrtfHash
+            };
+
+            var exception = Assert.Throws<NotSupportedException>(() =>
+                NativeSceneRenderer.Render(gatedScene, Path.Combine(root, "measured")));
+            Assert.Contains("Steam Audio", exception.Message, StringComparison.Ordinal);
         }
         finally
         {

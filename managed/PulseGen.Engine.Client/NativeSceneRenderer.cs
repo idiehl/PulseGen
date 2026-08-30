@@ -51,6 +51,7 @@ public static unsafe class NativeSceneRenderer
         string? projectDirectory = null)
     {
         SceneValidator.EnsureValid(scene);
+        EnsureReceiverCapabilities(scene);
         Directory.CreateDirectory(outputDirectory);
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
@@ -67,8 +68,10 @@ public static unsafe class NativeSceneRenderer
             {
                 var request = new NativeRenderRequest
                 {
-                    Size = (uint)sizeof(NativeRenderRequest), Version = AbiVersion,
-                    OutputDirectoryUtf8 = outputPointer, FilePrefixUtf8 = prefixPointer,
+                    Size = (uint)sizeof(NativeRenderRequest),
+                    Version = AbiVersion,
+                    OutputDirectoryUtf8 = outputPointer,
+                    FilePrefixUtf8 = prefixPointer,
                     DurationSeconds = scene.Timeline.DurationSeconds,
                     SampleRate = (uint)profile.SampleRate,
                     SampleFormat = profile.SampleFormat switch
@@ -78,7 +81,8 @@ public static unsafe class NativeSceneRenderer
                         _ => 2
                     },
                     Quality = profile.Quality switch { RenderQuality.Draft => 0, RenderQuality.Final => 2, _ => 1 },
-                    ReflectionOrder = (uint)profile.ReflectionOrder, Seed = (uint)profile.Seed
+                    ReflectionOrder = (uint)profile.ReflectionOrder,
+                    Seed = (uint)profile.Seed
                 };
                 var receipt = new NativeRenderReceipt { Size = (uint)sizeof(NativeRenderReceipt), Version = AbiVersion };
                 Check(Native.pg_engine_render_offline(engine, &request, &receipt), engine, "offline render");
@@ -254,6 +258,7 @@ public static unsafe class NativeSceneRenderer
         string? projectDirectory = null)
     {
         SceneValidator.EnsureValid(scene);
+        EnsureReceiverCapabilities(scene);
         if (!double.IsFinite(startTimeSeconds) || startTimeSeconds < 0 || startTimeSeconds > scene.Timeline.DurationSeconds)
         {
             throw new ArgumentOutOfRangeException(nameof(startTimeSeconds));
@@ -289,8 +294,11 @@ public static unsafe class NativeSceneRenderer
     {
         var config = new NativeEngineConfig
         {
-            Size = (uint)sizeof(NativeEngineConfig), Version = AbiVersion,
-            MaxEmitters = 64, MaxReceivers = 16, MaxKeyframesPerPath = 4096
+            Size = (uint)sizeof(NativeEngineConfig),
+            Version = AbiVersion,
+            MaxEmitters = 64,
+            MaxReceivers = 16,
+            MaxKeyframesPerPath = 4096
         };
 
         Check(Native.pg_engine_create(&config, out var engine), engine, "create engine");
@@ -647,12 +655,15 @@ public static unsafe class NativeSceneRenderer
             1 - BandValue(value, value.Absorption, frequency) - BandValue(value, value.Transmission, frequency)));
         var descriptor = new NativeRoom
         {
-            Size = (uint)sizeof(NativeRoom), Version = AbiVersion,
-            CentreMetres = ToNative(room.Transform.PositionMetres), DimensionsMetres = ToNative(dimensions),
+            Size = (uint)sizeof(NativeRoom),
+            Version = AbiVersion,
+            CentreMetres = ToNative(room.Transform.PositionMetres),
+            DimensionsMetres = ToNative(dimensions),
             WallReflectionLow = ReflectionGain(material, 250),
             WallReflectionMid = ReflectionGain(material, 1000),
             WallReflectionHigh = ReflectionGain(material, 8000),
-            Scattering = material.Scattering.Average(), Enabled = 1
+            Scattering = material.Scattering.Average(),
+            Enabled = 1
         };
         Check(Native.pg_engine_set_room(engine, &descriptor), engine, "set room");
     }
@@ -665,7 +676,8 @@ public static unsafe class NativeSceneRenderer
             ?? throw new InvalidOperationException($"Emitter '{emitter.Name}' requires a motion path for native rendering.");
         var frames = path.Keyframes.Select(item => new NativeMotionKeyframe
         {
-            TimeSeconds = item.TimeSeconds, PositionMetres = ToNative(item.PositionMetres)
+            TimeSeconds = item.TimeSeconds,
+            PositionMetres = ToNative(item.PositionMetres)
         }).ToArray();
         var waveform = MapWaveform(oscillator.Waveform ?? WaveformKind.Sine);
         var partials = ReadAdditivePartials(oscillator);
@@ -677,19 +689,24 @@ public static unsafe class NativeSceneRenderer
             {
                 var descriptor = new NativeSignalEmitter
                 {
-                    Size = (uint)sizeof(NativeSignalEmitter), Version = AbiVersion, NameUtf8 = namePointer,
+                    Size = (uint)sizeof(NativeSignalEmitter),
+                    Version = AbiVersion,
+                    NameUtf8 = namePointer,
                     Waveform = waveform,
                     FrequencyHz = oscillator.NumericParameters.GetValueOrDefault("frequencyHz", 440),
                     Amplitude = oscillator.NumericParameters.GetValueOrDefault("amplitude", 1),
                     PhaseRadians = oscillator.NumericParameters.GetValueOrDefault("phaseRadians", 0),
                     PulseWidth = oscillator.NumericParameters.GetValueOrDefault("pulseWidth", 0.5),
-                    GainLinear = emitter.GainLinear, MinDistanceMetres = emitter.MinDistanceMetres,
+                    GainLinear = emitter.GainLinear,
+                    MinDistanceMetres = emitter.MinDistanceMetres,
                     AttackSeconds = oscillator.NumericParameters.GetValueOrDefault("attackSeconds", 0),
                     ReleaseSeconds = oscillator.NumericParameters.GetValueOrDefault("releaseSeconds", 0),
                     NonlinearDrive = oscillator.NumericParameters.GetValueOrDefault("drive", 0),
-                    AdditivePartials = partialPointer, AdditivePartialCount = (uint)partials.Length,
+                    AdditivePartials = partialPointer,
+                    AdditivePartialCount = (uint)partials.Length,
                     MotionPathKind = MapPath(path.Kind),
-                    Keyframes = framePointer, KeyframeCount = (uint)frames.Length,
+                    Keyframes = framePointer,
+                    KeyframeCount = (uint)frames.Length,
                     NoiseSeed = (uint)Math.Clamp(oscillator.NumericParameters.GetValueOrDefault("seed", 1), 1, uint.MaxValue),
                     Enabled = 1
                 };
@@ -763,15 +780,31 @@ public static unsafe class NativeSceneRenderer
         {
             var descriptor = new NativeReceiver
             {
-                Size = (uint)sizeof(NativeReceiver), Version = AbiVersion, NameUtf8 = namePointer,
+                Size = (uint)sizeof(NativeReceiver),
+                Version = AbiVersion,
+                NameUtf8 = namePointer,
                 Kind = receiver.Kind == ReceiverRigKind.BinauralHead ? 0 : 1,
                 CentreMetres = ToNative(receiver.Transform.PositionMetres),
                 YawDegrees = receiver.Transform.RotationDegrees.Y,
-                SpacingMetres = receiver.SpacingMetres, HeadRadiusMetres = receiver.HeadRadiusMetres,
-                MicrophoneAngleDegrees = receiver.AngleDegrees, PolarPattern = (int)receiver.PolarPattern,
-                SensitivityDb = receiver.SensitivityDb, SelfNoiseDbSpl = receiver.SelfNoiseDbSpl, Enabled = 1
+                SpacingMetres = receiver.SpacingMetres,
+                HeadRadiusMetres = receiver.HeadRadiusMetres,
+                MicrophoneAngleDegrees = receiver.AngleDegrees,
+                PolarPattern = (int)receiver.PolarPattern,
+                SensitivityDb = receiver.SensitivityDb,
+                SelfNoiseDbSpl = receiver.SelfNoiseDbSpl,
+                Enabled = 1
             };
             Check(Native.pg_engine_add_receiver(engine, &descriptor, out var receiverIndex), engine, "add receiver");
+            if (receiver.Kind == ReceiverRigKind.StereoMicrophone)
+            {
+                var (left, right) = ReceiverRigGeometry.EffectiveMicrophoneCapsules(receiver);
+                var leftDescriptor = ToNative(left);
+                var rightDescriptor = ToNative(right);
+                Check(
+                    Native.pg_engine_set_receiver_capsules(engine, receiverIndex, &leftDescriptor, &rightDescriptor),
+                    engine,
+                    "set independent microphone capsules");
+            }
             if (receiver.MotionPathId is not { } motionPathId)
             {
                 return;
@@ -799,6 +832,28 @@ public static unsafe class NativeSceneRenderer
         finally
         {
             Marshal.FreeCoTaskMem(namePointer);
+        }
+    }
+
+    private static NativeReceiverCapsule ToNative(MicrophoneCapsule capsule) => new()
+    {
+        Size = (uint)sizeof(NativeReceiverCapsule),
+        Version = AbiVersion,
+        RelativePositionMetres = ToNative(capsule.RelativeTransform.PositionMetres),
+        RelativeRotationDegrees = ToNative(capsule.RelativeTransform.RotationDegrees),
+        PolarPattern = (int)capsule.PolarPattern,
+        SensitivityDb = capsule.SensitivityDb,
+        SelfNoiseDbSpl = capsule.SelfNoiseDbSpl
+    };
+
+    private static void EnsureReceiverCapabilities(SceneDocument scene)
+    {
+        var unsupported = scene.ReceiverRigs.FirstOrDefault(receiver =>
+            receiver.Enabled && receiver.Kind == ReceiverRigKind.BinauralHead && receiver.HrtfMode != HrtfMode.Parametric);
+        if (unsupported is not null)
+        {
+            throw new NotSupportedException(
+                $"Receiver '{unsupported.Name}' uses {unsupported.HrtfMode}. The current renderer supports the analytic parametric head model; measured SOFA and bounded hybrid rendering remain gated until the Steam Audio adapter is active.");
         }
     }
 
@@ -934,6 +989,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiver { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres; public double YawDegrees, SpacingMetres, HeadRadiusMetres, MicrophoneAngleDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Enabled, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverCapsule { public uint Size, Version; public NativeVector RelativePositionMetres, RelativeRotationDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverMotion { public uint Size, Version, ReceiverIndex; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderRequest { public uint Size, Version; public nint OutputDirectoryUtf8, FilePrefixUtf8; public double DurationSeconds; public uint SampleRate; public int SampleFormat, Quality; public uint ReflectionOrder, Seed; public nint CancellationFlag; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
@@ -953,6 +1009,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_mesh_geometry(nint engine, NativeMeshGeometry* geometry, out uint index, NativeMeshImportReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_capsules(nint engine, uint receiverIndex, NativeReceiverCapsule* leftCapsule, NativeReceiverCapsule* rightCapsule);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_motion(nint engine, NativeReceiverMotion* motion);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_device(nint engine, NativeDeviceConfig* config);

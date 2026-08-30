@@ -598,12 +598,33 @@ public sealed class WorldViewport : Control
 
     private void DrawReceiver(DrawingContext context, ReceiverRig receiver, Vector3d position, bool selected)
     {
-        var point = Project(position);
-        var halfSpacing = Math.Max(5, receiver.SpacingMetres * 28);
+        Vector3d leftPosition;
+        Vector3d rightPosition;
+        if (receiver.Kind == ReceiverRigKind.StereoMicrophone &&
+            receiver.LeftCapsule is { } left && receiver.RightCapsule is { } right)
+        {
+            leftPosition = ReceiverRigGeometry.CapsuleWorldPosition(receiver, left, position);
+            rightPosition = ReceiverRigGeometry.CapsuleWorldPosition(receiver, right, position);
+        }
+        else
+        {
+            var localLeft = new Vector3d(-receiver.SpacingMetres * 0.5, 0, 0);
+            var localRight = new Vector3d(receiver.SpacingMetres * 0.5, 0, 0);
+            leftPosition = position + ReceiverRigGeometry.RotateYaw(localLeft, receiver.Transform.RotationDegrees.Y);
+            rightPosition = position + ReceiverRigGeometry.RotateYaw(localRight, receiver.Transform.RotationDegrees.Y);
+        }
+        var leftPoint = Project(leftPosition);
+        var rightPoint = Project(rightPosition);
+        if (Distance(leftPoint, rightPoint) < 10)
+        {
+            var centre = Project(position);
+            leftPoint = new Point(centre.X - 5, centre.Y);
+            rightPoint = new Point(centre.X + 5, centre.Y);
+        }
         var pen = selected ? SelectedObjectPen : new Pen(ReceiverBrush, 2);
-        context.DrawLine(pen, new(point.X - halfSpacing, point.Y), new(point.X + halfSpacing, point.Y));
-        context.DrawEllipse(ReceiverBrush, selected ? SelectedObjectPen : null, new(point.X - halfSpacing, point.Y), selected ? 5 : 4, selected ? 5 : 4);
-        context.DrawEllipse(ReceiverBrush, selected ? SelectedObjectPen : null, new(point.X + halfSpacing, point.Y), selected ? 5 : 4, selected ? 5 : 4);
+        context.DrawLine(pen, leftPoint, rightPoint);
+        context.DrawEllipse(ReceiverBrush, selected ? SelectedObjectPen : null, leftPoint, selected ? 5 : 4, selected ? 5 : 4);
+        context.DrawEllipse(ReceiverBrush, selected ? SelectedObjectPen : null, rightPoint, selected ? 5 : 4, selected ? 5 : 4);
     }
 
     private Point Project(Vector3d point)
@@ -686,7 +707,14 @@ public sealed class WorldViewport : Control
         {
             var path = Scene.MotionPaths.FirstOrDefault(candidate => candidate.Id == receiver.MotionPathId);
             var position = path is null ? receiver.Transform.PositionMetres : SceneKinematics.PositionAt(path, TimeSeconds);
-            Consider(SceneSelection.Receiver(receiver.Id), position);
+            var receiverSelection = SceneSelection.Receiver(receiver.Id);
+            Consider(receiverSelection, position);
+            if (receiver.Kind == ReceiverRigKind.StereoMicrophone &&
+                receiver.LeftCapsule is { } left && receiver.RightCapsule is { } right)
+            {
+                Consider(receiverSelection, ReceiverRigGeometry.CapsuleWorldPosition(receiver, left, position));
+                Consider(receiverSelection, ReceiverRigGeometry.CapsuleWorldPosition(receiver, right, position));
+            }
         }
         foreach (var geometry in Scene.Geometry)
         {
@@ -743,6 +771,15 @@ public sealed class WorldViewport : Control
                 return true;
             }
         }
+        else if (spatialSelection.Kind == SceneSelectionKind.Receiver)
+        {
+            var receiver = Scene.ReceiverRigs.FirstOrDefault(item => item.Id == spatialSelection.Id);
+            if (receiver is not null && receiver.MotionPathId is null)
+            {
+                position = receiver.Transform.PositionMetres;
+                return true;
+            }
+        }
         return false;
     }
 
@@ -770,6 +807,15 @@ public sealed class WorldViewport : Control
                 Scene.Atmosphere.WindZones[index] = zone with { Transform = zone.Transform with { PositionMetres = position } };
             }
         }
+        else if (spatialSelection.Kind == SceneSelectionKind.Receiver)
+        {
+            var index = Scene.ReceiverRigs.FindIndex(item => item.Id == spatialSelection.Id);
+            if (index >= 0 && Scene.ReceiverRigs[index].MotionPathId is null)
+            {
+                var receiver = Scene.ReceiverRigs[index];
+                Scene.ReceiverRigs[index] = receiver with { Transform = receiver.Transform with { PositionMetres = position } };
+            }
+        }
         InvalidateVisual();
     }
 
@@ -783,6 +829,7 @@ public sealed class WorldViewport : Control
         {
             SceneSelectionKind.Geometry => Scene.Geometry.FirstOrDefault(item => item.Id == spatialSelection.Id)?.Name ?? "Geometry",
             SceneSelectionKind.WindZone => Scene.Atmosphere.WindZones.FirstOrDefault(item => item.Id == spatialSelection.Id)?.Name ?? "Wind zone",
+            SceneSelectionKind.Receiver => Scene.ReceiverRigs.FirstOrDefault(item => item.Id == spatialSelection.Id)?.Name ?? "Receiver",
             _ => "Spatial object"
         };
     }
