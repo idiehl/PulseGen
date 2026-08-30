@@ -606,7 +606,7 @@ std::size_t first_active_frame(const std::vector<float>& samples, float threshol
 int main(int argument_count, char** arguments)
 {
     try {
-    static_assert(PG_ABI_VERSION == 2U);
+    static_assert(PG_ABI_VERSION == 3U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
     REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 

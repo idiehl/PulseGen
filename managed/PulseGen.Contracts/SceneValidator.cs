@@ -241,9 +241,9 @@ public static class SceneValidator
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/bufferFrames", "Buffer size must be between 64 and 8192 frames."));
             }
-            if (profile.ReflectionOrder is < 0 or > 1)
+            if (profile.ReflectionOrder is < 0 or > 2)
             {
-                issues.Add(new($"renderProfiles/{profile.Id}/reflectionOrder", "The current first-order engine accepts reflection depth 0 or 1."));
+                issues.Add(new($"renderProfiles/{profile.Id}/reflectionOrder", "The current engine accepts room reflection depth 0, 1, or 2."));
             }
             if (profile.RayCount is < 0 or > 1_000_000)
             {

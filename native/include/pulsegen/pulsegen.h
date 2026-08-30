@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define PG_ABI_VERSION 2u
+#define PG_ABI_VERSION 3u
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
 #define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
@@ -168,7 +168,10 @@ typedef struct pg_room_desc {
     double scattering;
     uint32_t enabled;
     uint32_t reserved;
+    /* Mid-band (1 kHz), low-band (250 Hz), and high-band (8 kHz) RT60 values. */
     double decay_time_seconds;
+    double decay_time_low_seconds;
+    double decay_time_high_seconds;
 } pg_room_desc;
 
 typedef struct pg_acoustic_material_desc {

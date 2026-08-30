@@ -28,7 +28,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.8";
+constexpr std::string_view engine_version = "0.1.0-alpha.9";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -196,7 +196,9 @@ struct room_state {
     double reflection_mid{ 0.65 };
     double reflection_high{ 0.5 };
     double scattering{ 0.1 };
-    double decay_time_seconds{ 1.5 };
+    double decay_time_low_seconds{ 1.5 };
+    double decay_time_mid_seconds{ 1.5 };
+    double decay_time_high_seconds{ 1.5 };
     bool enabled{ true };
 };
 
@@ -324,10 +326,17 @@ struct channel_filter_state {
 };
 
 struct room_response_state {
-    std::array<std::vector<float>, 4> delay_lines;
-    std::array<std::size_t, 4> delay_indices{};
+    std::array<std::array<std::vector<float>, late_delay_seconds.size()>, 3> delay_lines;
+    std::array<std::array<std::size_t, late_delay_seconds.size()>, 3> delay_indices{};
+    std::array<std::array<double, late_delay_seconds.size()>, 3> delay_feedbacks{};
+    std::array<double, 3> input_gains{};
     std::array<double, 3> modal_previous_one{};
     std::array<double, 3> modal_previous_two{};
+    double lowpass_low{};
+    double lowpass_high{};
+    double lowpass_low_coefficient{};
+    double lowpass_high_coefficient{};
+    double modal_radius{ 0.9 };
     std::uint32_t sample_rate{};
 };
 
@@ -1156,6 +1165,100 @@ bool room_reflection_path(
     return true;
 }
 
+double axis_value(vec3 value, std::size_t axis) noexcept
+{
+    if (axis == 0U) {
+        return value.x;
+    }
+    if (axis == 1U) {
+        return value.y;
+    }
+    return value.z;
+}
+
+vec3 with_axis_value(vec3 value, std::size_t axis, double coordinate) noexcept
+{
+    if (axis == 0U) {
+        value.x = coordinate;
+    } else if (axis == 1U) {
+        value.y = coordinate;
+    } else {
+        value.z = coordinate;
+    }
+    return value;
+}
+
+bool point_inside_room(const room_state& room, vec3 point) noexcept
+{
+    constexpr double tolerance = 1.0e-7;
+    for (std::size_t axis = 0U; axis < 3U; ++axis) {
+        const double half_extent = axis_value(room.dimensions, axis) * 0.5;
+        const double coordinate = axis_value(point, axis);
+        const double centre = axis_value(room.centre, axis);
+        if (coordinate < centre - half_extent - tolerance || coordinate > centre + half_extent + tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool room_second_order_reflection_path(
+    const room_state& room,
+    vec3 source,
+    vec3 receiver,
+    int reflection_axis,
+    bool first_high_side,
+    vec3& image_source,
+    vec3& first_reflection_point,
+    vec3& second_reflection_point) noexcept
+{
+    if (!point_inside_room(room, source) || !point_inside_room(room, receiver)) {
+        return false;
+    }
+
+    const std::size_t axis = static_cast<std::size_t>(reflection_axis);
+    const double centre = axis_value(room.centre, axis);
+    const double dimension = axis_value(room.dimensions, axis);
+    const double low_wall = centre - (dimension * 0.5);
+    const double high_wall = centre + (dimension * 0.5);
+    const double source_coordinate = axis_value(source, axis);
+    const double receiver_coordinate = axis_value(receiver, axis);
+    const double image_coordinate = source_coordinate + (first_high_side ? -2.0 * dimension : 2.0 * dimension);
+    image_source = with_axis_value(source, axis, image_coordinate);
+
+    const double denominator = image_coordinate - receiver_coordinate;
+    if (std::abs(denominator) <= 1.0e-12) {
+        return false;
+    }
+    const double near_boundary = first_high_side ? low_wall : high_wall;
+    const double far_boundary = first_high_side ? low_wall - dimension : high_wall + dimension;
+    const double near_amount = (near_boundary - receiver_coordinate) / denominator;
+    const double far_amount = (far_boundary - receiver_coordinate) / denominator;
+    if (near_amount <= 0.0 || far_amount <= near_amount || far_amount >= 1.0) {
+        return false;
+    }
+
+    const vec3 near_unfolded = receiver + ((image_source - receiver) * near_amount);
+    const vec3 far_unfolded = receiver + ((image_source - receiver) * far_amount);
+    first_reflection_point = with_axis_value(far_unfolded, axis, first_high_side ? high_wall : low_wall);
+    second_reflection_point = with_axis_value(near_unfolded, axis, first_high_side ? low_wall : high_wall);
+    return point_inside_room(room, first_reflection_point) && point_inside_room(room, second_reflection_point);
+}
+
+double room_reflection_gain(const room_state& room, double frequency_hz) noexcept
+{
+    const double frequency = std::max(frequency_hz, 1.0);
+    if (frequency <= 250.0) {
+        return room.reflection_low;
+    }
+    if (frequency <= 1000.0) {
+        const double amount = std::log2(frequency / 250.0) / 2.0;
+        return std::lerp(room.reflection_low, room.reflection_mid, std::clamp(amount, 0.0, 1.0));
+    }
+    const double amount = std::log2(frequency / 1000.0) / 3.0;
+    return std::lerp(room.reflection_mid, room.reflection_high, std::clamp(amount, 0.0, 1.0));
+}
+
 bool surface_reflection_point(
     vec3 image_source,
     vec3 receiver,
@@ -1181,96 +1284,113 @@ delayed_path_sample sample_delayed_path(
     vec3 receiver_position,
     double receive_time,
     std::uint32_t sample_rate,
-    bool reflected,
+    std::uint32_t reflection_bounces,
     int reflection_axis,
-    bool reflection_high_side) noexcept
+    bool reflection_high_side,
+    double room_pressure_reflection = 1.0) noexcept
 {
     double emission_time = receive_time;
     vec3 source_position = sample_motion(emitter, emission_time);
-    vec3 apparent_source = source_position;
-    vec3 reflection_point = source_position;
+    vec3 image_source = source_position;
+    vec3 first_reflection_point = source_position;
+    vec3 second_reflection_point = source_position;
     propagation_integral propagation{};
 
-    for (int iteration = 0; iteration < 6; ++iteration) {
-        source_position = sample_motion(emitter, emission_time);
-        apparent_source = source_position;
-        if (reflected && engine.room.enabled) {
-            const bool has_reflection_point = room_reflection_path(
-                engine.room,
-                source_position,
-                receiver_position,
-                reflection_axis,
-                reflection_high_side,
-                apparent_source,
-                reflection_point);
-            propagation = has_reflection_point
-                ? integrate_propagation_path(
-                    engine.atmosphere,
-                    std::array{ source_position, reflection_point, receiver_position },
-                    emitter.frequency_hz,
-                    receive_time)
-                : integrate_propagation_path(
-                    engine.atmosphere,
-                    std::array{ apparent_source, receiver_position },
-                    emitter.frequency_hz,
-                    receive_time);
-        } else {
+    const auto update_propagation = [&]() noexcept {
+        if (reflection_bounces == 0U) {
             propagation = integrate_propagation_path(
                 engine.atmosphere,
                 std::array{ source_position, receiver_position },
                 emitter.frequency_hz,
                 receive_time);
+            return true;
+        }
+        if (!engine.room.enabled) {
+            return false;
+        }
+        if (reflection_bounces == 1U) {
+            if (!room_reflection_path(
+                    engine.room,
+                    source_position,
+                    receiver_position,
+                    reflection_axis,
+                    reflection_high_side,
+                    image_source,
+                    first_reflection_point)) {
+                return false;
+            }
+            propagation = integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ source_position, first_reflection_point, receiver_position },
+                emitter.frequency_hz,
+                receive_time);
+            return true;
+        }
+        if (reflection_bounces == 2U) {
+            if (!room_second_order_reflection_path(
+                    engine.room,
+                    source_position,
+                    receiver_position,
+                    reflection_axis,
+                    reflection_high_side,
+                    image_source,
+                    first_reflection_point,
+                    second_reflection_point)) {
+                return false;
+            }
+            propagation = integrate_propagation_path(
+                engine.atmosphere,
+                std::array{ source_position, first_reflection_point, second_reflection_point, receiver_position },
+                emitter.frequency_hz,
+                receive_time);
+            return true;
+        }
+        return false;
+    };
+
+    for (int iteration = 0; iteration < 6; ++iteration) {
+        source_position = sample_motion(emitter, emission_time);
+        if (!update_propagation()) {
+            return {};
         }
         emission_time = receive_time - propagation.travel_time_seconds;
     }
 
     source_position = sample_motion(emitter, emission_time);
-    apparent_source = source_position;
-    if (reflected && engine.room.enabled) {
-        const bool has_reflection_point = room_reflection_path(
-            engine.room,
-            source_position,
-            receiver_position,
-            reflection_axis,
-            reflection_high_side,
-            apparent_source,
-            reflection_point);
-        propagation = has_reflection_point
-            ? integrate_propagation_path(
-                engine.atmosphere,
-                std::array{ source_position, reflection_point, receiver_position },
-                emitter.frequency_hz,
-                receive_time)
-            : integrate_propagation_path(
-                engine.atmosphere,
-                std::array{ apparent_source, receiver_position },
-                emitter.frequency_hz,
-                receive_time);
-    } else {
-        propagation = integrate_propagation_path(
-            engine.atmosphere,
-            std::array{ source_position, receiver_position },
-            emitter.frequency_hz,
-            receive_time);
+    if (!update_propagation()) {
+        return {};
     }
 
     const double distance = propagation.distance_metres;
     const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
     const double absorption = std::exp(-propagation.absorption_exponent);
-    double reflection = 1.0;
-    if (reflected) {
-        const double frequency_mix = std::clamp((emitter.frequency_hz - 250.0) / 3750.0, 0.0, 1.0);
-        reflection = std::lerp(engine.room.reflection_mid, engine.room.reflection_high, frequency_mix);
-        reflection *= 1.0 - (0.35 * engine.room.scattering);
-    }
-
-    const double transmission = reflected
+    const double transmission = reflection_bounces > 0U
         ? 1.0
         : occlusion_transmission_gain(engine, source_position, receiver_position, emitter.frequency_hz);
-    const double sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
-        absorption * reflection * transmission / attenuation_distance;
-    const vec3 arrival_point = reflected ? reflection_point : source_position;
-    return { sample, distance, source_position, arrival_point - receiver_position };
+    const double incident_sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
+        absorption * transmission / attenuation_distance;
+    if (reflection_bounces == 0U) {
+        return { incident_sample, distance, source_position, source_position - receiver_position };
+    }
+
+    const double reflection_per_bounce = std::clamp(room_pressure_reflection, 0.0, 1.0);
+    const double specular_energy_per_bounce = 1.0 - std::clamp(engine.room.scattering, 0.0, 1.0);
+    const double combined_reflection = reflection_bounces == 2U
+        ? reflection_per_bounce * reflection_per_bounce
+        : reflection_per_bounce;
+    const double specular_energy_fraction = reflection_bounces == 2U
+        ? specular_energy_per_bounce * specular_energy_per_bounce
+        : specular_energy_per_bounce;
+    const double specular_gain = combined_reflection * std::sqrt(specular_energy_fraction);
+    const double diffuse_gain = combined_reflection * std::sqrt(std::max(0.0, 1.0 - specular_energy_fraction));
+    const vec3 arrival_point = reflection_bounces == 1U ? first_reflection_point : second_reflection_point;
+    return {
+        incident_sample * specular_gain,
+        distance,
+        source_position,
+        arrival_point - receiver_position,
+        incident_sample * diffuse_gain
+    };
 }
 
 delayed_path_sample sample_geometry_reflection(
@@ -1394,21 +1514,61 @@ double microphone_pattern_gain(pg_polar_pattern pattern, vec3 capsule_forward, v
 room_response_state make_room_response_state()
 {
     room_response_state state{};
-    for (std::size_t index = 0; index < late_delay_seconds.size(); ++index) {
-        const auto capacity = static_cast<std::size_t>(std::ceil(late_delay_seconds[index] * maximum_supported_sample_rate)) + 2U;
-        state.delay_lines[index].resize(capacity);
+    for (auto& band : state.delay_lines) {
+        for (std::size_t index = 0; index < late_delay_seconds.size(); ++index) {
+            const auto capacity = static_cast<std::size_t>(std::ceil(late_delay_seconds[index] * maximum_supported_sample_rate)) + 2U;
+            band[index].resize(capacity);
+        }
     }
     return state;
 }
 
-void reset_room_response(room_response_state& state, std::uint32_t sample_rate) noexcept
+void reset_room_response(
+    room_response_state& state,
+    std::uint32_t sample_rate,
+    const room_state& room,
+    double impulse_response_seconds) noexcept
 {
-    for (auto& line : state.delay_lines) {
-        std::fill(line.begin(), line.end(), 0.0F);
+    for (auto& band : state.delay_lines) {
+        for (auto& line : band) {
+            std::fill(line.begin(), line.end(), 0.0F);
+        }
     }
     state.delay_indices = {};
     state.modal_previous_one = {};
     state.modal_previous_two = {};
+    state.lowpass_low = 0.0;
+    state.lowpass_high = 0.0;
+    state.lowpass_low_coefficient = std::exp(
+        (-2.0 * std::numbers::pi * 500.0) / static_cast<double>(sample_rate));
+    state.lowpass_high_coefficient = std::exp(
+        (-2.0 * std::numbers::pi * 4000.0) / static_cast<double>(sample_rate));
+    const std::array<double, 3> room_reflections{
+        std::clamp(room.reflection_low, 0.0, 0.999),
+        std::clamp(room.reflection_mid, 0.0, 0.999),
+        std::clamp(room.reflection_high, 0.0, 0.999)
+    };
+    const std::array<double, 3> room_decay_times{
+        room.decay_time_low_seconds,
+        room.decay_time_mid_seconds,
+        room.decay_time_high_seconds
+    };
+    for (std::size_t band = 0U; band < state.delay_lines.size(); ++band) {
+        const double decay_time = std::clamp(
+            std::min(room_decay_times[band], impulse_response_seconds),
+            0.05,
+            30.0);
+        state.input_gains[band] = 0.08 + (0.18 * room.scattering) + (0.12 * room_reflections[band]);
+        for (std::size_t index = 0U; index < late_delay_seconds.size(); ++index) {
+            state.delay_feedbacks[band][index] = std::pow(0.001, late_delay_seconds[index] / decay_time);
+        }
+        if (band == 0U) {
+            state.modal_radius = std::clamp(
+                std::pow(0.001, 1.0 / (decay_time * static_cast<double>(sample_rate))),
+                0.9,
+                0.99999);
+        }
+    }
     state.sample_rate = sample_rate;
 }
 
@@ -1457,7 +1617,7 @@ std::size_t diffuse_line_count(std::uint32_t ray_count) noexcept
     return diffuse_delay_seconds.size();
 }
 
-std::pair<double, double> process_surface_diffuse_response(
+std::pair<double, double> process_diffuse_response(
     pg_engine& engine,
     std::size_t receiver_index,
     double input,
@@ -1522,35 +1682,43 @@ std::pair<double, double> process_room_response(
     }
     room_response_state& state = engine.receiver_room_responses[receiver_index];
     if (state.sample_rate != sample_rate) {
-        reset_room_response(state, sample_rate);
+        reset_room_response(state, sample_rate, engine.room, impulse_response_seconds);
     }
 
-    const double room_reflection = std::clamp(engine.room.reflection_mid, 0.0, 0.999);
-    const double decay_time = std::clamp(
-        std::min(engine.room.decay_time_seconds, impulse_response_seconds),
-        0.05,
-        30.0);
-    const double input_gain = 0.08 + (0.18 * engine.room.scattering) + (0.12 * room_reflection);
+    state.lowpass_low = ((1.0 - state.lowpass_low_coefficient) * input) +
+        (state.lowpass_low_coefficient * state.lowpass_low);
+    state.lowpass_high = ((1.0 - state.lowpass_high_coefficient) * input) +
+        (state.lowpass_high_coefficient * state.lowpass_high);
+    const std::array<double, 3> band_inputs{
+        state.lowpass_low,
+        state.lowpass_high - state.lowpass_low,
+        input - state.lowpass_high
+    };
     constexpr std::array<double, 4> left_mix{ 0.24, 0.19, -0.17, 0.15 };
     constexpr std::array<double, 4> right_mix{ 0.17, -0.23, 0.15, 0.19 };
     double late_left = 0.0;
     double late_right = 0.0;
-    for (std::size_t index = 0; index < state.delay_lines.size(); ++index) {
-        auto& line = state.delay_lines[index];
-        const auto delay_length = std::clamp(
-            static_cast<std::size_t>(std::llround(late_delay_seconds[index] * sample_rate)),
-            std::size_t{ 2U },
-            line.size());
-        std::size_t& cursor = state.delay_indices[index];
-        if (cursor >= delay_length) {
-            cursor = 0U;
+    for (std::size_t band = 0U; band < state.delay_lines.size(); ++band) {
+        for (std::size_t index = 0; index < late_delay_seconds.size(); ++index) {
+            auto& line = state.delay_lines[band][index];
+            const auto delay_length = std::clamp(
+                static_cast<std::size_t>(std::llround(late_delay_seconds[index] * sample_rate)),
+                std::size_t{ 2U },
+                line.size());
+            std::size_t& cursor = state.delay_indices[band][index];
+            if (cursor >= delay_length) {
+                cursor = 0U;
+            }
+            const double delayed = line[cursor];
+            line[cursor] = static_cast<float>(std::clamp(
+                (band_inputs[band] * state.input_gains[band]) +
+                    (delayed * state.delay_feedbacks[band][index]),
+                -8.0,
+                8.0));
+            cursor = (cursor + 1U) % delay_length;
+            late_left += delayed * left_mix[index];
+            late_right += delayed * right_mix[index];
         }
-        const double delayed = line[cursor];
-        const double feedback = std::pow(0.001, late_delay_seconds[index] / decay_time);
-        line[cursor] = static_cast<float>(std::clamp((input * input_gain) + (delayed * feedback), -8.0, 8.0));
-        cursor = (cursor + 1U) % delay_length;
-        late_left += delayed * left_mix[index];
-        late_right += delayed * right_mix[index];
     }
 
     const std::array<double, 3> dimensions{
@@ -1560,15 +1728,12 @@ std::pair<double, double> process_room_response(
     };
     constexpr std::array<double, 3> mode_numbers{ 5.0, 3.0, 7.0 };
     const double local_speed = speed_of_sound(engine.atmosphere);
-    const double radius = std::clamp(
-        std::pow(0.001, 1.0 / (decay_time * static_cast<double>(sample_rate))),
-        0.9,
-        0.99999);
+    const double radius = state.modal_radius;
     double modal = 0.0;
     for (std::size_t mode = 0; mode < dimensions.size(); ++mode) {
         const double frequency = std::min(local_speed * mode_numbers[mode] / (2.0 * dimensions[mode]), sample_rate * 0.45);
         const double coefficient = 2.0 * radius * std::cos(2.0 * std::numbers::pi * frequency / sample_rate);
-        const double output = (input * 0.0035) + (coefficient * state.modal_previous_one[mode]) -
+        const double output = (band_inputs[0] * 0.0035) + (coefficient * state.modal_previous_one[mode]) -
             (radius * radius * state.modal_previous_two[mode]);
         state.modal_previous_two[mode] = state.modal_previous_one[mode];
         state.modal_previous_one[mode] = std::clamp(output, -4.0, 4.0);
@@ -1627,17 +1792,69 @@ std::pair<float, float> render_frame(
             continue;
         }
 
-        const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, false, 0, false);
-        const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, false, 0, false);
+        const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, 0U, 0, false);
+        const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, 0U, 0, false);
         double left_sample = receiver_path_sample(left_direct, left_forward, left_pattern);
         double right_sample = receiver_path_sample(right_direct, right_forward, right_pattern);
         source_lateral += dot(normalized(left_direct.source_position - receiver_centre), right);
+        const double room_pressure_reflection = engine.room.enabled && reflection_order > 0U
+            ? room_reflection_gain(engine.room, emitter.frequency_hz)
+            : 1.0;
 
         if (engine.room.enabled && reflection_order > 0U) {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int side = 0; side < 2; ++side) {
-                    const auto left_reflection = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, true, axis, side != 0);
-                    const auto right_reflection = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, true, axis, side != 0);
+                    const auto left_reflection = sample_delayed_path(
+                        engine,
+                        emitter,
+                        left_position,
+                        receive_time,
+                        sample_rate,
+                        1U,
+                        axis,
+                        side != 0,
+                        room_pressure_reflection);
+                    const auto right_reflection = sample_delayed_path(
+                        engine,
+                        emitter,
+                        right_position,
+                        receive_time,
+                        sample_rate,
+                        1U,
+                        axis,
+                        side != 0,
+                        room_pressure_reflection);
+                    left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                    right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
+                    diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
+                    diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                }
+            }
+        }
+
+        if (engine.room.enabled && reflection_order > 1U) {
+            for (int axis = 0; axis < 3; ++axis) {
+                for (int first_side = 0; first_side < 2; ++first_side) {
+                    const auto left_reflection = sample_delayed_path(
+                        engine,
+                        emitter,
+                        left_position,
+                        receive_time,
+                        sample_rate,
+                        2U,
+                        axis,
+                        first_side != 0,
+                        room_pressure_reflection);
+                    const auto right_reflection = sample_delayed_path(
+                        engine,
+                        emitter,
+                        right_position,
+                        receive_time,
+                        sample_rate,
+                        2U,
+                        axis,
+                        first_side != 0,
+                        room_pressure_reflection);
                     left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
                     right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
                     diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
@@ -1683,7 +1900,7 @@ std::pair<float, float> render_frame(
         right_total += right_sample;
     }
 
-    const auto [diffuse_left, diffuse_right] = process_surface_diffuse_response(
+    const auto [diffuse_left, diffuse_right] = process_diffuse_response(
         engine,
         receiver_index,
         0.5 * (diffuse_input_left + diffuse_input_right),
@@ -1992,9 +2209,12 @@ pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room
         !coefficient_valid(room->wall_reflection_high) || !coefficient_valid(room->scattering)) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Room reflection and scattering values must be in 0..1.");
     }
-    if (!std::isfinite(room->decay_time_seconds) || room->decay_time_seconds < 0.0 || room->decay_time_seconds > 30.0) {
-        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Room decay time must be zero for the default or a bounded value no greater than 30 seconds.");
+    const auto decay_valid = [](double value) { return std::isfinite(value) && value >= 0.0 && value <= 30.0; };
+    if (!decay_valid(room->decay_time_seconds) || !decay_valid(room->decay_time_low_seconds) ||
+        !decay_valid(room->decay_time_high_seconds)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Room decay times must be zero for a fallback or bounded values no greater than 30 seconds.");
     }
+    const double mid_decay_time = room->decay_time_seconds > 0.0 ? room->decay_time_seconds : 1.5;
     engine->room = {
         from_c(room->centre_metres),
         dimensions,
@@ -2002,9 +2222,14 @@ pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_desc* room
         room->wall_reflection_mid,
         room->wall_reflection_high,
         room->scattering,
-        room->decay_time_seconds > 0.0 ? room->decay_time_seconds : 1.5,
+        room->decay_time_low_seconds > 0.0 ? room->decay_time_low_seconds : mid_decay_time,
+        mid_decay_time,
+        room->decay_time_high_seconds > 0.0 ? room->decay_time_high_seconds : mid_decay_time,
         room->enabled != 0U
     };
+    for (auto& response : engine->receiver_room_responses) {
+        response.sample_rate = 0U;
+    }
     return PG_STATUS_OK;
 }
 
@@ -2547,7 +2772,7 @@ pg_status PG_CALL pg_engine_render_receiver_block(
 
     if (start_frame == 0U || engine->receiver_next_frames[receiver_index] != start_frame) {
         engine->receiver_filters[receiver_index] = {};
-        reset_room_response(engine->receiver_room_responses[receiver_index], sample_rate);
+        reset_room_response(engine->receiver_room_responses[receiver_index], sample_rate, engine->room, 2.0);
         reset_diffuse_response(engine->receiver_diffuse_responses[receiver_index], sample_rate);
     }
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
@@ -2576,7 +2801,7 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
     }
     if (request->output_directory_utf8 == nullptr || request->duration_seconds <= 0.0 || request->sample_rate == 0U ||
         request->sample_rate > maximum_supported_sample_rate ||
-        !std::isfinite(request->duration_seconds) || request->reflection_order > 1U ||
+        !std::isfinite(request->duration_seconds) || request->reflection_order > 2U ||
         request->ray_count > 1000000U || !std::isfinite(request->impulse_response_seconds) ||
         request->impulse_response_seconds < 0.0 || request->impulse_response_seconds > 30.0) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Render directory, duration, sample rate, or echo-quality settings are invalid.");
@@ -2605,7 +2830,11 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
                 continue;
             }
             engine->receiver_filters[receiver_index] = {};
-            reset_room_response(engine->receiver_room_responses[receiver_index], request->sample_rate);
+            reset_room_response(
+                engine->receiver_room_responses[receiver_index],
+                request->sample_rate,
+                engine->room,
+                request->impulse_response_seconds);
             reset_diffuse_response(engine->receiver_diffuse_responses[receiver_index], request->sample_rate);
             for (std::uint64_t frame = 0; frame < frame_count; ++frame) {
                 if (request->cancellation_flag != nullptr && *request->cancellation_flag != 0U) {
@@ -2707,7 +2936,7 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Preview receiver index is out of range or disabled.");
     }
     if (config->sample_rate < 8000U || config->sample_rate > maximum_supported_sample_rate ||
-        config->period_frames < 32U || config->period_frames > 8192U || config->reflection_order > 1U ||
+        config->period_frames < 32U || config->period_frames > 8192U || config->reflection_order > 2U ||
         config->ray_count > 1000000U || !std::isfinite(config->impulse_response_seconds) ||
         config->impulse_response_seconds < 0.0 || config->impulse_response_seconds > 30.0) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Preview sample rate, period, or echo-quality settings are outside supported bounds.");
@@ -2750,7 +2979,11 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
     if (engine->device.playback.internalPeriodSizeInFrames > 0U) {
         engine->device_period_frames = engine->device.playback.internalPeriodSizeInFrames;
     }
-    reset_room_response(engine->receiver_room_responses[config->receiver_index], engine->device_sample_rate);
+    reset_room_response(
+        engine->receiver_room_responses[config->receiver_index],
+        engine->device_sample_rate,
+        engine->room,
+        config->impulse_response_seconds);
     const double diffuse_decay_time = config->impulse_response_seconds > 0.0
         ? std::clamp(config->impulse_response_seconds, 0.05, 30.0)
         : 0.0;

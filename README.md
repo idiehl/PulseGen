@@ -19,10 +19,11 @@ commands and reads bounded telemetry.
   sound speed, pressure-aware air absorption, altitude layers, and transformed
   bounded wind/turbulence zones. Preview samples the field once per propagation
   leg; final rendering subdivides each leg for higher-accuracy travel time and
-  tonal loss. First-order shoebox reflections, physically estimated room fade,
-  bounded modal resonances, deterministic scattered-surface tails, late-field
-  feedback delays, analytic binaural head shadowing, and receiver-pair modelling
-  are also active. Stereo microphone capsules can carry independent
+  tonal loss. Shoebox rooms render every first bounce plus deterministic
+  opposing-wall second bounces, physically estimated three-band Eyring fade,
+  bounded low-frequency modal resonances, deterministic scattered-surface tails,
+  late-field feedback delays, analytic binaural head shadowing, and receiver-pair
+  modelling. Stereo microphone capsules can carry independent
   three-axis offsets and aim, pickup patterns, and sensitivity into both preview
   and final rendering.
   Receiver rigs can follow the same editable absolute-coordinate paths as
@@ -58,7 +59,8 @@ commands and reads bounded telemetry.
   starting points, independent duplication for comparisons, live surface usage
   reporting, guarded removal, and a non-destructive per-band listening workflow.
   Parametric rooms show their size/material-derived bass, voice, and brightness
-  fade estimates. Render profiles are selectable and editable in the scene tree,
+  fade estimates, and all three estimates drive separate active room tails.
+  Render profiles are selectable and editable in the scene tree,
   and the active profile drives preview as well as export. Preset coefficients
   are intentionally labeled as simulation starting points rather than certified
   measurements.
@@ -80,6 +82,11 @@ Steam Audio, KISS FFT, libsndfile, codec packs, GPU model execution, full mesh
 authoring, and triangle-level imported-mesh viewport rendering remain explicit
 adapters; their dependency records prevent an unfinished integration from being
 presented as active.
+
+Reflection depth 2 currently applies only to opposing wall pairs in an
+axis-aligned parametric room. Authored finite planes and boxes remain deliberately
+limited to one reflection, and imported meshes still provide occlusion rather
+than reflection paths.
 
 ## Build
 

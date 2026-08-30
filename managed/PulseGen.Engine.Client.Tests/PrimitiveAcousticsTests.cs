@@ -25,12 +25,14 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.8", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.9", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v5", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal(3, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
+            Assert.Equal("eyring-three-band-v1", receipt.RootElement.GetProperty("roomResponseModel").GetString());
             Assert.Contains(
                 receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                 dependency => dependency.GetProperty("name").GetString() == "Assimp" &&
@@ -75,8 +77,8 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal((ulong)161803, first.DeterministicSeed);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
-            Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v5", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
             Assert.Equal(2, receipt.RootElement.GetProperty("windZoneCount").GetInt32());
@@ -254,7 +256,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
             using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
             {
-                Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Equal(6, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
                 Assert.Contains(
                     receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                     dependency => dependency.GetProperty("name").GetString() == "Assimp");
@@ -311,6 +313,80 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(4096, receipt.RootElement.GetProperty("rayCount").GetInt32());
             Assert.Equal(0.2, receipt.RootElement.GetProperty("impulseResponseSeconds").GetDouble());
             Assert.Equal(424242, receipt.RootElement.GetProperty("seed").GetInt32());
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void SecondRoomBounceArrivesAtTheAnalyticOpposingWallTime()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-second-room-bounce-{Guid.NewGuid():N}");
+        try
+        {
+            var scene = CreateRoomImpulseScene();
+            var firstOrder = scene.RenderProfiles[0] with
+            {
+                ReflectionOrder = 1,
+                RayCount = 0,
+                ImpulseResponseSeconds = 0
+            };
+            var secondOrder = firstOrder with { ReflectionOrder = 2 };
+            NativeSceneRenderer.Render(scene, Path.Combine(root, "first-order"), firstOrder);
+            var secondReceipt = NativeSceneRenderer.Render(scene, Path.Combine(root, "second-order"), secondOrder);
+
+            var firstSamples = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "first-order"), "*.wav").Single());
+            var secondSamples = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "second-order"), "*.wav").Single());
+            var secondBounceArrival = FirstDifferenceFrame(firstSamples, secondSamples);
+            var shortestPathMetres = Math.Sqrt((16 * 16) + (0.995 * 0.995));
+            var expectedArrival = (int)Math.Round(shortestPathMetres / 344.04 * 48000);
+
+            Assert.InRange(secondBounceArrival, expectedArrival - 2, expectedArrival + 2);
+            Assert.True(PeakDifferenceAfterFrame(firstSamples, secondSamples, secondBounceArrival) > 1.0e-4);
+            using var receipt = JsonDocument.Parse(File.ReadAllText(secondReceipt.RenderReceiptPath));
+            Assert.Equal(2, receipt.RootElement.GetProperty("reflectionOrder").GetInt32());
+            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void EyringRoomTailUsesIndependentLowAndHighFrequencyDecayTimes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-room-bands-{Guid.NewGuid():N}");
+        try
+        {
+            var lowScene = CreateBandDecayScene(250);
+            var highScene = CreateBandDecayScene(8000);
+            NativeSceneRenderer.Render(lowScene, Path.Combine(root, "low"));
+            var highReceipt = NativeSceneRenderer.Render(highScene, Path.Combine(root, "high"));
+
+            var lowSamples = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "low"), "*.wav").Single());
+            var highSamples = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "high"), "*.wav").Single());
+            var lowEarly = WindowRms(lowSamples, 0, 0.02, 0.08, 48000);
+            var highEarly = WindowRms(highSamples, 0, 0.02, 0.08, 48000);
+            var lowLate = WindowRms(lowSamples, 0, 0.40, 0.70, 48000);
+            var highLate = WindowRms(highSamples, 0, 0.40, 0.70, 48000);
+            var lowRetention = lowLate / lowEarly;
+            var highRetention = highLate / highEarly;
+
+            Assert.True(lowRetention > 1.0e-4, $"Expected a measurable low-band room tail; retention={lowRetention:R}.");
+            Assert.True(
+                lowRetention > highRetention * 20,
+                $"Expected the low band to outlast the highly absorbed high band; low={lowRetention:R}, high={highRetention:R}.");
+            using var receipt = JsonDocument.Parse(File.ReadAllText(highReceipt.RenderReceiptPath));
+            Assert.Equal("eyring-three-band-v1", receipt.RootElement.GetProperty("roomResponseModel").GetString());
         }
         finally
         {
@@ -482,6 +558,112 @@ public sealed class PrimitiveAcousticsTests
         };
     }
 
+    private static SceneDocument CreateRoomImpulseScene()
+    {
+        var scene = CreateScene(withSurface: false);
+        var material = scene.Materials[0] with
+        {
+            Name = "Uniform room test material",
+            Absorption = [0.19, 0.19, 0.19, 0.19, 0.19, 0.19, 0.19, 0.19],
+            Scattering = [0, 0, 0, 0, 0, 0, 0, 0],
+            Transmission = [0, 0, 0, 0, 0, 0, 0, 0]
+        };
+        scene.Materials[0] = material;
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = Guid.Parse("bbbbbbbb-0000-4000-8000-000000000006"),
+            Name = "Analytic shoebox",
+            Kind = GeometryKind.ParametricRoom,
+            MaterialId = material.Id,
+            DimensionsMetres = new Vector3d(12, 10, 8),
+            Occludes = false,
+            Reflects = true
+        });
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = new Vector3d(1, 0, 0) },
+                new MotionKeyframe { TimeSeconds = 0.15, PositionMetres = new Vector3d(1, 0, 0) }
+            ]
+        };
+        var nodes = scene.Emitters[0].SignalGraph.Nodes.ToList();
+        var oscillatorIndex = nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+        nodes[oscillatorIndex] = nodes[oscillatorIndex] with
+        {
+            Waveform = WaveformKind.Impulse,
+            NumericParameters = new Dictionary<string, double> { ["frequencyHz"] = 1, ["amplitude"] = 1 }
+        };
+        scene.Emitters[0] = scene.Emitters[0] with
+        {
+            SignalGraph = scene.Emitters[0].SignalGraph with { Nodes = nodes }
+        };
+        return scene with
+        {
+            Name = "Second Room Bounce",
+            Timeline = new EventTimeline { DurationSeconds = 0.15 }
+        };
+    }
+
+    private static SceneDocument CreateBandDecayScene(double frequencyHz)
+    {
+        var scene = CreateScene(withSurface: false);
+        var material = scene.Materials[0] with
+        {
+            Name = "Frequency-shaped room material",
+            Absorption = [0.02, 0.02, 0.03, 0.15, 0.45, 0.85, 0.9, 0.92],
+            Scattering = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
+            Transmission = [0, 0, 0, 0, 0, 0, 0, 0]
+        };
+        scene.Materials[0] = material;
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = Guid.Parse("bbbbbbbb-0000-4000-8000-000000000007"),
+            Name = "Three-band decay room",
+            Kind = GeometryKind.ParametricRoom,
+            MaterialId = material.Id,
+            DimensionsMetres = new Vector3d(12, 10, 8),
+            Occludes = false,
+            Reflects = true
+        });
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = new Vector3d(1, 0, 0) },
+                new MotionKeyframe { TimeSeconds = 0.08, PositionMetres = new Vector3d(1, 0, 0) }
+            ]
+        };
+        var nodes = scene.Emitters[0].SignalGraph.Nodes.ToList();
+        var oscillatorIndex = nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+        nodes[oscillatorIndex] = nodes[oscillatorIndex] with
+        {
+            Waveform = WaveformKind.Sine,
+            NumericParameters = new Dictionary<string, double>
+            {
+                ["frequencyHz"] = frequencyHz,
+                ["amplitude"] = 1,
+                ["attackSeconds"] = 0.005,
+                ["releaseSeconds"] = 0.01
+            }
+        };
+        scene.Emitters[0] = scene.Emitters[0] with
+        {
+            SignalGraph = scene.Emitters[0].SignalGraph with { Nodes = nodes }
+        };
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            ReflectionOrder = 1,
+            RayCount = 0,
+            ImpulseResponseSeconds = 1.2
+        };
+        return scene with
+        {
+            Name = $"{frequencyHz:0} Hz Room Decay",
+            Timeline = new EventTimeline { DurationSeconds = 0.8 }
+        };
+    }
+
     private static float[] ReadFloatSamples(string path)
     {
         using var stream = File.OpenRead(path);
@@ -529,6 +711,24 @@ public sealed class PrimitiveAcousticsTests
             count++;
         }
         return Math.Sqrt(sum / count);
+    }
+
+    private static double WindowRms(
+        IReadOnlyList<float> samples,
+        int channel,
+        double startSeconds,
+        double endSeconds,
+        int sampleRate)
+    {
+        var startFrame = Math.Clamp((int)Math.Round(startSeconds * sampleRate), 0, samples.Count / 2);
+        var endFrame = Math.Clamp((int)Math.Round(endSeconds * sampleRate), startFrame + 1, samples.Count / 2);
+        double sum = 0;
+        for (var frame = startFrame; frame < endFrame; frame++)
+        {
+            var sample = samples[(frame * 2) + channel];
+            sum += sample * sample;
+        }
+        return Math.Sqrt(sum / (endFrame - startFrame));
     }
 
     private static int FirstDifferenceFrame(

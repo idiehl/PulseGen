@@ -452,8 +452,8 @@ public sealed partial class MainWindow : Window
                         RenderAtmosphereSegmentsBox.Text = profile.AtmosphereIntegrationSegments.ToString(CultureInfo.InvariantCulture);
                         RenderSeedBox.Text = profile.Seed.ToString(CultureInfo.InvariantCulture);
                         RenderProfileExplanationText.Text = profile.Quality == RenderQuality.Final
-                            ? "Final mode uses every authored air-path slice. A larger diffuse-detail budget creates a denser scattered tail; zero detail or a zero-second tail disables it."
-                            : "Preview uses one air sample per path leg for responsiveness. A larger diffuse-detail budget creates a denser scattered tail; zero detail or a zero-second tail disables it.";
+                            ? "Final mode uses every authored air-path slice. Depth 2 adds an opposing-wall second bounce in axis-aligned rooms; authored planes and boxes stay first-bounce. Diffuse detail controls tail density."
+                            : "Preview uses one air sample per path leg. Depth 2 adds an opposing-wall second bounce in axis-aligned rooms; authored planes and boxes stay first-bounce. Diffuse detail controls tail density.";
                         RenderProfileInspectorPanel.IsVisible = true;
                         RefreshRenderProfileSummary();
                         break;

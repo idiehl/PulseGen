@@ -29,10 +29,11 @@ public readonly record struct PreviewDeviceStatus(
 
 public static unsafe class NativeSceneRenderer
 {
-    private const uint AbiVersion = 2;
+    private const uint AbiVersion = 3;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "bounded-propagation-v5";
+    private const string AcousticModel = "bounded-propagation-v6";
     private const string AtmosphereModel = "layered-bounded-wind-v1";
+    private const string RoomResponseModel = "eyring-three-band-v1";
     private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
     private const uint MaximumImportedMeshTriangles = 250_000;
     private static readonly double[] NativeBandCentresHz = [125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -145,11 +146,12 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            5,
+            6,
             EngineVersion,
             AbiVersion,
             AcousticModel,
             AtmosphereModel,
+            RoomResponseModel,
             scene.ProjectId,
             scene.Name,
             ProjectStore.ComputeSceneRevisionSha256(scene),
@@ -219,6 +221,7 @@ public static unsafe class NativeSceneRenderer
         uint NativeAbiVersion,
         string AcousticModel,
         string AtmosphereModel,
+        string RoomResponseModel,
         Guid ProjectId,
         string SceneName,
         string SceneRevisionSha256,
@@ -653,7 +656,9 @@ public static unsafe class NativeSceneRenderer
             WallReflectionHigh = ReflectionGain(material, 8000),
             Scattering = material.Scattering.Average(),
             Enabled = 1,
-            DecayTimeSeconds = roomEstimate.MidFrequencyRt60Seconds
+            DecayTimeSeconds = roomEstimate.MidFrequencyRt60Seconds,
+            DecayTimeLowSeconds = roomEstimate.LowFrequencyRt60Seconds,
+            DecayTimeHighSeconds = roomEstimate.HighFrequencyRt60Seconds
         };
         Check(Native.pg_engine_set_room(engine, &descriptor), engine, "set room");
     }
@@ -970,7 +975,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereLayer { public uint Size, Version; public double BaseAltitudeMetres, TopAltitudeMetres, TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeWindZone { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees, VelocityMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereField { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeAtmosphereLayer* Layers; public uint LayerCount; public NativeWindZone* WindZones; public uint WindZoneCount, IntegrationSegments, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; public double DecayTimeSeconds; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; public double DecayTimeSeconds, DecayTimeLowSeconds, DecayTimeHighSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMeshGeometry { public uint Size, Version; public nint NameUtf8; public void* EncodedData; public ulong EncodedSizeBytes; public nint FormatHintUtf8; public NativeVector CentreMetres, Scale, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, MaxTriangles, Reserved; }

@@ -254,13 +254,13 @@
                   <StackPanel Spacing="6">
                     <TextBlock Classes="sectionTitle" Text="ESTIMATED NATURAL ROOM FADE" />
                     <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
-                      <TextBlock Text="Bass (250 Hz)" Foreground="#8192A7" /><TextBlock x:Name="RoomLowDecayText" Grid.Column="1" Classes="value" Text="0.00 s" />
+                      <TextBlock Text="Bass (250 Hz) · active" Foreground="#8192A7" /><TextBlock x:Name="RoomLowDecayText" Grid.Column="1" Classes="value" Text="0.00 s" />
                       <TextBlock Grid.Row="1" Text="Voice (1 kHz) · active" Foreground="#8192A7" /><TextBlock x:Name="RoomMidDecayText" Grid.Row="1" Grid.Column="1" Classes="value" Text="0.00 s" />
-                      <TextBlock Grid.Row="2" Text="Brightness (8 kHz)" Foreground="#8192A7" /><TextBlock x:Name="RoomHighDecayText" Grid.Row="2" Grid.Column="1" Classes="value" Text="0.00 s" />
+                      <TextBlock Grid.Row="2" Text="Brightness (8 kHz) · active" Foreground="#8192A7" /><TextBlock x:Name="RoomHighDecayText" Grid.Row="2" Grid.Column="1" Classes="value" Text="0.00 s" />
                       <TextBlock Grid.Row="3" Text="Average wall interval" Foreground="#8192A7" /><TextBlock x:Name="RoomReflectionIntervalText" Grid.Row="3" Grid.Column="1" Classes="value" Text="0.0 ms" />
                       <TextBlock Grid.Row="4" Text="Profile fade cap" Foreground="#8192A7" /><TextBlock x:Name="RoomProfileTailText" Grid.Row="4" Grid.Column="1" Classes="value" Text="0.00 s" />
                     </Grid>
-                    <TextBlock Text="The voice-band estimate drives the current room tail. Bass and brightness show the band-split target for a later engine cycle. The active profile can shorten the voice-band tail." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                    <TextBlock Text="All three frequency bands drive separate room tails. The active profile fade cap can shorten any band, but never extends its physically estimated decay." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
                   </StackPanel>
                 </Border>
               </StackPanel>
@@ -461,7 +461,7 @@
                   <TextBlock Grid.Row="3" Text="File precision" Foreground="#8192A7" /><ComboBox x:Name="RenderSampleFormatBox" Grid.Row="3" Grid.Column="1" SelectionChanged="OnRenderSampleFormatChanged" />
                   <TextBlock Grid.Row="4" Text="Dither" Foreground="#8192A7" /><ComboBox x:Name="RenderDitherBox" Grid.Row="4" Grid.Column="1" />
                   <TextBlock Grid.Row="5" Text="Audio buffer (frames)" Foreground="#8192A7" /><TextBox x:Name="RenderBufferFramesBox" Grid.Row="5" Grid.Column="1" HorizontalContentAlignment="Right" />
-                  <TextBlock Grid.Row="6" Text="First echoes (0–1)" Foreground="#8192A7" /><TextBox x:Name="RenderReflectionOrderBox" Grid.Row="6" Grid.Column="1" HorizontalContentAlignment="Right" />
+                  <TextBlock Grid.Row="6" Text="Room bounce depth (0–2)" Foreground="#8192A7" /><TextBox x:Name="RenderReflectionOrderBox" Grid.Row="6" Grid.Column="1" HorizontalContentAlignment="Right" />
                   <TextBlock Grid.Row="7" Text="Diffuse detail budget" Foreground="#8192A7" /><TextBox x:Name="RenderRayCountBox" Grid.Row="7" Grid.Column="1" HorizontalContentAlignment="Right" />
                   <TextBlock Grid.Row="8" Text="Echo fade time (s)" Foreground="#8192A7" /><TextBox x:Name="RenderTailSecondsBox" Grid.Row="8" Grid.Column="1" HorizontalContentAlignment="Right" />
                   <TextBlock Grid.Row="9" Text="Air path slices" Foreground="#8192A7" /><TextBox x:Name="RenderAtmosphereSegmentsBox" Grid.Row="9" Grid.Column="1" HorizontalContentAlignment="Right" />
@@ -469,7 +469,7 @@
                 <Grid ColumnDefinitions="*,132">
                   <TextBlock Text="Repeatable random seed" Foreground="#8192A7" /><TextBox x:Name="RenderSeedBox" Grid.Column="1" HorizontalContentAlignment="Right" />
                 </Grid>
-                <TextBlock x:Name="RenderProfileExplanationText" Text="A larger diffuse-detail budget creates a denser scattered tail. Zero detail or a zero-second tail disables it." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <TextBlock x:Name="RenderProfileExplanationText" Text="Depth 2 adds an opposing-wall second bounce inside axis-aligned rooms. Authored planes and boxes remain first-bounce." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
               </StackPanel>
             </Border>
             <Button Content="Apply as active profile" Background="#266A64" Foreground="White" Click="OnApplyRenderProfileClicked" />

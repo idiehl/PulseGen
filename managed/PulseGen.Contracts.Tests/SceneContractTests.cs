@@ -322,6 +322,11 @@ public sealed class SceneContractTests
     {
         var scene = SampleScenes.CreateFlyby();
         var profile = scene.RenderProfiles[0];
+        scene.RenderProfiles[0] = profile with { ReflectionOrder = 2 };
+        Assert.DoesNotContain(
+            SceneValidator.Validate(scene),
+            issue => issue.Path.EndsWith("/reflectionOrder", StringComparison.Ordinal));
+
         scene.RenderProfiles[0] = profile with
         {
             Name = " ",
