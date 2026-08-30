@@ -24,6 +24,7 @@ public sealed class SceneAuthoringTests
         Assert.Equal(movingEmitter.MotionPathId, SceneSelectionResolver.MotionPath(scene, movingSelection)?.Id);
         Assert.Null(SceneSelectionResolver.MotionPath(scene, SceneSelection.Emitter(staticEmitter.Id)));
         Assert.True(SceneSelectionResolver.Exists(scene, SceneSelection.Material(scene.Materials[0].Id)));
+        Assert.True(SceneSelectionResolver.Exists(scene, SceneSelection.RenderProfile(scene.RenderProfiles[0].Id)));
         Assert.False(SceneSelectionResolver.Exists(scene, SceneSelection.Geometry(Guid.NewGuid())));
     }
 
@@ -214,7 +215,8 @@ public sealed class SceneAuthoringTests
         Assert.Same(original, scene.Materials[0]);
 
         var replacement = AcousticMaterialPresets.All.First(item => item.Name == "Heavy curtain")
-            .ApplyTo(original) with { Name = "Curtained stone wall" };
+            .ApplyTo(original) with
+        { Name = "Curtained stone wall" };
         var validAccepted = SceneAuthoringOperations.TryReplaceMaterial(
             scene,
             original.Id,
@@ -345,5 +347,62 @@ public sealed class SceneAuthoringTests
         Assert.InRange(Math.Abs(worldPosition.X - 0.03), 0, 1e-12);
         Assert.InRange(Math.Abs(worldPosition.Y - 1.72), 0, 1e-12);
         Assert.InRange(Math.Abs(worldPosition.Z - -0.88), 0, 1e-12);
+    }
+
+    [Fact]
+    public void MaterialAuditionsAreValidDeterministicScenesWithoutMutatingTheSourceMaterial()
+    {
+        var source = AcousticMaterialPresets.All.First(item => item.Name == "Dense timber").Create(Guid.NewGuid());
+        var originalId = source.Id;
+        var originalAbsorption = source.Absorption.ToArray();
+
+        foreach (var band in MaterialAuditionBands.All)
+        {
+            var audition = MaterialAuditionScene.Create(source, band.FrequencyHz);
+
+            Assert.Equal(1.5, audition.Timeline.DurationSeconds);
+            Assert.Equal(band.FrequencyHz, audition.Emitters[0].SignalGraph.Nodes[0].NumericParameters["frequencyHz"]);
+            Assert.Equal(4096, audition.RenderProfiles[0].RayCount);
+            Assert.Equal(1.25, audition.RenderProfiles[0].ImpulseResponseSeconds);
+            Assert.DoesNotContain(SceneValidator.Validate(audition), issue => issue.Severity == ValidationSeverity.Error);
+        }
+
+        Assert.Equal(originalId, source.Id);
+        Assert.Equal(originalAbsorption, source.Absorption);
+    }
+
+    [Fact]
+    public void RenderProfileEditsRollBackInvalidEchoQualityAndCommitValidSettings()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var original = scene.RenderProfiles[0];
+
+        var invalidAccepted = SceneAuthoringOperations.TryReplaceRenderProfile(
+            scene,
+            original.Id,
+            original with { RayCount = -1, ImpulseResponseSeconds = 31 },
+            out var invalidError);
+
+        Assert.False(invalidAccepted);
+        Assert.Contains("ray count", invalidError?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(original, scene.RenderProfiles[0]);
+
+        var replacement = original with
+        {
+            Name = "Dense room tail",
+            ReflectionOrder = 1,
+            RayCount = 4096,
+            ImpulseResponseSeconds = 3.25,
+            AtmosphereIntegrationSegments = 32,
+            Seed = 8675309
+        };
+        var validAccepted = SceneAuthoringOperations.TryReplaceRenderProfile(
+            scene,
+            original.Id,
+            replacement,
+            out var validError);
+
+        Assert.True(validAccepted, validError?.Message);
+        Assert.Equal(replacement, scene.RenderProfiles[0]);
     }
 }

@@ -301,6 +301,56 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void RoomDecayEstimateRespondsToSizeAndMaterialLoss()
+    {
+        var scene = SampleScenes.CreateSurfaceEcho();
+        var stone = scene.Materials.Single(item => item.Name == "Polished stone");
+        var curtain = scene.Materials.Single(item => item.Name == "Heavy acoustic curtain");
+        var dimensions = new Vector3d(20, 8, 14);
+
+        var stoneEstimate = AcousticRoomAnalysis.Estimate(dimensions, stone);
+        var curtainEstimate = AcousticRoomAnalysis.Estimate(dimensions, curtain);
+
+        Assert.True(stoneEstimate.MidFrequencyRt60Seconds > curtainEstimate.MidFrequencyRt60Seconds);
+        Assert.True(curtainEstimate.LowFrequencyRt60Seconds > curtainEstimate.HighFrequencyRt60Seconds);
+        Assert.InRange(stoneEstimate.MeanFreePathMetres, 5, 20);
+        Assert.InRange(stoneEstimate.MeanReflectionIntervalMilliseconds, 10, 60);
+    }
+
+    [Fact]
+    public void RenderEchoQualitySettingsStayInsideNativeBounds()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var profile = scene.RenderProfiles[0];
+        scene.RenderProfiles[0] = profile with
+        {
+            Name = " ",
+            ReflectionOrder = 9,
+            RayCount = 1_000_001,
+            ImpulseResponseSeconds = 31,
+            Seed = -1
+        };
+
+        var issues = SceneValidator.Validate(scene);
+
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/name", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/reflectionOrder", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/rayCount", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/impulseResponseSeconds", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/seed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void SceneRequiresAnExplicitRenderProfile()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.RenderProfiles.Clear();
+
+        Assert.Contains(SceneValidator.Validate(scene), issue =>
+            issue.Path == "renderProfiles" && issue.Severity == ValidationSeverity.Error);
+    }
+
+    [Fact]
     public void AcousticGeometryRequiresMaterialAndPhysicalDimensions()
     {
         var scene = SampleScenes.CreateFlyby();

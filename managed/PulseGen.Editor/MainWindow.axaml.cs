@@ -24,6 +24,9 @@ public sealed partial class MainWindow : Window
     private SceneDocument scene = SampleScenes.CreateFlyby();
     private readonly DispatcherTimer previewTimer;
     private DateTimeOffset previewStarted;
+    private double previewDurationSeconds;
+    private bool previewAdvancesScene = true;
+    private string previewCompletionStatus = "Preview complete · scene state preserved";
     private int selectedKeyframeIndex;
     private bool initializingControls = true;
     private bool sceneDirty;
@@ -33,6 +36,7 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? syncCancellation;
     private NativeSceneRenderer.PreviewSession? audioPreview;
     private SceneSelection currentSelection;
+    private Guid activeRenderProfileId;
     private bool refreshingSceneTree;
     private readonly List<MaterialBandEditorRow> materialBandEditors = [];
     private readonly HttpClient atlasHttp = new(new SocketsHttpHandler
@@ -65,6 +69,12 @@ public sealed partial class MainWindow : Window
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
         MaterialPresetBox.ItemsSource = AcousticMaterialPresets.All;
+        MaterialAuditionBandBox.ItemsSource = MaterialAuditionBands.All;
+        MaterialAuditionBandBox.SelectedItem = MaterialAuditionBands.All.First(item => item.FrequencyHz == 1000);
+        RenderQualityBox.ItemsSource = RenderProfileChoices.Qualities;
+        RenderSampleRateBox.ItemsSource = RenderProfileChoices.SampleRates;
+        RenderSampleFormatBox.ItemsSource = RenderProfileChoices.SampleFormats;
+        RenderDitherBox.ItemsSource = RenderProfileChoices.Dithers;
         ApplySceneToControls(scene, projectDirectory: null);
         initializingControls = false;
     }
@@ -79,6 +89,7 @@ public sealed partial class MainWindow : Window
         sceneDirty = false;
         Viewport.Scene = scene;
         Viewport.TimeSeconds = 0;
+        activeRenderProfileId = scene.RenderProfiles.First().Id;
         currentSelection = SceneSelection.Emitter(scene.Emitters[0].Id);
         Viewport.Selection = currentSelection;
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
@@ -106,6 +117,7 @@ public sealed partial class MainWindow : Window
         TimelineSourceText.Text = $"{emitter.Name} · source active";
 
         RefreshAtmosphereSummary();
+        RefreshRenderProfileSummary();
 
         RefreshReceiverSummary();
         var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
@@ -164,6 +176,9 @@ public sealed partial class MainWindow : Window
             var receiverItems = scene.ReceiverRigs.Select(rig => Leaf(
                 $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}",
                 SceneSelection.Receiver(rig.Id))).ToList();
+            var renderProfileItems = scene.RenderProfiles.Select(profile => Leaf(
+                $"⇥  {profile.Name}",
+                SceneSelection.RenderProfile(profile.Id))).ToList();
 
             SceneTree.ItemsSource = new[]
             {
@@ -175,7 +190,8 @@ public sealed partial class MainWindow : Window
                     {
                         new TreeViewItem { Header = "◉  SOURCES & PATHS", IsExpanded = true, ItemsSource = sourceItems },
                         new TreeViewItem { Header = "▱  ACOUSTIC WORLD", IsExpanded = true, ItemsSource = worldItems },
-                        new TreeViewItem { Header = "⌇  RECEIVERS", IsExpanded = true, ItemsSource = receiverItems }
+                        new TreeViewItem { Header = "⌇  RECEIVERS", IsExpanded = true, ItemsSource = receiverItems },
+                        new TreeViewItem { Header = "⇥  RENDER PROFILES", IsExpanded = true, ItemsSource = renderProfileItems }
                     }
                 }
             };
@@ -230,6 +246,7 @@ public sealed partial class MainWindow : Window
             LayerInspectorPanel.IsVisible = false;
             BaseAtmosphereInspectorPanel.IsVisible = false;
             ReceiverInspectorPanel.IsVisible = false;
+            RenderProfileInspectorPanel.IsVisible = false;
             ReadOnlyInspectorPanel.IsVisible = false;
 
             switch (selection.Kind)
@@ -282,6 +299,24 @@ public sealed partial class MainWindow : Window
                         GeometryRotationY.IsEnabled = !room;
                         GeometryRotationZ.IsEnabled = !room;
                         GeometryReflectsBox.IsEnabled = geometry.Kind != GeometryKind.ImportedMesh;
+                        RoomDecayPanel.IsVisible = room;
+                        if (room)
+                        {
+                            var material = scene.Materials.First(item => item.Id == geometry.MaterialId);
+                            var dimensions = new Vector3d(
+                                geometry.DimensionsMetres.X * geometry.Transform.Scale.X,
+                                geometry.DimensionsMetres.Y * geometry.Transform.Scale.Y,
+                                geometry.DimensionsMetres.Z * geometry.Transform.Scale.Z);
+                            var speed = SceneValidator.EffectiveSpeedOfSound(
+                                scene.Atmosphere.TemperatureCelsius,
+                                scene.Atmosphere.RelativeHumidityPercent);
+                            var estimate = AcousticRoomAnalysis.Estimate(dimensions, material, speed);
+                            RoomLowDecayText.Text = $"{estimate.LowFrequencyRt60Seconds:0.00} s";
+                            RoomMidDecayText.Text = $"{estimate.MidFrequencyRt60Seconds:0.00} s";
+                            RoomHighDecayText.Text = $"{estimate.HighFrequencyRt60Seconds:0.00} s";
+                            RoomReflectionIntervalText.Text = $"{estimate.MeanReflectionIntervalMilliseconds:0.0} ms";
+                            RoomProfileTailText.Text = $"{GetActiveRenderProfile().ImpulseResponseSeconds:0.00} s";
+                        }
                         GeometryConstraintText.Text = room
                             ? "The current modal-room solver keeps rooms axis-aligned. Position and size remain fully editable."
                             : geometry.Kind == GeometryKind.ImportedMesh
@@ -398,6 +433,31 @@ public sealed partial class MainWindow : Window
                         ReceiverInspectorPanel.IsVisible = true;
                         break;
                     }
+                case SceneSelectionKind.RenderProfile:
+                    {
+                        var profile = scene.RenderProfiles.First(item => item.Id == selection.Id);
+                        activeRenderProfileId = profile.Id;
+                        InspectorSelectionText.Text = profile.Name;
+                        InspectorKindBadge.Text = "RENDER";
+                        RenderProfileNameBox.Text = profile.Name;
+                        RenderQualityBox.SelectedItem = RenderProfileChoices.Qualities.First(item => item.Quality == profile.Quality);
+                        RenderSampleRateBox.SelectedItem = RenderProfileChoices.SampleRates.First(item => item.SampleRate == profile.SampleRate);
+                        RenderSampleFormatBox.SelectedItem = RenderProfileChoices.SampleFormats.First(item => item.Format == profile.SampleFormat);
+                        RenderDitherBox.SelectedItem = RenderProfileChoices.Dithers.First(item => item.Mode == profile.Dither);
+                        UpdateRenderDitherControls(profile.SampleFormat);
+                        RenderBufferFramesBox.Text = profile.BufferFrames.ToString(CultureInfo.InvariantCulture);
+                        RenderReflectionOrderBox.Text = profile.ReflectionOrder.ToString(CultureInfo.InvariantCulture);
+                        RenderRayCountBox.Text = profile.RayCount.ToString(CultureInfo.InvariantCulture);
+                        RenderTailSecondsBox.Text = FormatNumber(profile.ImpulseResponseSeconds);
+                        RenderAtmosphereSegmentsBox.Text = profile.AtmosphereIntegrationSegments.ToString(CultureInfo.InvariantCulture);
+                        RenderSeedBox.Text = profile.Seed.ToString(CultureInfo.InvariantCulture);
+                        RenderProfileExplanationText.Text = profile.Quality == RenderQuality.Final
+                            ? "Final mode uses every authored air-path slice. A larger diffuse-detail budget creates a denser scattered tail; zero detail or a zero-second tail disables it."
+                            : "Preview uses one air sample per path leg for responsiveness. A larger diffuse-detail budget creates a denser scattered tail; zero detail or a zero-second tail disables it.";
+                        RenderProfileInspectorPanel.IsVisible = true;
+                        RefreshRenderProfileSummary();
+                        break;
+                    }
                 default:
                     InspectorSelectionText.Text = "Scene selection";
                     InspectorKindBadge.Text = "WORLD";
@@ -428,7 +488,20 @@ public sealed partial class MainWindow : Window
             ? "Still"
             : $"{scene.Atmosphere.WindZones.Count} bounded · {strongestWind.VelocityMetresPerSecond.Length:0.00} m/s";
         EffectiveSpeedText.Text = $"{SceneValidator.EffectiveSpeedOfSound(scene.Atmosphere.TemperatureCelsius, scene.Atmosphere.RelativeHumidityPercent):0.00} m/s";
-        FieldQualityText.Text = "1 / path leg";
+        var profile = GetActiveRenderProfile();
+        FieldQualityText.Text = $"1 preview / {profile.AtmosphereIntegrationSegments} final";
+    }
+
+    private RenderProfile GetActiveRenderProfile() =>
+        scene.RenderProfiles.FirstOrDefault(profile => profile.Id == activeRenderProfileId)
+        ?? scene.RenderProfiles.First();
+
+    private void RefreshRenderProfileSummary()
+    {
+        var profile = GetActiveRenderProfile();
+        var qualityName = RenderProfileChoices.Qualities.First(item => item.Quality == profile.Quality).Name;
+        ActiveSampleRateText.Text = $"{profile.SampleRate / 1000d:0.#} kHz · {qualityName.ToUpperInvariant()}";
+        FieldQualityText.Text = $"1 preview / {profile.AtmosphereIntegrationSegments} final";
     }
 
     private void RefreshReceiverSummary()
@@ -675,7 +748,55 @@ public sealed partial class MainWindow : Window
         SetMaterialEnergy(MaterialScatteredBar, MaterialScatteredText, summary.ScatteredAway);
         SetMaterialEnergy(MaterialTransmittedBar, MaterialTransmittedText, summary.Transmitted);
         MaterialEnergyHintText.Text =
-            "These averages cover every shown frequency band. Clear echo is audible now; sound sent away leaves the current mirror-like path. Roughness also softens high notes in the clear echo.";
+            "These averages cover every shown frequency band. Clear echo stays directional; scattered sound feeds the deterministic diffuse tail when the active profile has diffuse detail and tail time. Roughness softens brighter reflections.";
+    }
+
+    private void OnAuditionMaterialClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Material ||
+            MaterialAuditionBandBox.SelectedItem is not MaterialAuditionBandChoice band)
+        {
+            StatusText.Text = "Select a material and listening band first";
+            return;
+        }
+        var original = scene.Materials.FirstOrDefault(item => item.Id == currentSelection.Id);
+        if (original is null)
+        {
+            StatusText.Text = "Material audition rejected · the selected material no longer exists";
+            return;
+        }
+        if (!TryReadMaterialDraft(original, out var draft, out var draftError))
+        {
+            StatusText.Text = $"Material audition rejected · {draftError}";
+            return;
+        }
+
+        var auditionScene = MaterialAuditionScene.Create(draft, band.FrequencyHz);
+        var profile = auditionScene.RenderProfiles[0];
+        StopPreviewTransport();
+        previewStarted = DateTimeOffset.UtcNow;
+        previewDurationSeconds = auditionScene.Timeline.DurationSeconds;
+        previewAdvancesScene = false;
+        previewCompletionStatus = $"{draft.Name} audition complete · project was not changed";
+        PlayButton.Content = "▶  Auditioning";
+        try
+        {
+            audioPreview = NativeSceneRenderer.StartPreview(
+                auditionScene,
+                sampleRate: (uint)profile.SampleRate,
+                periodFrames: (uint)profile.BufferFrames,
+                reflectionOrder: (uint)profile.ReflectionOrder,
+                rayCount: (uint)profile.RayCount,
+                impulseResponseSeconds: profile.ImpulseResponseSeconds,
+                seed: (uint)profile.Seed);
+            previewTimer.Start();
+            StatusText.Text = $"Auditioning {draft.Name} at {band.Name} · direct tone, clear echo, and diffuse tail";
+        }
+        catch (Exception exception)
+        {
+            StopPreviewTransport();
+            StatusText.Text = $"Material audition unavailable: {exception.Message}";
+        }
     }
 
     private static void SetMaterialEnergy(ProgressBar bar, TextBlock label, double amount)
@@ -713,6 +834,9 @@ public sealed partial class MainWindow : Window
 
     private static bool TryReadNumber(TextBox field, out double value) =>
         double.TryParse(field.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
+
+    private static bool TryReadInteger(TextBox field, out int value) =>
+        int.TryParse(field.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
 
     private static bool TryReadVector(TextBox x, TextBox y, TextBox z, out Vector3d value)
     {
@@ -988,6 +1112,84 @@ public sealed partial class MainWindow : Window
         }
 
         CommitSceneEdit($"{replacement.Name} material physics");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnRenderSampleFormatChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (initializingControls || RenderSampleFormatBox.SelectedItem is not RenderSampleFormatChoice choice)
+        {
+            return;
+        }
+        UpdateRenderDitherControls(choice.Format);
+    }
+
+    private void UpdateRenderDitherControls(RenderSampleFormat format)
+    {
+        if (format == RenderSampleFormat.Float32)
+        {
+            RenderDitherBox.SelectedItem = RenderProfileChoices.Dithers.First(item => item.Mode == DitherMode.None);
+            RenderDitherBox.IsEnabled = false;
+            return;
+        }
+
+        RenderDitherBox.IsEnabled = true;
+        if ((RenderDitherBox.SelectedItem as DitherChoice)?.Mode != DitherMode.Tpdf)
+        {
+            RenderDitherBox.SelectedItem = RenderProfileChoices.Dithers.First(item => item.Mode == DitherMode.Tpdf);
+        }
+    }
+
+    private void OnApplyRenderProfileClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.RenderProfile)
+        {
+            return;
+        }
+        var original = scene.RenderProfiles.FirstOrDefault(item => item.Id == currentSelection.Id);
+        var name = RenderProfileNameBox.Text?.Trim();
+        if (original is null || string.IsNullOrWhiteSpace(name) ||
+            RenderQualityBox.SelectedItem is not RenderQualityChoice qualityChoice ||
+            RenderSampleRateBox.SelectedItem is not RenderSampleRateChoice sampleRateChoice ||
+            RenderSampleFormatBox.SelectedItem is not RenderSampleFormatChoice sampleFormatChoice ||
+            RenderDitherBox.SelectedItem is not DitherChoice ditherChoice ||
+            !TryReadInteger(RenderBufferFramesBox, out var bufferFrames) ||
+            !TryReadInteger(RenderReflectionOrderBox, out var reflectionOrder) ||
+            !TryReadInteger(RenderRayCountBox, out var rayCount) ||
+            !TryReadNumber(RenderTailSecondsBox, out var tailSeconds) ||
+            !TryReadInteger(RenderAtmosphereSegmentsBox, out var atmosphereSegments) ||
+            !TryReadInteger(RenderSeedBox, out var seed))
+        {
+            StatusText.Text = "Render profile rejected · complete every field with a valid number and name";
+            return;
+        }
+
+        StopPreviewTransport();
+        var replacement = original with
+        {
+            Name = name,
+            Quality = qualityChoice.Quality,
+            SampleRate = sampleRateChoice.SampleRate,
+            SampleFormat = sampleFormatChoice.Format,
+            Dither = ditherChoice.Mode,
+            BufferFrames = bufferFrames,
+            ReflectionOrder = reflectionOrder,
+            RayCount = rayCount,
+            ImpulseResponseSeconds = tailSeconds,
+            AtmosphereIntegrationSegments = atmosphereSegments,
+            Seed = seed
+        };
+        if (!SceneAuthoringOperations.TryReplaceRenderProfile(scene, original.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{original.Name} render profile", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+
+        activeRenderProfileId = replacement.Id;
+        CommitSceneEdit($"{replacement.Name} render profile");
+        RefreshRenderProfileSummary();
         RefreshSceneTree();
         PopulateInspector(currentSelection);
     }
@@ -1336,20 +1538,27 @@ public sealed partial class MainWindow : Window
     private void OnPlayClicked(object? sender, RoutedEventArgs e)
     {
         StopPreviewTransport();
+        var profile = GetActiveRenderProfile();
         previewStarted = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(Viewport.TimeSeconds);
+        previewDurationSeconds = scene.Timeline.DurationSeconds;
+        previewAdvancesScene = true;
+        previewCompletionStatus = "Preview complete · scene state preserved";
         previewTimer.Start();
         PlayButton.Content = "▶  Playing";
         try
         {
             audioPreview = NativeSceneRenderer.StartPreview(
                 scene,
-                sampleRate: 48000,
-                periodFrames: 512,
-                reflectionOrder: 1,
+                sampleRate: (uint)profile.SampleRate,
+                periodFrames: (uint)profile.BufferFrames,
+                reflectionOrder: (uint)profile.ReflectionOrder,
+                rayCount: (uint)profile.RayCount,
+                impulseResponseSeconds: profile.ImpulseResponseSeconds,
+                seed: (uint)profile.Seed,
                 startTimeSeconds: Viewport.TimeSeconds,
                 projectDirectory: lastProjectDirectory);
             var status = audioPreview.Status;
-            StatusText.Text = $"Audible WASAPI preview · {status.SampleRate:N0} Hz · {status.PeriodFrames} frames · receiver 1";
+            StatusText.Text = $"Audible WASAPI preview · {profile.Name} · {status.SampleRate:N0} Hz · {profile.RayCount:N0} diffuse-detail budget";
         }
         catch (Exception exception)
         {
@@ -2106,9 +2315,10 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "Rendering isolated receiver takes…";
         try
         {
-            var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output, projectDirectory: lastProjectDirectory));
+            var profile = GetActiveRenderProfile();
+            var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output, profile, lastProjectDirectory));
             lastRenderDirectory = output;
-            StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
+            StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes with {profile.Name} + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
         }
         catch (Exception exception)
         {
@@ -2172,21 +2382,35 @@ public sealed partial class MainWindow : Window
     private void OnPreviewTick(object? sender, EventArgs e)
     {
         var elapsed = (DateTimeOffset.UtcNow - previewStarted).TotalSeconds;
-        if (elapsed >= scene.Timeline.DurationSeconds)
+        if (elapsed >= previewDurationSeconds)
         {
+            var advancesScene = previewAdvancesScene;
+            var completionStatus = previewCompletionStatus;
             StopPreviewTransport();
-            UpdatePlayhead(scene.Timeline.DurationSeconds);
-            StatusText.Text = "Preview complete · scene state preserved";
+            if (advancesScene)
+            {
+                UpdatePlayhead(scene.Timeline.DurationSeconds);
+            }
+            StatusText.Text = completionStatus;
             return;
         }
         if (audioPreview is not null && !audioPreview.Status.Running)
         {
             audioPreview.Dispose();
             audioPreview = null;
+            if (!previewAdvancesScene)
+            {
+                StopPreviewTransport();
+                StatusText.Text = "Material audition stopped · the WASAPI device was removed or rerouted";
+                return;
+            }
             StatusText.Text = "Visual-only preview · the WASAPI device stopped or was rerouted";
         }
 
-        UpdatePlayhead(elapsed);
+        if (previewAdvancesScene)
+        {
+            UpdatePlayhead(elapsed);
+        }
     }
 
     private void StopPreviewTransport()

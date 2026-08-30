@@ -213,8 +213,17 @@ public static class SceneValidator
             ValidateGeometry(geometry, materialIds, assetsByHash, issues);
         }
 
+        if (scene.RenderProfiles.Count == 0)
+        {
+            issues.Add(new("renderProfiles", "At least one render profile is required for preview and export."));
+        }
+
         foreach (var profile in scene.RenderProfiles)
         {
+            if (string.IsNullOrWhiteSpace(profile.Name))
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/name", "Render profile name is required."));
+            }
             if (!SupportedSampleRates.Contains(profile.SampleRate))
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/sampleRate", "Unsupported render sample rate."));
@@ -232,9 +241,25 @@ public static class SceneValidator
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/bufferFrames", "Buffer size must be between 64 and 8192 frames."));
             }
+            if (profile.ReflectionOrder is < 0 or > 1)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/reflectionOrder", "The current first-order engine accepts reflection depth 0 or 1."));
+            }
+            if (profile.RayCount is < 0 or > 1_000_000)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/rayCount", "Diffuse ray count must be in 0..1,000,000."));
+            }
+            if (!double.IsFinite(profile.ImpulseResponseSeconds) || profile.ImpulseResponseSeconds is < 0 or > 30)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/impulseResponseSeconds", "Echo fade time must be a finite value in 0..30 seconds."));
+            }
             if (profile.AtmosphereIntegrationSegments is < 1 or > 4096)
             {
                 issues.Add(new($"renderProfiles/{profile.Id}/atmosphereIntegrationSegments", "Atmosphere integration segment count must be in 1..4096."));
+            }
+            if (profile.Seed < 0)
+            {
+                issues.Add(new($"renderProfiles/{profile.Id}/seed", "The deterministic render seed may not be negative."));
             }
         }
 

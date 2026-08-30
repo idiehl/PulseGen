@@ -20,7 +20,7 @@
 extern "C" {
 #endif
 
-#define PG_ABI_VERSION 1u
+#define PG_ABI_VERSION 2u
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
 #define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
@@ -168,6 +168,7 @@ typedef struct pg_room_desc {
     double scattering;
     uint32_t enabled;
     uint32_t reserved;
+    double decay_time_seconds;
 } pg_room_desc;
 
 typedef struct pg_acoustic_material_desc {
@@ -327,6 +328,9 @@ typedef struct pg_render_request {
     uint32_t reflection_order;
     uint32_t seed;
     const volatile uint32_t* cancellation_flag;
+    uint32_t ray_count;
+    uint32_t reserved;
+    double impulse_response_seconds;
 } pg_render_request;
 
 typedef struct pg_render_receipt {
@@ -353,6 +357,9 @@ typedef struct pg_device_config {
     uint32_t exclusive_mode;
     uint32_t reserved;
     uint64_t start_frame;
+    uint32_t ray_count;
+    uint32_t seed;
+    double impulse_response_seconds;
 } pg_device_config;
 
 typedef struct pg_device_status {

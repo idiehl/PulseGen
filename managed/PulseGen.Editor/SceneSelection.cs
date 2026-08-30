@@ -12,7 +12,8 @@ internal enum SceneSelectionKind
     BaseAtmosphere,
     AtmosphereLayer,
     WindZone,
-    Receiver
+    Receiver,
+    RenderProfile
 }
 
 internal readonly record struct SceneSelection(
@@ -35,6 +36,8 @@ internal readonly record struct SceneSelection(
     public static SceneSelection WindZone(Guid id) => new(SceneSelectionKind.WindZone, id);
 
     public static SceneSelection Receiver(Guid id) => new(SceneSelectionKind.Receiver, id);
+
+    public static SceneSelection RenderProfile(Guid id) => new(SceneSelectionKind.RenderProfile, id);
 
     public bool IsSpatial => Kind is SceneSelectionKind.Geometry or SceneSelectionKind.WindZone or SceneSelectionKind.Receiver;
 }
@@ -64,6 +67,58 @@ internal sealed record PolarPatternChoice(PolarPattern Pattern, string Name)
     public override string ToString() => Name;
 }
 
+internal sealed record RenderQualityChoice(RenderQuality Quality, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record RenderSampleRateChoice(int SampleRate, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record RenderSampleFormatChoice(RenderSampleFormat Format, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal sealed record DitherChoice(DitherMode Mode, string Name)
+{
+    public override string ToString() => Name;
+}
+
+internal static class RenderProfileChoices
+{
+    public static IReadOnlyList<RenderQualityChoice> Qualities { get; } =
+    [
+        new(RenderQuality.Draft, "Fast draft"),
+        new(RenderQuality.Interactive, "Live preview"),
+        new(RenderQuality.Final, "High-detail final")
+    ];
+
+    public static IReadOnlyList<RenderSampleRateChoice> SampleRates { get; } =
+    [
+        new(44100, "44.1 kHz"),
+        new(48000, "48 kHz"),
+        new(88200, "88.2 kHz"),
+        new(96000, "96 kHz"),
+        new(192000, "192 kHz")
+    ];
+
+    public static IReadOnlyList<RenderSampleFormatChoice> SampleFormats { get; } =
+    [
+        new(RenderSampleFormat.Pcm16, "16-bit PCM"),
+        new(RenderSampleFormat.Pcm24, "24-bit PCM"),
+        new(RenderSampleFormat.Float32, "32-bit float")
+    ];
+
+    public static IReadOnlyList<DitherChoice> Dithers { get; } =
+    [
+        new(DitherMode.None, "None (float)"),
+        new(DitherMode.Tpdf, "Gentle TPDF (integer)")
+    ];
+}
+
 internal static class SceneSelectionResolver
 {
     public static bool Exists(SceneDocument scene, SceneSelection selection) => selection.Kind switch
@@ -76,6 +131,7 @@ internal static class SceneSelectionResolver
         SceneSelectionKind.AtmosphereLayer => selection.Index >= 0 && selection.Index < scene.Atmosphere.Layers.Count,
         SceneSelectionKind.WindZone => scene.Atmosphere.WindZones.Any(item => item.Id == selection.Id),
         SceneSelectionKind.Receiver => scene.ReceiverRigs.Any(item => item.Id == selection.Id),
+        SceneSelectionKind.RenderProfile => scene.RenderProfiles.Any(item => item.Id == selection.Id),
         _ => false
     };
 
@@ -248,6 +304,13 @@ internal static class SceneAuthoringOperations
         }
         return TryReplace(scene.ReceiverRigs, item => item.Id == id, replacement, scene, out error);
     }
+
+    public static bool TryReplaceRenderProfile(
+        SceneDocument scene,
+        Guid id,
+        RenderProfile replacement,
+        out ValidationIssue? error) =>
+        TryReplace(scene.RenderProfiles, item => item.Id == id, replacement, scene, out error);
 
     public static bool TryReplaceAtmosphereLayer(
         SceneDocument scene,

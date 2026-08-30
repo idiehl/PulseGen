@@ -19,9 +19,10 @@ commands and reads bounded telemetry.
   sound speed, pressure-aware air absorption, altitude layers, and transformed
   bounded wind/turbulence zones. Preview samples the field once per propagation
   leg; final rendering subdivides each leg for higher-accuracy travel time and
-  tonal loss. First-order shoebox reflections, bounded modal resonances,
-  late-field feedback delays, analytic binaural head shadowing, and receiver-pair
-  modelling are also active. Stereo microphone capsules can carry independent
+  tonal loss. First-order shoebox reflections, physically estimated room fade,
+  bounded modal resonances, deterministic scattered-surface tails, late-field
+  feedback delays, analytic binaural head shadowing, and receiver-pair modelling
+  are also active. Stereo microphone capsules can carry independent
   three-axis offsets and aim, pickup patterns, and sensitivity into both preview
   and final rendering.
   Receiver rigs can follow the same editable absolute-coordinate paths as
@@ -29,8 +30,10 @@ commands and reads bounded telemetry.
   isolated stereo take.
 - Static, transformed finite planes and oriented boxes with octave-band
   absorption, scattering, and transmission; geometry-aware direct occlusion;
-  and bounded first-order image-source reflections. The viewport renders the
-  same authored surfaces used by offline and preview audio.
+  bounded first-order image-source reflections; and energy-normalized diffuse
+  decay fed by authored scattering. The viewport renders the same authored
+  surfaces used by offline and preview audio. The render profile's diffuse-detail
+  budget and fade time now control the audible scattered response in both paths.
 - Checksum-pinned Assimp 6.0.5 import for static OBJ and self-contained
   glTF/GLB acoustic meshes. Project assets are size/SHA-256 verified before a
   memory-only native import, capped at 250,000 triangles per mesh, and compiled
@@ -53,8 +56,12 @@ commands and reads bounded telemetry.
 - First-class acoustic-material authoring with eight-band soak/scatter/pass
   controls, roughness, plain-language incoming-energy summaries, six adjustable
   starting points, independent duplication for comparisons, live surface usage
-  reporting, and guarded removal. Preset coefficients are intentionally labeled
-  as simulation starting points rather than certified measurements.
+  reporting, guarded removal, and a non-destructive per-band listening workflow.
+  Parametric rooms show their size/material-derived bass, voice, and brightness
+  fade estimates. Render profiles are selectable and editable in the scene tree,
+  and the active profile drives preview as well as export. Preset coefficients
+  are intentionally labeled as simulation starting points rather than certified
+  measurements.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.

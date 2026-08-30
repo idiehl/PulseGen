@@ -25,11 +25,11 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.7", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.8", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v4", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v5", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Contains(
                 receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
@@ -75,8 +75,8 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal((ulong)161803, first.DeterministicSeed);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
-            Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v4", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v5", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
             Assert.Equal(2, receipt.RootElement.GetProperty("windZoneCount").GetInt32());
@@ -254,7 +254,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
             using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
             {
-                Assert.Equal(4, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Equal(5, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
                 Assert.Contains(
                     receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                     dependency => dependency.GetProperty("name").GetString() == "Assimp");
@@ -273,6 +273,44 @@ public sealed class PrimitiveAcousticsTests
                 NativeSceneRenderer.Render(scene, Path.Combine(root, "tampered"), projectDirectory: project));
             await Assert.ThrowsAsync<InvalidDataException>(() =>
                 ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj"));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void RenderProfileRayCountActivatesADeterministicScatteredTail()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-diffuse-tail-{Guid.NewGuid():N}");
+        try
+        {
+            var scene = CreateDiffuseImpulseScene();
+            var noDiffuseProfile = scene.RenderProfiles[0] with { RayCount = 0, ImpulseResponseSeconds = 0.2 };
+            var diffuseProfile = scene.RenderProfiles[0] with { RayCount = 4096, ImpulseResponseSeconds = 0.2, Seed = 424242 };
+            NativeSceneRenderer.Render(scene, Path.Combine(root, "no-diffuse"), noDiffuseProfile);
+            var first = NativeSceneRenderer.Render(scene, Path.Combine(root, "diffuse-first"), diffuseProfile);
+            NativeSceneRenderer.Render(scene, Path.Combine(root, "diffuse-second"), diffuseProfile);
+
+            var noDiffuse = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "no-diffuse"), "*.wav").Single());
+            var diffuseFirst = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "diffuse-first"), "*.wav").Single());
+            var diffuseSecond = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "diffuse-second"), "*.wav").Single());
+            var firstDiffuseFrame = FirstDifferenceFrame(noDiffuse, diffuseFirst);
+            var diffuseTailPeak = PeakDifferenceAfterFrame(noDiffuse, diffuseFirst, firstDiffuseFrame);
+            Assert.True(
+                firstDiffuseFrame is > 1000 and < 12000,
+                $"Expected the scattered response to arrive after direct and clear reflected sound; diffuse={firstDiffuseFrame}.");
+            Assert.True(diffuseTailPeak > 1.0e-4, $"Expected an audible scattered tail; peak={diffuseTailPeak:R}.");
+            Assert.Equal(diffuseFirst, diffuseSecond);
+
+            using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
+            Assert.Equal(4096, receipt.RootElement.GetProperty("rayCount").GetInt32());
+            Assert.Equal(0.2, receipt.RootElement.GetProperty("impulseResponseSeconds").GetDouble());
+            Assert.Equal(424242, receipt.RootElement.GetProperty("seed").GetInt32());
         }
         finally
         {
@@ -384,6 +422,66 @@ public sealed class PrimitiveAcousticsTests
         return scene with { Name = moving ? "Moving Receiver" : "Static Receiver" };
     }
 
+    private static SceneDocument CreateDiffuseImpulseScene()
+    {
+        var scene = CreateScene(withSurface: false);
+        var material = scene.Materials[0] with
+        {
+            Name = "Scattering test wall",
+            Absorption = [0, 0, 0, 0, 0, 0, 0, 0],
+            Scattering = [0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75, 0.75],
+            Transmission = [0, 0, 0, 0, 0, 0, 0, 0],
+            Roughness = 0
+        };
+        scene.Materials[0] = material;
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = Guid.Parse("bbbbbbbb-0000-4000-8000-000000000005"),
+            Name = "Diffuse reflection plane",
+            Kind = GeometryKind.Plane,
+            MaterialId = material.Id,
+            Transform = new Transform { PositionMetres = new Vector3d(0, 0, 3) },
+            DimensionsMetres = new Vector3d(10, 10, 0),
+            Occludes = false,
+            Reflects = true
+        });
+        scene.MotionPaths[0] = scene.MotionPaths[0] with
+        {
+            Keyframes =
+            [
+                new MotionKeyframe { TimeSeconds = 0, PositionMetres = new Vector3d(1, 0, 0) },
+                new MotionKeyframe { TimeSeconds = 0.25, PositionMetres = new Vector3d(1, 0, 0) }
+            ]
+        };
+        var nodes = scene.Emitters[0].SignalGraph.Nodes.ToList();
+        var oscillatorIndex = nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+        nodes[oscillatorIndex] = nodes[oscillatorIndex] with
+        {
+            Waveform = WaveformKind.Impulse,
+            NumericParameters = new Dictionary<string, double>
+            {
+                ["frequencyHz"] = 1,
+                ["amplitude"] = 1
+            }
+        };
+        scene.Emitters[0] = scene.Emitters[0] with
+        {
+            SignalGraph = scene.Emitters[0].SignalGraph with { Nodes = nodes }
+        };
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            ReflectionOrder = 1,
+            RayCount = 4096,
+            ImpulseResponseSeconds = 0.2,
+            Seed = 424242
+        };
+        return scene with
+        {
+            Name = "Diffuse Tail Integration",
+            Timeline = new EventTimeline { DurationSeconds = 0.25 }
+        };
+    }
+
     private static float[] ReadFloatSamples(string path)
     {
         using var stream = File.OpenRead(path);
@@ -431,6 +529,37 @@ public sealed class PrimitiveAcousticsTests
             count++;
         }
         return Math.Sqrt(sum / count);
+    }
+
+    private static int FirstDifferenceFrame(
+        IReadOnlyList<float> baseline,
+        IReadOnlyList<float> comparison,
+        float threshold = 1.0e-8f)
+    {
+        Assert.Equal(baseline.Count, comparison.Count);
+        for (var frame = 0; frame < baseline.Count / 2; frame++)
+        {
+            if (Math.Abs(baseline[frame * 2] - comparison[frame * 2]) > threshold ||
+                Math.Abs(baseline[(frame * 2) + 1] - comparison[(frame * 2) + 1]) > threshold)
+            {
+                return frame;
+            }
+        }
+        return baseline.Count / 2;
+    }
+
+    private static double PeakDifferenceAfterFrame(
+        IReadOnlyList<float> baseline,
+        IReadOnlyList<float> comparison,
+        int startFrame)
+    {
+        Assert.Equal(baseline.Count, comparison.Count);
+        double peak = 0;
+        for (var index = Math.Max(0, startFrame) * 2; index < baseline.Count; index++)
+        {
+            peak = Math.Max(peak, Math.Abs(baseline[index] - comparison[index]));
+        }
+        return peak;
     }
 
     private static int FirstActiveFrame(IReadOnlyList<float> samples, float threshold = 1.0e-7f)

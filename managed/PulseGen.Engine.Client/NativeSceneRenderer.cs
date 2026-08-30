@@ -29,9 +29,9 @@ public readonly record struct PreviewDeviceStatus(
 
 public static unsafe class NativeSceneRenderer
 {
-    private const uint AbiVersion = 1;
+    private const uint AbiVersion = 2;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "bounded-propagation-v4";
+    private const string AcousticModel = "bounded-propagation-v5";
     private const string AtmosphereModel = "layered-bounded-wind-v1";
     private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
     private const uint MaximumImportedMeshTriangles = 250_000;
@@ -52,9 +52,10 @@ public static unsafe class NativeSceneRenderer
     {
         SceneValidator.EnsureValid(scene);
         EnsureReceiverCapabilities(scene);
-        Directory.CreateDirectory(outputDirectory);
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
+        SceneValidator.EnsureValid(scene with { RenderProfiles = [profile] });
+        Directory.CreateDirectory(outputDirectory);
 
         var appliedAtmosphereSegments = profile.Quality == RenderQuality.Final
             ? profile.AtmosphereIntegrationSegments
@@ -82,7 +83,9 @@ public static unsafe class NativeSceneRenderer
                     },
                     Quality = profile.Quality switch { RenderQuality.Draft => 0, RenderQuality.Final => 2, _ => 1 },
                     ReflectionOrder = (uint)profile.ReflectionOrder,
-                    Seed = (uint)profile.Seed
+                    Seed = (uint)profile.Seed,
+                    RayCount = (uint)profile.RayCount,
+                    ImpulseResponseSeconds = profile.ImpulseResponseSeconds
                 };
                 var receipt = new NativeRenderReceipt { Size = (uint)sizeof(NativeRenderReceipt), Version = AbiVersion };
                 Check(Native.pg_engine_render_offline(engine, &request, &receipt), engine, "offline render");
@@ -142,7 +145,7 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            4,
+            5,
             EngineVersion,
             AbiVersion,
             AcousticModel,
@@ -253,6 +256,9 @@ public static unsafe class NativeSceneRenderer
         uint sampleRate = 48000,
         uint periodFrames = 512,
         uint reflectionOrder = 1,
+        uint rayCount = 1024,
+        double impulseResponseSeconds = 2,
+        uint seed = 1,
         bool exclusiveMode = false,
         double startTimeSeconds = 0,
         string? projectDirectory = null)
@@ -275,7 +281,10 @@ public static unsafe class NativeSceneRenderer
                 PeriodFrames = periodFrames,
                 ReflectionOrder = reflectionOrder,
                 ExclusiveMode = exclusiveMode ? 1U : 0U,
-                StartFrame = checked((ulong)Math.Round(startTimeSeconds * sampleRate))
+                StartFrame = checked((ulong)Math.Round(startTimeSeconds * sampleRate)),
+                RayCount = rayCount,
+                Seed = seed,
+                ImpulseResponseSeconds = impulseResponseSeconds
             };
             Check(Native.pg_engine_start_device(engine, &config), engine, "start WASAPI preview");
             return new PreviewSession(engine);
@@ -608,29 +617,8 @@ public static unsafe class NativeSceneRenderer
         }
     }
 
-    private static double BandValue(AcousticMaterial material, IReadOnlyList<double> values, double frequencyHz)
-    {
-        if (frequencyHz <= material.OctaveBandCentresHz[0])
-        {
-            return values[0];
-        }
-        var last = material.OctaveBandCentresHz.Length - 1;
-        if (frequencyHz >= material.OctaveBandCentresHz[last])
-        {
-            return values[last];
-        }
-        for (var index = 1; index <= last; index++)
-        {
-            var upper = material.OctaveBandCentresHz[index];
-            if (frequencyHz <= upper)
-            {
-                var lower = material.OctaveBandCentresHz[index - 1];
-                var amount = (Math.Log2(frequencyHz) - Math.Log2(lower)) / (Math.Log2(upper) - Math.Log2(lower));
-                return values[index - 1] + ((values[index] - values[index - 1]) * Math.Clamp(amount, 0, 1));
-            }
-        }
-        return values[last];
-    }
+    private static double BandValue(AcousticMaterial material, IReadOnlyList<double> values, double frequencyHz) =>
+        AcousticRoomAnalysis.SampleBand(material, values, frequencyHz);
 
     private static void ConfigureRoom(SceneDocument scene, nint engine)
     {
@@ -653,6 +641,7 @@ public static unsafe class NativeSceneRenderer
         static double ReflectionGain(AcousticMaterial value, double frequency) => Math.Sqrt(Math.Max(
             0,
             1 - BandValue(value, value.Absorption, frequency) - BandValue(value, value.Transmission, frequency)));
+        var roomEstimate = AcousticRoomAnalysis.Estimate(dimensions, material);
         var descriptor = new NativeRoom
         {
             Size = (uint)sizeof(NativeRoom),
@@ -663,7 +652,8 @@ public static unsafe class NativeSceneRenderer
             WallReflectionMid = ReflectionGain(material, 1000),
             WallReflectionHigh = ReflectionGain(material, 8000),
             Scattering = material.Scattering.Average(),
-            Enabled = 1
+            Enabled = 1,
+            DecayTimeSeconds = roomEstimate.MidFrequencyRt60Seconds
         };
         Check(Native.pg_engine_set_room(engine, &descriptor), engine, "set room");
     }
@@ -980,7 +970,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereLayer { public uint Size, Version; public double BaseAltitudeMetres, TopAltitudeMetres, TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeWindZone { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees, VelocityMetresPerSecond; public double Turbulence; public ulong NoiseSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAtmosphereField { public uint Size, Version; public double TemperatureCelsius, RelativeHumidityPercent, PressureKilopascals; public NativeAtmosphereLayer* Layers; public uint LayerCount; public NativeWindZone* WindZones; public uint WindZoneCount, IntegrationSegments, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; public double DecayTimeSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMeshGeometry { public uint Size, Version; public nint NameUtf8; public void* EncodedData; public ulong EncodedSizeBytes; public nint FormatHintUtf8; public NativeVector CentreMetres, Scale, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, MaxTriangles, Reserved; }
@@ -991,9 +981,9 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiver { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres; public double YawDegrees, SpacingMetres, HeadRadiusMetres, MicrophoneAngleDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverCapsule { public uint Size, Version; public NativeVector RelativePositionMetres, RelativeRotationDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverMotion { public uint Size, Version, ReceiverIndex; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeRenderRequest { public uint Size, Version; public nint OutputDirectoryUtf8, FilePrefixUtf8; public double DurationSeconds; public uint SampleRate; public int SampleFormat, Quality; public uint ReflectionOrder, Seed; public nint CancellationFlag; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeRenderRequest { public uint Size, Version; public nint OutputDirectoryUtf8, FilePrefixUtf8; public double DurationSeconds; public uint SampleRate; public int SampleFormat, Quality; public uint ReflectionOrder, Seed; public nint CancellationFlag; public uint RayCount, Reserved; public double ImpulseResponseSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; public uint RayCount, Seed; public double ImpulseResponseSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; }
 
     private static class Native

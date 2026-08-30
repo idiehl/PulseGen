@@ -28,7 +28,7 @@
           <Button Content="⇥  Render" Background="#266A64" Foreground="White" Click="OnRenderClicked" ToolTip.Tip="Render an isolated two-channel WAV take for each enabled receiver rig." />
         </StackPanel>
         <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
-          <TextBlock Text="48 kHz" Foreground="#B8C4D3" VerticalAlignment="Center" />
+          <TextBlock x:Name="ActiveSampleRateText" Text="48 kHz · INTERACTIVE" Foreground="#B8C4D3" VerticalAlignment="Center" />
           <Border Background="#152E28" CornerRadius="9" Padding="8,3">
             <TextBlock Text="ENGINE READY" Foreground="#73E6C2" FontSize="10" FontWeight="SemiBold" />
           </Border>
@@ -172,6 +172,13 @@
                   <TextBox x:Name="MaterialRoughnessBox" Grid.Column="1" HorizontalContentAlignment="Right" LostFocus="OnMaterialDraftChanged" />
                 </Grid>
                 <TextBlock x:Name="MaterialUsageText" Text="Used by 1 surface" TextWrapping="Wrap" Foreground="#91A4BD" FontSize="9" />
+                <Border Height="1" Background="#293444" Margin="0,3" />
+                <TextBlock Classes="sectionTitle" Text="LISTEN TO THIS MATERIAL" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                  <ComboBox x:Name="MaterialAuditionBandBox" />
+                  <Button Grid.Column="1" Content="▶  Audition" Click="OnAuditionMaterialClicked" ToolTip.Tip="Play a short tone and its reflection through the current, unapplied material values. The project is not changed." />
+                </Grid>
+                <TextBlock Text="Choose one pitch band to hear its clear reflection and scattered tail. This uses the values currently shown, even before Apply material." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
               </StackPanel>
             </Border>
 
@@ -243,6 +250,19 @@
                   </StackPanel>
                 </Grid>
                 <TextBlock x:Name="GeometryConstraintText" Text="Drag the selected centre handle in the world for X/Z movement." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <Border x:Name="RoomDecayPanel" IsVisible="False" Background="#111B25" BorderBrush="#28394A" BorderThickness="1" CornerRadius="5" Padding="9">
+                  <StackPanel Spacing="6">
+                    <TextBlock Classes="sectionTitle" Text="ESTIMATED NATURAL ROOM FADE" />
+                    <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="4">
+                      <TextBlock Text="Bass (250 Hz)" Foreground="#8192A7" /><TextBlock x:Name="RoomLowDecayText" Grid.Column="1" Classes="value" Text="0.00 s" />
+                      <TextBlock Grid.Row="1" Text="Voice (1 kHz) · active" Foreground="#8192A7" /><TextBlock x:Name="RoomMidDecayText" Grid.Row="1" Grid.Column="1" Classes="value" Text="0.00 s" />
+                      <TextBlock Grid.Row="2" Text="Brightness (8 kHz)" Foreground="#8192A7" /><TextBlock x:Name="RoomHighDecayText" Grid.Row="2" Grid.Column="1" Classes="value" Text="0.00 s" />
+                      <TextBlock Grid.Row="3" Text="Average wall interval" Foreground="#8192A7" /><TextBlock x:Name="RoomReflectionIntervalText" Grid.Row="3" Grid.Column="1" Classes="value" Text="0.0 ms" />
+                      <TextBlock Grid.Row="4" Text="Profile fade cap" Foreground="#8192A7" /><TextBlock x:Name="RoomProfileTailText" Grid.Row="4" Grid.Column="1" Classes="value" Text="0.00 s" />
+                    </Grid>
+                    <TextBlock Text="The voice-band estimate drives the current room tail. Bass and brightness show the band-split target for a later engine cycle. The active profile can shorten the voice-band tail." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                  </StackPanel>
+                </Border>
               </StackPanel>
             </Border>
             <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
@@ -428,6 +448,31 @@
               <Button Content="Apply receiver" Background="#266A64" Foreground="White" Click="OnApplyReceiverClicked" />
               <Button Grid.Column="1" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
             </Grid>
+          </StackPanel>
+
+          <StackPanel x:Name="RenderProfileInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Preview and final echo quality" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <Grid ColumnDefinitions="*,132" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Profile name" Foreground="#8192A7" /><TextBox x:Name="RenderProfileNameBox" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Quality mode" Foreground="#8192A7" /><ComboBox x:Name="RenderQualityBox" Grid.Row="1" Grid.Column="1" />
+                  <TextBlock Grid.Row="2" Text="Sample rate" Foreground="#8192A7" /><ComboBox x:Name="RenderSampleRateBox" Grid.Row="2" Grid.Column="1" />
+                  <TextBlock Grid.Row="3" Text="File precision" Foreground="#8192A7" /><ComboBox x:Name="RenderSampleFormatBox" Grid.Row="3" Grid.Column="1" SelectionChanged="OnRenderSampleFormatChanged" />
+                  <TextBlock Grid.Row="4" Text="Dither" Foreground="#8192A7" /><ComboBox x:Name="RenderDitherBox" Grid.Row="4" Grid.Column="1" />
+                  <TextBlock Grid.Row="5" Text="Audio buffer (frames)" Foreground="#8192A7" /><TextBox x:Name="RenderBufferFramesBox" Grid.Row="5" Grid.Column="1" HorizontalContentAlignment="Right" />
+                  <TextBlock Grid.Row="6" Text="First echoes (0–1)" Foreground="#8192A7" /><TextBox x:Name="RenderReflectionOrderBox" Grid.Row="6" Grid.Column="1" HorizontalContentAlignment="Right" />
+                  <TextBlock Grid.Row="7" Text="Diffuse detail budget" Foreground="#8192A7" /><TextBox x:Name="RenderRayCountBox" Grid.Row="7" Grid.Column="1" HorizontalContentAlignment="Right" />
+                  <TextBlock Grid.Row="8" Text="Echo fade time (s)" Foreground="#8192A7" /><TextBox x:Name="RenderTailSecondsBox" Grid.Row="8" Grid.Column="1" HorizontalContentAlignment="Right" />
+                  <TextBlock Grid.Row="9" Text="Air path slices" Foreground="#8192A7" /><TextBox x:Name="RenderAtmosphereSegmentsBox" Grid.Row="9" Grid.Column="1" HorizontalContentAlignment="Right" />
+                </Grid>
+                <Grid ColumnDefinitions="*,132">
+                  <TextBlock Text="Repeatable random seed" Foreground="#8192A7" /><TextBox x:Name="RenderSeedBox" Grid.Column="1" HorizontalContentAlignment="Right" />
+                </Grid>
+                <TextBlock x:Name="RenderProfileExplanationText" Text="A larger diffuse-detail budget creates a denser scattered tail. Zero detail or a zero-second tail disables it." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+            <Button Content="Apply as active profile" Background="#266A64" Foreground="White" Click="OnApplyRenderProfileClicked" />
           </StackPanel>
 
           <Border x:Name="ReadOnlyInspectorPanel" IsVisible="False" Classes="panel" Padding="12">

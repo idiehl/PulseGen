@@ -606,7 +606,7 @@ std::size_t first_active_frame(const std::vector<float>& samples, float threshol
 int main(int argument_count, char** arguments)
 {
     try {
-    static_assert(PG_ABI_VERSION == 1U);
+    static_assert(PG_ABI_VERSION == 2U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
     REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 
@@ -1060,9 +1060,28 @@ int main(int argument_count, char** arguments)
         direct_impulse.begin(),
         scattered_reflection_residual.begin(),
         [](float scattered, float direct) { return scattered - direct; });
-    const double scattered_pressure_ratio = channel_rms(scattered_reflection_residual, 0U) /
-        channel_rms(reflection_residual, 0U);
-    REQUIRE(std::abs(scattered_pressure_ratio - 0.5) < 0.002);
+    const std::size_t reflection_channel =
+        std::abs(reflection_residual[reflection_arrival * 2U]) >=
+            std::abs(reflection_residual[(reflection_arrival * 2U) + 1U])
+        ? 0U
+        : 1U;
+    const double clear_echo_pressure_ratio =
+        std::abs(scattered_reflection_residual[(reflection_arrival * 2U) + reflection_channel]) /
+        std::abs(reflection_residual[(reflection_arrival * 2U) + reflection_channel]);
+    REQUIRE(std::abs(clear_echo_pressure_ratio - 0.5) < 0.002);
+
+    const std::size_t diffuse_search_start = reflection_arrival + 400U;
+    double clear_tail_peak = 0.0;
+    double scattered_tail_peak = 0.0;
+    for (std::size_t frame = diffuse_search_start; frame < scattered_reflection_residual.size() / 2U; ++frame) {
+        clear_tail_peak = std::max(clear_tail_peak, std::abs(static_cast<double>(reflection_residual[frame * 2U])));
+        clear_tail_peak = std::max(clear_tail_peak, std::abs(static_cast<double>(reflection_residual[(frame * 2U) + 1U])));
+        scattered_tail_peak = std::max(scattered_tail_peak, std::abs(static_cast<double>(scattered_reflection_residual[frame * 2U])));
+        scattered_tail_peak = std::max(scattered_tail_peak, std::abs(static_cast<double>(scattered_reflection_residual[(frame * 2U) + 1U])));
+    }
+    REQUIRE(clear_tail_peak < 1.0e-8);
+    REQUIRE(scattered_tail_peak > 1.0e-4);
+    REQUIRE(scattered_impulse == render_surface_source(scattered_reflection_options));
 
     auto solid_box_reflection_options = reflection_surface_options;
     solid_box_reflection_options.geometry_kind = PG_GEOMETRY_BOX;

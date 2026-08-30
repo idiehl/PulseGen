@@ -2,6 +2,11 @@ using PulseGen.Contracts;
 
 namespace PulseGen.Editor;
 
+internal sealed record MaterialAuditionBandChoice(double FrequencyHz, string Name)
+{
+    public override string ToString() => Name;
+}
+
 internal sealed record AcousticMaterialPreset(
     string Name,
     string Description,
@@ -91,6 +96,156 @@ internal static class AcousticMaterialPresets
     ];
 
     public static AcousticMaterialPreset Default => All[0];
+}
+
+internal static class MaterialAuditionBands
+{
+    public static IReadOnlyList<MaterialAuditionBandChoice> All { get; } =
+    [
+        new(125, "125 Hz · deep bass"),
+        new(250, "250 Hz · bass"),
+        new(500, "500 Hz · low voice"),
+        new(1000, "1 kHz · voice centre"),
+        new(2000, "2 kHz · presence"),
+        new(4000, "4 kHz · detail"),
+        new(8000, "8 kHz · brightness"),
+        new(16000, "16 kHz · air")
+    ];
+}
+
+internal static class MaterialAuditionScene
+{
+    public static SceneDocument Create(AcousticMaterial sourceMaterial, double frequencyHz)
+    {
+        ArgumentNullException.ThrowIfNull(sourceMaterial);
+        if (!double.IsFinite(frequencyHz) || frequencyHz is < 20 or > 20_000)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frequencyHz));
+        }
+
+        var pathId = Guid.Parse("f1000000-0000-4000-8000-000000000001");
+        var emitterId = Guid.Parse("f1000000-0000-4000-8000-000000000002");
+        var oscillatorId = Guid.Parse("f1000000-0000-4000-8000-000000000003");
+        var outputId = Guid.Parse("f1000000-0000-4000-8000-000000000004");
+        var materialId = Guid.Parse("f1000000-0000-4000-8000-000000000005");
+        var planeId = Guid.Parse("f1000000-0000-4000-8000-000000000006");
+        var receiverId = Guid.Parse("f1000000-0000-4000-8000-000000000007");
+        var profileId = Guid.Parse("f1000000-0000-4000-8000-000000000008");
+        var material = sourceMaterial with
+        {
+            Id = materialId,
+            OctaveBandCentresHz = sourceMaterial.OctaveBandCentresHz.ToArray(),
+            Absorption = sourceMaterial.Absorption.ToArray(),
+            Scattering = sourceMaterial.Scattering.ToArray(),
+            Transmission = sourceMaterial.Transmission.ToArray()
+        };
+        var timestamp = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero);
+
+        return new SceneDocument
+        {
+            ProjectId = Guid.Parse("f1000000-0000-4000-8000-000000000000"),
+            Name = $"{material.Name} {frequencyHz:0} Hz audition",
+            Atmosphere = new AtmosphereField
+            {
+                TemperatureCelsius = 20,
+                RelativeHumidityPercent = 50,
+                PressureKilopascals = 101.325
+            },
+            MotionPaths =
+            [
+                new MotionPath
+                {
+                    Id = pathId,
+                    Name = "Stationary audition tone",
+                    Kind = MotionPathKind.Linear,
+                    Keyframes =
+                    [
+                        new MotionKeyframe { TimeSeconds = 0, PositionMetres = new(-2, 1.5, 0) },
+                        new MotionKeyframe { TimeSeconds = 1.5, PositionMetres = new(-2, 1.5, 0) }
+                    ]
+                }
+            ],
+            Emitters =
+            [
+                new Emitter
+                {
+                    Id = emitterId,
+                    Name = $"{frequencyHz:0} Hz comparison tone",
+                    MotionPathId = pathId,
+                    GainLinear = 0.7,
+                    MinDistanceMetres = 0.5,
+                    SignalGraph = new SignalGraph
+                    {
+                        Nodes =
+                        [
+                            new SignalNode
+                            {
+                                Id = oscillatorId,
+                                Name = "Audition sine",
+                                Kind = SignalNodeKind.Oscillator,
+                                Waveform = WaveformKind.Sine,
+                                NumericParameters = new Dictionary<string, double>
+                                {
+                                    ["frequencyHz"] = frequencyHz,
+                                    ["amplitude"] = 0.45
+                                }
+                            },
+                            new SignalNode { Id = outputId, Name = "Audition output", Kind = SignalNodeKind.Output }
+                        ],
+                        Connections =
+                        [
+                            new SignalConnection { FromNodeId = oscillatorId, FromPort = "out", ToNodeId = outputId, ToPort = "in" }
+                        ]
+                    }
+                }
+            ],
+            Materials = [material],
+            Geometry =
+            [
+                new AcousticGeometry
+                {
+                    Id = planeId,
+                    Name = "Audition reflector",
+                    Kind = GeometryKind.Plane,
+                    MaterialId = materialId,
+                    Transform = new Transform { PositionMetres = new(0, 1.5, 3) },
+                    DimensionsMetres = new(12, 6, 0),
+                    Occludes = false,
+                    Reflects = true
+                }
+            ],
+            ReceiverRigs =
+            [
+                new ReceiverRig
+                {
+                    Id = receiverId,
+                    Name = "Audition microphones",
+                    Kind = ReceiverRigKind.StereoMicrophone,
+                    Transform = new Transform { PositionMetres = new(2, 1.5, 0) },
+                    SpacingMetres = 0.12,
+                    PolarPattern = PolarPattern.Omni
+                }
+            ],
+            Timeline = new EventTimeline { DurationSeconds = 1.5 },
+            RenderProfiles =
+            [
+                new RenderProfile
+                {
+                    Id = profileId,
+                    Name = "Material audition",
+                    Quality = RenderQuality.Interactive,
+                    SampleRate = 48000,
+                    BufferFrames = 512,
+                    ReflectionOrder = 1,
+                    RayCount = 4096,
+                    ImpulseResponseSeconds = 1.25,
+                    Seed = 20260830
+                }
+            ],
+            CreatedAtUtc = timestamp,
+            UpdatedAtUtc = timestamp
+        };
+    }
 }
 
 internal readonly record struct MaterialEnergySummary(
