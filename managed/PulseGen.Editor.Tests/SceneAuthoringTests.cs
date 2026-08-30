@@ -23,6 +23,7 @@ public sealed class SceneAuthoringTests
         Assert.Equal(movingEmitter.Id, SceneSelectionResolver.Emitter(scene, movingSelection)?.Id);
         Assert.Equal(movingEmitter.MotionPathId, SceneSelectionResolver.MotionPath(scene, movingSelection)?.Id);
         Assert.Null(SceneSelectionResolver.MotionPath(scene, SceneSelection.Emitter(staticEmitter.Id)));
+        Assert.True(SceneSelectionResolver.Exists(scene, SceneSelection.Material(scene.Materials[0].Id)));
         Assert.False(SceneSelectionResolver.Exists(scene, SceneSelection.Geometry(Guid.NewGuid())));
     }
 
@@ -162,6 +163,92 @@ public sealed class SceneAuthoringTests
         Assert.False(accepted);
         Assert.Contains("unique", error?.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(originalCount, scene.Geometry.Count);
+    }
+
+    [Fact]
+    public void MaterialPresetsConserveEnergyAndCreateIndependentCoefficientArrays()
+    {
+        foreach (var preset in AcousticMaterialPresets.All)
+        {
+            var first = preset.Create(Guid.NewGuid());
+            var second = preset.Create(Guid.NewGuid());
+            var summary = AcousticMaterialPhysics.Average(first);
+
+            Assert.Equal(AcousticMaterialPresets.StandardBandCentresHz.Length, first.Absorption.Length);
+            Assert.InRange(Math.Abs(summary.Total - 1), 0, 1e-12);
+            Assert.DoesNotContain(
+                SceneValidator.Validate(SampleScenes.CreateFlyby() with
+                {
+                    Materials = [first],
+                    Geometry = []
+                }),
+                issue => issue.Severity == ValidationSeverity.Error);
+
+            first.Absorption[0] = Math.Min(1, first.Absorption[0] + 0.01);
+            Assert.NotEqual(first.Absorption[0], second.Absorption[0]);
+        }
+    }
+
+    [Fact]
+    public void MaterialEditsRollBackInvalidEnergyAndCommitValidPresets()
+    {
+        var scene = SampleScenes.CreateSurfaceEcho();
+        var original = scene.Materials[0];
+        var invalidAbsorption = original.Absorption.ToArray();
+        var invalidTransmission = original.Transmission.ToArray();
+        invalidAbsorption[0] = 0.9;
+        invalidTransmission[0] = 0.2;
+
+        var invalidAccepted = SceneAuthoringOperations.TryReplaceMaterial(
+            scene,
+            original.Id,
+            original with
+            {
+                Absorption = invalidAbsorption,
+                Transmission = invalidTransmission
+            },
+            out var invalidError);
+
+        Assert.False(invalidAccepted);
+        Assert.Contains("incident energy", invalidError?.Message, StringComparison.Ordinal);
+        Assert.Same(original, scene.Materials[0]);
+
+        var replacement = AcousticMaterialPresets.All.First(item => item.Name == "Heavy curtain")
+            .ApplyTo(original) with { Name = "Curtained stone wall" };
+        var validAccepted = SceneAuthoringOperations.TryReplaceMaterial(
+            scene,
+            original.Id,
+            replacement,
+            out var validError);
+
+        Assert.True(validAccepted, validError?.Message);
+        Assert.Equal("Curtained stone wall", scene.Materials[0].Name);
+        Assert.Equal(0.96, scene.Materials[0].Absorption[^1]);
+    }
+
+    [Fact]
+    public void MaterialRemovalProtectsSurfaceAssignmentsAndTheLastStartingPoint()
+    {
+        var scene = SampleScenes.CreateSurfaceEcho();
+        var used = scene.Materials[0];
+
+        var usedAccepted = SceneAuthoringOperations.TryRemoveMaterial(scene, used.Id, out var usedError);
+
+        Assert.False(usedAccepted);
+        Assert.Contains(scene.Geometry[0].Name, usedError?.Message, StringComparison.Ordinal);
+        Assert.Contains(used, scene.Materials);
+
+        var spare = AcousticMaterialPresets.Default.Create(Guid.NewGuid(), "Unused comparison");
+        Assert.True(SceneAuthoringOperations.TryAddMaterial(scene, spare, out var addError), addError?.Message);
+        Assert.True(SceneAuthoringOperations.TryRemoveMaterial(scene, spare.Id, out var removeError), removeError?.Message);
+        Assert.DoesNotContain(scene.Materials, item => item.Id == spare.Id);
+
+        var minimal = SampleScenes.CreateFlyby();
+        minimal.Geometry.Clear();
+        var last = minimal.Materials[0];
+        Assert.False(SceneAuthoringOperations.TryRemoveMaterial(minimal, last.Id, out var lastError));
+        Assert.Contains("at least one", lastError?.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(last, minimal.Materials[0]);
     }
 
     [Fact]

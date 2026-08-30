@@ -50,6 +50,11 @@ commands and reads bounded telemetry.
   isolated-take rendering; and analysis import. Imported measured SOFA selections
   are content-addressed and deliberately render-gated until their Steam Audio
   adapter is active, so the analytic head model is never mislabeled as measured.
+- First-class acoustic-material authoring with eight-band soak/scatter/pass
+  controls, roughness, plain-language incoming-energy summaries, six adjustable
+  starting points, independent duplication for comparisons, live surface usage
+  reporting, and guarded removal. Preset coefficients are intentionally labeled
+  as simulation starting points rather than certified measurements.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.

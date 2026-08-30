@@ -7,6 +7,7 @@ internal enum SceneSelectionKind
     None,
     Emitter,
     MotionPath,
+    Material,
     Geometry,
     BaseAtmosphere,
     AtmosphereLayer,
@@ -22,6 +23,8 @@ internal readonly record struct SceneSelection(
     public static SceneSelection Emitter(Guid id) => new(SceneSelectionKind.Emitter, id);
 
     public static SceneSelection MotionPath(Guid id) => new(SceneSelectionKind.MotionPath, id);
+
+    public static SceneSelection Material(Guid id) => new(SceneSelectionKind.Material, id);
 
     public static SceneSelection Geometry(Guid id) => new(SceneSelectionKind.Geometry, id);
 
@@ -67,6 +70,7 @@ internal static class SceneSelectionResolver
     {
         SceneSelectionKind.Emitter => scene.Emitters.Any(item => item.Id == selection.Id),
         SceneSelectionKind.MotionPath => scene.MotionPaths.Any(item => item.Id == selection.Id),
+        SceneSelectionKind.Material => scene.Materials.Any(item => item.Id == selection.Id),
         SceneSelectionKind.Geometry => scene.Geometry.Any(item => item.Id == selection.Id),
         SceneSelectionKind.BaseAtmosphere => true,
         SceneSelectionKind.AtmosphereLayer => selection.Index >= 0 && selection.Index < scene.Atmosphere.Layers.Count,
@@ -120,6 +124,12 @@ internal static class SceneSelectionResolver
 
 internal static class SceneAuthoringOperations
 {
+    public static bool TryAddMaterial(
+        SceneDocument scene,
+        AcousticMaterial material,
+        out ValidationIssue? error) =>
+        TryAdd(scene.Materials, material, scene, out error);
+
     public static bool TryAddGeometry(
         SceneDocument scene,
         AcousticGeometry geometry,
@@ -164,6 +174,53 @@ internal static class SceneAuthoringOperations
         AcousticGeometry replacement,
         out ValidationIssue? error) =>
         TryReplace(scene.Geometry, item => item.Id == id, replacement, scene, out error);
+
+    public static bool TryReplaceMaterial(
+        SceneDocument scene,
+        Guid id,
+        AcousticMaterial replacement,
+        out ValidationIssue? error) =>
+        TryReplace(scene.Materials, item => item.Id == id, replacement, scene, out error);
+
+    public static bool TryRemoveMaterial(
+        SceneDocument scene,
+        Guid id,
+        out ValidationIssue? error)
+    {
+        var index = scene.Materials.FindIndex(item => item.Id == id);
+        if (index < 0)
+        {
+            error = new ValidationIssue("scene/selection", "The selected acoustic material no longer exists.");
+            return false;
+        }
+
+        var usedBy = scene.Geometry.Where(item => item.MaterialId == id).Select(item => item.Name).ToArray();
+        if (usedBy.Length > 0)
+        {
+            var names = string.Join(", ", usedBy.Take(3));
+            var remainder = usedBy.Length > 3 ? $" and {usedBy.Length - 3} more" : string.Empty;
+            error = new ValidationIssue(
+                $"materials/{id}",
+                $"Reassign the material on {names}{remainder} before removing it.");
+            return false;
+        }
+        if (scene.Materials.Count == 1)
+        {
+            error = new ValidationIssue("materials", "Keep at least one acoustic material so new surfaces have a valid starting point.");
+            return false;
+        }
+
+        var original = scene.Materials[index];
+        scene.Materials.RemoveAt(index);
+        error = FirstError(scene);
+        if (error is not null)
+        {
+            scene.Materials.Insert(index, original);
+            return false;
+        }
+
+        return true;
+    }
 
     public static bool TryReplaceWindZone(
         SceneDocument scene,

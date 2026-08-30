@@ -382,6 +382,11 @@ public static class SceneValidator
 
     private static void ValidateMaterial(AcousticMaterial material, List<ValidationIssue> issues)
     {
+        if (string.IsNullOrWhiteSpace(material.Name))
+        {
+            issues.Add(new($"materials/{material.Id}/name", "Acoustic material name is required."));
+        }
+
         var count = material.OctaveBandCentresHz.Length;
         if (count == 0 || material.Absorption.Length != count || material.Scattering.Length != count || material.Transmission.Length != count)
         {

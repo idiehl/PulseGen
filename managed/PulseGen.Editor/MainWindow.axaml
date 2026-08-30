@@ -47,6 +47,7 @@
                 <MenuItem Header="Reflective plane" Click="OnAddPlaneClicked" />
                 <MenuItem Header="Acoustic box" Click="OnAddBoxClicked" />
                 <MenuItem Header="Parametric room" Click="OnAddRoomClicked" />
+                <MenuItem Header="Acoustic material" Click="OnAddMaterialClicked" />
                 <MenuItem Header="Bounded wind zone" Click="OnAddWindZoneClicked" />
                 <MenuItem Header="Atmosphere layer" Click="OnAddAtmosphereLayerClicked" />
                 <MenuItem Header="Binaural head receiver" Click="OnAddBinauralReceiverClicked" />
@@ -143,6 +144,63 @@
                 <TextBlock Text="Drag a path point in the world for X/Z; use these fields for exact SI coordinates." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
               </StackPanel>
             </Border>
+          </StackPanel>
+
+          <StackPanel x:Name="MaterialInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Surface behavior" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <TextBlock Text="Material name" Foreground="#8192A7" />
+                <TextBox x:Name="MaterialNameBox" />
+                <TextBlock Text="Starting point" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="6">
+                  <ComboBox x:Name="MaterialPresetBox" SelectionChanged="OnMaterialPresetChanged" />
+                  <Button Grid.Column="1" Content="Load" Click="OnLoadMaterialPresetClicked" ToolTip.Tip="Load these coefficients into the editor without changing the scene until Apply material is pressed." />
+                </Grid>
+                <TextBlock x:Name="MaterialPresetDescriptionText" Text="Preset values are adjustable starting points, not certified measurements." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <Border Height="1" Background="#293444" Margin="0,3" />
+                <Grid ColumnDefinitions="54,*,*,*" ColumnSpacing="5">
+                  <TextBlock Text="Hz" Classes="sectionTitle" />
+                  <TextBlock Grid.Column="1" Text="SOAK" Classes="sectionTitle" TextAlignment="Center" />
+                  <TextBlock Grid.Column="2" Text="SCATTER" Classes="sectionTitle" TextAlignment="Center" />
+                  <TextBlock Grid.Column="3" Text="PASS" Classes="sectionTitle" TextAlignment="Center" />
+                </Grid>
+                <StackPanel x:Name="MaterialBandRows" Spacing="4" />
+                <TextBlock Text="Each value runs from 0 to 1. Soak removes sound, scatter sends reflected sound away from the clear echo path, and pass lets sound through the boundary." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <Grid ColumnDefinitions="*,92" ColumnSpacing="8">
+                  <TextBlock Text="Surface roughness (0 smooth · 1 coarse)" Foreground="#8192A7" TextWrapping="Wrap" />
+                  <TextBox x:Name="MaterialRoughnessBox" Grid.Column="1" HorizontalContentAlignment="Right" LostFocus="OnMaterialDraftChanged" />
+                </Grid>
+                <TextBlock x:Name="MaterialUsageText" Text="Used by 1 surface" TextWrapping="Wrap" Foreground="#91A4BD" FontSize="9" />
+              </StackPanel>
+            </Border>
+
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="7">
+                <TextBlock Classes="sectionTitle" Text="AVERAGE ENERGY MAP" />
+                <Grid ColumnDefinitions="72,*,42" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5" ColumnSpacing="6">
+                  <TextBlock Text="Soaked up" Foreground="#8192A7" />
+                  <ProgressBar x:Name="MaterialAbsorbedBar" Grid.Column="1" Minimum="0" Maximum="100" Height="7" VerticalAlignment="Center" />
+                  <TextBlock x:Name="MaterialAbsorbedText" Grid.Column="2" Classes="value" Text="0%" TextAlignment="Right" />
+                  <TextBlock Grid.Row="1" Text="Clear echo" Foreground="#8192A7" />
+                  <ProgressBar x:Name="MaterialClearEchoBar" Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="100" Height="7" VerticalAlignment="Center" />
+                  <TextBlock x:Name="MaterialClearEchoText" Grid.Row="1" Grid.Column="2" Classes="value" Text="0%" TextAlignment="Right" />
+                  <TextBlock Grid.Row="2" Text="Sent away" Foreground="#8192A7" />
+                  <ProgressBar x:Name="MaterialScatteredBar" Grid.Row="2" Grid.Column="1" Minimum="0" Maximum="100" Height="7" VerticalAlignment="Center" />
+                  <TextBlock x:Name="MaterialScatteredText" Grid.Row="2" Grid.Column="2" Classes="value" Text="0%" TextAlignment="Right" />
+                  <TextBlock Grid.Row="3" Text="Passes through" Foreground="#8192A7" />
+                  <ProgressBar x:Name="MaterialTransmittedBar" Grid.Row="3" Grid.Column="1" Minimum="0" Maximum="100" Height="7" VerticalAlignment="Center" />
+                  <TextBlock x:Name="MaterialTransmittedText" Grid.Row="3" Grid.Column="2" Classes="value" Text="0%" TextAlignment="Right" />
+                </Grid>
+                <TextBlock x:Name="MaterialEnergyHintText" Text="Averages summarize all frequency bands." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+
+            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
+              <Button Content="Apply material" Background="#266A64" Foreground="White" Click="OnApplyMaterialClicked" />
+              <Button Grid.Column="1" Content="Duplicate" Click="OnDuplicateMaterialClicked" ToolTip.Tip="Create an independent copy for quick side-by-side surface tuning." />
+              <Button Grid.Column="2" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
+            </Grid>
           </StackPanel>
 
           <StackPanel x:Name="GeometryInspectorPanel" IsVisible="False" Spacing="10">

@@ -146,7 +146,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["id", "name", "octaveBandCentresHz", "absorption", "scattering", "transmission", "roughness"],
       "properties": {
-        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" },
+        "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string", "minLength": 1 },
         "octaveBandCentresHz": { "type": "array", "items": { "type": "number", "exclusiveMinimum": 0 } },
         "absorption": { "$ref": "#/$defs/bandArray" }, "scattering": { "$ref": "#/$defs/bandArray" },
         "transmission": { "$ref": "#/$defs/bandArray" }, "roughness": { "type": "number", "minimum": 0, "maximum": 1 },

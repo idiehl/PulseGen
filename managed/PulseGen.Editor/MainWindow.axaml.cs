@@ -1,5 +1,6 @@
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Layout;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using PulseGen.Atlas.Client;
@@ -14,6 +15,12 @@ namespace PulseGen.Editor;
 
 public sealed partial class MainWindow : Window
 {
+    private sealed record MaterialBandEditorRow(
+        double FrequencyHz,
+        TextBox Absorption,
+        TextBox Scattering,
+        TextBox Transmission);
+
     private SceneDocument scene = SampleScenes.CreateFlyby();
     private readonly DispatcherTimer previewTimer;
     private DateTimeOffset previewStarted;
@@ -27,6 +34,7 @@ public sealed partial class MainWindow : Window
     private NativeSceneRenderer.PreviewSession? audioPreview;
     private SceneSelection currentSelection;
     private bool refreshingSceneTree;
+    private readonly List<MaterialBandEditorRow> materialBandEditors = [];
     private readonly HttpClient atlasHttp = new(new SocketsHttpHandler
     {
         AllowAutoRedirect = false,
@@ -56,6 +64,7 @@ public sealed partial class MainWindow : Window
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
+        MaterialPresetBox.ItemsSource = AcousticMaterialPresets.All;
         ApplySceneToControls(scene, projectDirectory: null);
         initializingControls = false;
     }
@@ -140,6 +149,13 @@ public sealed partial class MainWindow : Window
                 .ToList();
             worldItems.Add(new TreeViewItem
             {
+                Header = "◫  MATERIALS",
+                IsExpanded = true,
+                ItemsSource = scene.Materials.Select(material =>
+                    Leaf($"◇  {material.Name}", SceneSelection.Material(material.Id))).ToList()
+            });
+            worldItems.Add(new TreeViewItem
+            {
                 Header = "≋  ATMOSPHERE",
                 IsExpanded = true,
                 ItemsSource = atmosphereItems
@@ -208,6 +224,7 @@ public sealed partial class MainWindow : Window
         try
         {
             EmitterInspectorPanel.IsVisible = false;
+            MaterialInspectorPanel.IsVisible = false;
             GeometryInspectorPanel.IsVisible = false;
             WindInspectorPanel.IsVisible = false;
             LayerInspectorPanel.IsVisible = false;
@@ -271,6 +288,15 @@ public sealed partial class MainWindow : Window
                                 ? "Dimensions describe the visible authored-bounds proxy; scale and rotation transform the verified mesh itself. Imported-mesh echoes remain disabled."
                                 : "Drag the selected centre handle in the world for X/Z movement; use these fields for exact position, size, and rotation.";
                         GeometryInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                case SceneSelectionKind.Material:
+                    {
+                        var material = scene.Materials.First(item => item.Id == selection.Id);
+                        InspectorSelectionText.Text = material.Name;
+                        InspectorKindBadge.Text = "MATERIAL";
+                        PopulateMaterialEditor(material);
+                        MaterialInspectorPanel.IsVisible = true;
                         break;
                     }
                 case SceneSelectionKind.WindZone:
@@ -457,6 +483,208 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    private void PopulateMaterialEditor(AcousticMaterial material)
+    {
+        MaterialNameBox.Text = material.Name;
+        var matchingPreset = AcousticMaterialPresets.All.FirstOrDefault(preset => preset.Matches(material));
+        MaterialPresetBox.SelectedItem = matchingPreset;
+        MaterialPresetDescriptionText.Text = matchingPreset is null
+            ? "Custom material. Presets are adjustable starting points, not certified measurements."
+            : $"{matchingPreset.Description} Values are simulation starting points, not certified measurements.";
+        BuildMaterialBandRows(material);
+        MaterialRoughnessBox.Text = FormatNumber(material.Roughness);
+
+        var usedBy = scene.Geometry.Where(item => item.MaterialId == material.Id).Select(item => item.Name).ToArray();
+        MaterialUsageText.Text = usedBy.Length switch
+        {
+            0 => "Not assigned to a surface yet.",
+            1 => $"Used by {usedBy[0]}.",
+            _ => $"Used by {usedBy.Length} surfaces: {string.Join(", ", usedBy.Take(3))}{(usedBy.Length > 3 ? $" and {usedBy.Length - 3} more" : string.Empty)}."
+        };
+        UpdateMaterialEnergySummary(material);
+    }
+
+    private void BuildMaterialBandRows(AcousticMaterial material)
+    {
+        materialBandEditors.Clear();
+        MaterialBandRows.Children.Clear();
+        for (var index = 0; index < material.OctaveBandCentresHz.Length; index++)
+        {
+            var row = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("54,*,*,*"),
+                ColumnSpacing = 5
+            };
+            var frequency = new TextBlock
+            {
+                Text = FormatBandFrequency(material.OctaveBandCentresHz[index]),
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 10
+            };
+            var absorption = CreateMaterialCoefficientBox(material.Absorption[index]);
+            var scattering = CreateMaterialCoefficientBox(material.Scattering[index]);
+            var transmission = CreateMaterialCoefficientBox(material.Transmission[index]);
+            Grid.SetColumn(absorption, 1);
+            Grid.SetColumn(scattering, 2);
+            Grid.SetColumn(transmission, 3);
+            row.Children.Add(frequency);
+            row.Children.Add(absorption);
+            row.Children.Add(scattering);
+            row.Children.Add(transmission);
+            MaterialBandRows.Children.Add(row);
+            materialBandEditors.Add(new(
+                material.OctaveBandCentresHz[index],
+                absorption,
+                scattering,
+                transmission));
+        }
+    }
+
+    private TextBox CreateMaterialCoefficientBox(double value)
+    {
+        var field = new TextBox
+        {
+            Text = FormatNumber(value),
+            HorizontalContentAlignment = HorizontalAlignment.Right
+        };
+        field.LostFocus += OnMaterialDraftChanged;
+        return field;
+    }
+
+    private static string FormatBandFrequency(double frequencyHz) => frequencyHz >= 1000
+        ? $"{frequencyHz / 1000:0.#}k"
+        : $"{frequencyHz:0}";
+
+    private void OnMaterialPresetChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (initializingControls)
+        {
+            return;
+        }
+        MaterialPresetDescriptionText.Text = MaterialPresetBox.SelectedItem is AcousticMaterialPreset preset
+            ? $"{preset.Description} Load changes only the draft until Apply material is pressed."
+            : "Custom material. Presets are adjustable starting points, not certified measurements.";
+    }
+
+    private void OnLoadMaterialPresetClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Material ||
+            MaterialPresetBox.SelectedItem is not AcousticMaterialPreset preset)
+        {
+            StatusText.Text = "Choose a material starting point to load";
+            return;
+        }
+        var material = scene.Materials.FirstOrDefault(item => item.Id == currentSelection.Id);
+        if (material is null)
+        {
+            return;
+        }
+
+        var draft = preset.ApplyTo(material);
+        BuildMaterialBandRows(draft);
+        MaterialRoughnessBox.Text = FormatNumber(draft.Roughness);
+        UpdateMaterialEnergySummary(draft);
+        StatusText.Text = $"{preset.Name} values loaded into the editor · Apply material to commit them";
+    }
+
+    private void OnMaterialDraftChanged(object? sender, RoutedEventArgs e)
+    {
+        if (initializingControls || currentSelection.Kind != SceneSelectionKind.Material)
+        {
+            return;
+        }
+        var original = scene.Materials.FirstOrDefault(item => item.Id == currentSelection.Id);
+        if (original is null)
+        {
+            return;
+        }
+        if (TryReadMaterialDraft(original, out var draft, out var error))
+        {
+            UpdateMaterialEnergySummary(draft);
+        }
+        else
+        {
+            MaterialEnergyHintText.Text = error;
+        }
+    }
+
+    private bool TryReadMaterialDraft(
+        AcousticMaterial original,
+        out AcousticMaterial replacement,
+        out string error)
+    {
+        var name = MaterialNameBox.Text?.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            replacement = original;
+            error = "Give the material a name before applying it.";
+            return false;
+        }
+        if (materialBandEditors.Count == 0 || !TryReadNumber(MaterialRoughnessBox, out var roughness) || roughness is < 0 or > 1)
+        {
+            replacement = original;
+            error = "Roughness must be a number from 0 to 1.";
+            return false;
+        }
+
+        var centres = new double[materialBandEditors.Count];
+        var absorption = new double[materialBandEditors.Count];
+        var scattering = new double[materialBandEditors.Count];
+        var transmission = new double[materialBandEditors.Count];
+        for (var index = 0; index < materialBandEditors.Count; index++)
+        {
+            var row = materialBandEditors[index];
+            if (!TryReadNumber(row.Absorption, out absorption[index]) ||
+                !TryReadNumber(row.Scattering, out scattering[index]) ||
+                !TryReadNumber(row.Transmission, out transmission[index]) ||
+                absorption[index] is < 0 or > 1 ||
+                scattering[index] is < 0 or > 1 ||
+                transmission[index] is < 0 or > 1)
+            {
+                replacement = original;
+                error = $"The {FormatBandFrequency(row.FrequencyHz)} band needs values from 0 to 1.";
+                return false;
+            }
+            if (absorption[index] + transmission[index] > 1 + 1e-12)
+            {
+                replacement = original;
+                error = $"At {FormatBandFrequency(row.FrequencyHz)}, soak plus pass cannot exceed all incoming sound.";
+                return false;
+            }
+            centres[index] = row.FrequencyHz;
+        }
+
+        replacement = original with
+        {
+            Name = name,
+            OctaveBandCentresHz = centres,
+            Absorption = absorption,
+            Scattering = scattering,
+            Transmission = transmission,
+            Roughness = roughness
+        };
+        error = string.Empty;
+        return true;
+    }
+
+    private void UpdateMaterialEnergySummary(AcousticMaterial material)
+    {
+        var summary = AcousticMaterialPhysics.Average(material);
+        SetMaterialEnergy(MaterialAbsorbedBar, MaterialAbsorbedText, summary.Absorbed);
+        SetMaterialEnergy(MaterialClearEchoBar, MaterialClearEchoText, summary.ClearReflection);
+        SetMaterialEnergy(MaterialScatteredBar, MaterialScatteredText, summary.ScatteredAway);
+        SetMaterialEnergy(MaterialTransmittedBar, MaterialTransmittedText, summary.Transmitted);
+        MaterialEnergyHintText.Text =
+            "These averages cover every shown frequency band. Clear echo is audible now; sound sent away leaves the current mirror-like path. Roughness also softens high notes in the clear echo.";
+    }
+
+    private static void SetMaterialEnergy(ProgressBar bar, TextBlock label, double amount)
+    {
+        var percent = Math.Clamp(amount * 100, 0, 100);
+        bar.Value = percent;
+        label.Text = $"{percent:0}%";
+    }
+
     private void MarkSceneEdited(string message)
     {
         StopPreviewTransport();
@@ -512,6 +740,55 @@ public sealed partial class MainWindow : Window
     private void OnAddBoxClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.Box);
 
     private void OnAddRoomClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.ParametricRoom);
+
+    private void OnAddMaterialClicked(object? sender, RoutedEventArgs e)
+    {
+        var material = AcousticMaterialPresets.Default.Create(
+            Guid.NewGuid(),
+            SceneSelectionResolver.UniqueName("Acoustic material", scene.Materials.Select(item => item.Name)));
+        if (!SceneAuthoringOperations.TryAddMaterial(scene, material, out var error))
+        {
+            RejectSceneEdit($"Add {material.Name}", error);
+            return;
+        }
+        currentSelection = SceneSelection.Material(material.Id);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit($"{material.Name} added from the balanced-wall starting point");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnDuplicateMaterialClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Material)
+        {
+            return;
+        }
+        var original = scene.Materials.FirstOrDefault(item => item.Id == currentSelection.Id);
+        if (original is null)
+        {
+            return;
+        }
+        var duplicate = original with
+        {
+            Id = Guid.NewGuid(),
+            Name = SceneSelectionResolver.UniqueName($"{original.Name} copy", scene.Materials.Select(item => item.Name)),
+            OctaveBandCentresHz = original.OctaveBandCentresHz.ToArray(),
+            Absorption = original.Absorption.ToArray(),
+            Scattering = original.Scattering.ToArray(),
+            Transmission = original.Transmission.ToArray()
+        };
+        if (!SceneAuthoringOperations.TryAddMaterial(scene, duplicate, out var error))
+        {
+            RejectSceneEdit($"Duplicate {original.Name}", error);
+            return;
+        }
+        currentSelection = SceneSelection.Material(duplicate.Id);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit($"{duplicate.Name} created as an independent comparison material");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
 
     private void AddGeometry(GeometryKind kind)
     {
@@ -688,6 +965,31 @@ public sealed partial class MainWindow : Window
         {
             UpdateReceiverHrtfControls();
         }
+    }
+
+    private void OnApplyMaterialClicked(object? sender, RoutedEventArgs e)
+    {
+        var index = scene.Materials.FindIndex(item => item.Id == currentSelection.Id);
+        if (currentSelection.Kind != SceneSelectionKind.Material || index < 0)
+        {
+            return;
+        }
+        var original = scene.Materials[index];
+        if (!TryReadMaterialDraft(original, out var replacement, out var draftError))
+        {
+            StatusText.Text = $"Material edit rejected · {draftError}";
+            return;
+        }
+        if (!SceneAuthoringOperations.TryReplaceMaterial(scene, original.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{original.Name} material", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+
+        CommitSceneEdit($"{replacement.Name} material physics");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
     }
 
     private void OnApplyGeometryClicked(object? sender, RoutedEventArgs e)
@@ -964,6 +1266,20 @@ public sealed partial class MainWindow : Window
         var nextSelection = SceneSelection.BaseAtmosphere();
         switch (currentSelection.Kind)
         {
+            case SceneSelectionKind.Material:
+                {
+                    var material = scene.Materials.FirstOrDefault(item => item.Id == currentSelection.Id);
+                    if (material is null) return;
+                    removedName = material.Name;
+                    if (!SceneAuthoringOperations.TryRemoveMaterial(scene, material.Id, out var error))
+                    {
+                        RejectSceneEdit($"Remove {material.Name}", error);
+                        PopulateInspector(currentSelection);
+                        return;
+                    }
+                    nextSelection = SceneSelection.Material(scene.Materials[0].Id);
+                    break;
+                }
             case SceneSelectionKind.Geometry:
                 {
                     var index = scene.Geometry.FindIndex(item => item.Id == currentSelection.Id);

@@ -288,12 +288,14 @@ public sealed class SceneContractTests
     {
         var scene = SampleScenes.CreateFlyby();
         var material = scene.Materials[0];
+        scene.Materials[0] = material = material with { Name = "   " };
         material.OctaveBandCentresHz[2] = material.OctaveBandCentresHz[1];
         material.Absorption[0] = 0.9;
         material.Transmission[0] = 0.2;
 
         var issues = SceneValidator.Validate(scene);
 
+        Assert.Contains(issues, issue => issue.Path == $"materials/{material.Id}/name");
         Assert.Contains(issues, issue => issue.Path.EndsWith("/octaveBandCentresHz", StringComparison.Ordinal));
         Assert.Contains(issues, issue => issue.Path == $"materials/{material.Id}" && issue.Message.Contains("incident energy", StringComparison.Ordinal));
     }
