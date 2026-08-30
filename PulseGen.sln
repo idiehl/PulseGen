@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Contracts", "manag
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Editor", "managed\PulseGen.Editor\PulseGen.Editor.csproj", "{25511471-6430-4B50-9EBE-449E9D2543E1}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Editor.Tests", "managed\PulseGen.Editor.Tests\PulseGen.Editor.Tests.csproj", "{C40C5801-17B4-4B42-BF5D-63BDA0F7DC20}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.Engine.Client", "managed\PulseGen.Engine.Client\PulseGen.Engine.Client.csproj", "{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PulseGen.RenderCli", "managed\PulseGen.RenderCli\PulseGen.RenderCli.csproj", "{E107E70F-06E6-42BD-861B-3E65D70190FB}"
@@ -40,6 +42,10 @@ Global
 		{25511471-6430-4B50-9EBE-449E9D2543E1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{25511471-6430-4B50-9EBE-449E9D2543E1}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{25511471-6430-4B50-9EBE-449E9D2543E1}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C40C5801-17B4-4B42-BF5D-63BDA0F7DC20}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C40C5801-17B4-4B42-BF5D-63BDA0F7DC20}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C40C5801-17B4-4B42-BF5D-63BDA0F7DC20}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C40C5801-17B4-4B42-BF5D-63BDA0F7DC20}.Release|Any CPU.Build.0 = Release|Any CPU
 		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{82E56C7D-E7D0-4C3D-B939-A474BC5CB712}.Release|Any CPU.ActiveCfg = Release|Any CPU

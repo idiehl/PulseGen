@@ -41,9 +41,19 @@
       <Grid RowDefinitions="Auto,*,Auto">
         <Grid Margin="14,13,14,8" ColumnDefinitions="*,Auto">
           <TextBlock Classes="sectionTitle" Text="SCENE WORLD" />
-          <Button Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add a simulation entity" />
+          <Button x:Name="AddEntityButton" Grid.Column="1" Content="＋" Width="28" Height="25" Padding="0" ToolTip.Tip="Add a room, acoustic surface, wind zone, or atmosphere layer">
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="Reflective plane" Click="OnAddPlaneClicked" />
+                <MenuItem Header="Acoustic box" Click="OnAddBoxClicked" />
+                <MenuItem Header="Parametric room" Click="OnAddRoomClicked" />
+                <MenuItem Header="Bounded wind zone" Click="OnAddWindZoneClicked" />
+                <MenuItem Header="Atmosphere layer" Click="OnAddAtmosphereLayerClicked" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
         </Grid>
-        <TreeView x:Name="SceneTree" Grid.Row="1" Margin="7,0" Background="Transparent" />
+        <TreeView x:Name="SceneTree" Grid.Row="1" Margin="7,0" Background="Transparent" SelectionChanged="OnSceneTreeSelectionChanged" />
         <Border Grid.Row="2" Classes="panel" Margin="10" Padding="11">
           <StackPanel Spacing="8">
             <TextBlock Classes="sectionTitle" Text="SIMULATION SUMMARY" />
@@ -85,45 +95,193 @@
     <Border Grid.Row="1" Grid.Column="2" Background="#10151D" BorderBrush="#253042" BorderThickness="1,0,0,0">
       <ScrollViewer>
         <StackPanel Margin="12" Spacing="10">
-          <TextBlock Classes="sectionTitle" Text="PHYSICS INSPECTOR" Margin="3,1,0,2" />
-          <Border Classes="panel" Padding="12">
+          <Grid ColumnDefinitions="*,Auto" Margin="3,1,0,2">
+            <StackPanel>
+              <TextBlock Classes="sectionTitle" Text="PHYSICS INSPECTOR" />
+              <TextBlock x:Name="InspectorSelectionText" Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" Margin="0,4,0,0" />
+            </StackPanel>
+            <Border Grid.Column="1" Background="#172631" CornerRadius="8" Padding="8,3" VerticalAlignment="Center">
+              <TextBlock x:Name="InspectorKindBadge" Text="SOURCE" Foreground="#77DCD1" FontSize="9" FontWeight="SemiBold" />
+            </Border>
+          </Grid>
+
+          <StackPanel x:Name="EmitterInspectorPanel" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock x:Name="EmitterNameText" Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <Grid ColumnDefinitions="*,120" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Primitive" Foreground="#8192A7" />
+                  <ComboBox x:Name="WaveformBox" Grid.Column="1" SelectionChanged="OnWaveformChanged" />
+                  <TextBlock Grid.Row="1" Text="Frequency (Hz)" Foreground="#8192A7" /><TextBox x:Name="FrequencyBox" Grid.Row="1" Grid.Column="1" Text="440" HorizontalContentAlignment="Right" LostFocus="OnSignalValueCommitted" />
+                  <TextBlock Grid.Row="2" Text="Linear gain" Foreground="#8192A7" /><TextBox x:Name="GainBox" Grid.Row="2" Grid.Column="1" Text="0.800" HorizontalContentAlignment="Right" LostFocus="OnSignalValueCommitted" />
+                  <TextBlock Grid.Row="3" Text="Emitter mode" Foreground="#8192A7" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="Point / mono" TextAlignment="Right" />
+                  <TextBlock Grid.Row="4" Text="Propagation" Foreground="#8192A7" /><TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="Retarded" TextAlignment="Right" />
+                </Grid>
+              </StackPanel>
+            </Border>
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Classes="sectionTitle" Text="MOTION AT PLAYHEAD" />
+                <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
+                  <TextBlock Text="Position X" Foreground="#8192A7" /><TextBlock x:Name="PositionX" Grid.Column="1" Classes="value" Text="−28.000 m" />
+                  <TextBlock Grid.Row="1" Text="Position Y" Foreground="#8192A7" /><TextBlock x:Name="PositionY" Grid.Row="1" Grid.Column="1" Classes="value" Text="1.700 m" />
+                  <TextBlock Grid.Row="2" Text="Position Z" Foreground="#8192A7" /><TextBlock x:Name="PositionZ" Grid.Row="2" Grid.Column="1" Classes="value" Text="4.000 m" />
+                  <TextBlock Grid.Row="3" Text="Radial velocity" Foreground="#8192A7" /><TextBlock x:Name="VelocityText" Grid.Row="3" Grid.Column="1" Classes="value" Text="9.73 m/s" />
+                </Grid>
+                <Border Height="1" Background="#293444" Margin="0,4" />
+                <TextBlock x:Name="SelectedPointText" Text="KEYFRAME 1 · t 0.000 s" Classes="sectionTitle" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" Foreground="#8192A7" VerticalAlignment="Center" />
+                  <TextBox x:Name="KeyframeX" Grid.Column="1" Text="-28.000" LostFocus="OnKeyframeValueCommitted" />
+                  <TextBlock Grid.Column="2" Text="Y" Foreground="#8192A7" VerticalAlignment="Center" />
+                  <TextBox x:Name="KeyframeY" Grid.Column="3" Text="1.700" LostFocus="OnKeyframeValueCommitted" />
+                  <TextBlock Grid.Column="4" Text="Z" Foreground="#8192A7" VerticalAlignment="Center" />
+                  <TextBox x:Name="KeyframeZ" Grid.Column="5" Text="4.000" LostFocus="OnKeyframeValueCommitted" />
+                </Grid>
+                <TextBlock Text="Drag a path point in the world for X/Z; use these fields for exact SI coordinates." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <StackPanel x:Name="GeometryInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <Grid ColumnDefinitions="*,Auto">
+                  <TextBlock x:Name="GeometryKindText" Text="Reflective plane" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                  <TextBlock Grid.Column="1" Text="SI" Classes="sectionTitle" />
+                </Grid>
+                <TextBlock Text="Position (m)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryPositionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryPositionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryPositionZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Authored dimensions (m)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryDimensionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryDimensionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryDimensionZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Rotation (degrees)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryRotationX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryRotationY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryRotationZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Scale" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryScaleX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryScaleY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="GeometryScaleZ" Grid.Column="5" />
+                </Grid>
+                <Grid ColumnDefinitions="*,130" RowDefinitions="Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Acoustic material" Foreground="#8192A7" VerticalAlignment="Center" />
+                  <ComboBox x:Name="GeometryMaterialBox" Grid.Column="1" />
+                  <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="16">
+                    <CheckBox x:Name="GeometryOccludesBox" Content="Blocks sound" />
+                    <CheckBox x:Name="GeometryReflectsBox" Content="Creates echoes" />
+                  </StackPanel>
+                </Grid>
+                <TextBlock x:Name="GeometryConstraintText" Text="Drag the selected centre handle in the world for X/Z movement." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <Button Content="Apply geometry" Background="#266A64" Foreground="White" Click="OnApplyGeometryClicked" />
+              <Button Grid.Column="1" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
+            </Grid>
+          </StackPanel>
+
+          <StackPanel x:Name="WindInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Bounded wind field" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <TextBlock Text="Position (m)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindPositionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindPositionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindPositionZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Dimensions (m)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindDimensionX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindDimensionY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindDimensionZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Rotation (degrees)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindRotationX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindRotationY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindRotationZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Scale" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindScaleX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindScaleY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindScaleZ" Grid.Column="5" />
+                </Grid>
+                <TextBlock Text="Velocity (m/s, world axes)" Foreground="#8192A7" />
+                <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
+                  <TextBlock Text="X" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindVelocityX" Grid.Column="1" />
+                  <TextBlock Text="Y" Grid.Column="2" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindVelocityY" Grid.Column="3" />
+                  <TextBlock Text="Z" Grid.Column="4" VerticalAlignment="Center" Foreground="#8192A7" /><TextBox x:Name="WindVelocityZ" Grid.Column="5" />
+                </Grid>
+                <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Turbulence (0–1)" Foreground="#8192A7" /><TextBox x:Name="WindTurbulence" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Noise seed" Foreground="#8192A7" /><TextBox x:Name="WindNoiseSeed" Grid.Row="1" Grid.Column="1" />
+                </Grid>
+                <TextBlock Text="Drag the selected centre handle in the world for X/Z movement. The dashed box is the active field boundary." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <Button Content="Apply wind field" Background="#266A64" Foreground="White" Click="OnApplyWindClicked" />
+              <Button Grid.Column="1" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
+            </Grid>
+          </StackPanel>
+
+          <StackPanel x:Name="LayerInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Altitude-bounded air layer" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Bottom altitude (m)" Foreground="#8192A7" /><TextBox x:Name="LayerBaseAltitude" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Top altitude (m)" Foreground="#8192A7" /><TextBox x:Name="LayerTopAltitude" Grid.Row="1" Grid.Column="1" />
+                  <TextBlock Grid.Row="2" Text="Temperature (°C)" Foreground="#8192A7" /><TextBox x:Name="LayerTemperature" Grid.Row="2" Grid.Column="1" />
+                  <TextBlock Grid.Row="3" Text="Humidity (%)" Foreground="#8192A7" /><TextBox x:Name="LayerHumidity" Grid.Row="3" Grid.Column="1" />
+                  <TextBlock Grid.Row="4" Text="Pressure (kPa)" Foreground="#8192A7" /><TextBox x:Name="LayerPressure" Grid.Row="4" Grid.Column="1" />
+                </Grid>
+                <TextBlock Text="Layers may have gaps, where base air applies, but they cannot overlap." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              </StackPanel>
+            </Border>
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+              <Button Content="Apply air layer" Background="#266A64" Foreground="White" Click="OnApplyLayerClicked" />
+              <Button Grid.Column="1" Content="Remove" Background="#3A2328" Foreground="#F0B6BC" Click="OnRemoveSelectedClicked" />
+            </Grid>
+          </StackPanel>
+
+          <StackPanel x:Name="BaseAtmosphereInspectorPanel" IsVisible="False" Spacing="10">
+            <Border Classes="panel" Padding="12">
+              <StackPanel Spacing="8">
+                <TextBlock Text="Base air outside authored layers" Foreground="#E9F3F4" FontWeight="SemiBold" />
+                <Grid ColumnDefinitions="*,110" RowDefinitions="Auto,Auto,Auto" RowSpacing="6">
+                  <TextBlock Text="Temperature (°C)" Foreground="#8192A7" /><TextBox x:Name="BaseTemperature" Grid.Column="1" />
+                  <TextBlock Grid.Row="1" Text="Humidity (%)" Foreground="#8192A7" /><TextBox x:Name="BaseHumidity" Grid.Row="1" Grid.Column="1" />
+                  <TextBlock Grid.Row="2" Text="Pressure (kPa)" Foreground="#8192A7" /><TextBox x:Name="BasePressure" Grid.Row="2" Grid.Column="1" />
+                </Grid>
+                <Button Content="Apply base air" Background="#266A64" Foreground="White" Click="OnApplyBaseAtmosphereClicked" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <Border x:Name="ReadOnlyInspectorPanel" IsVisible="False" Classes="panel" Padding="12">
             <StackPanel Spacing="8">
-              <TextBlock x:Name="EmitterNameText" Text="440 Hz moving primitive" Foreground="#E9F3F4" FontWeight="SemiBold" />
-              <Grid ColumnDefinitions="*,120" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
-                <TextBlock Text="Primitive" Foreground="#8192A7" />
-                <ComboBox x:Name="WaveformBox" Grid.Column="1" SelectionChanged="OnWaveformChanged" />
-                <TextBlock Grid.Row="1" Text="Frequency (Hz)" Foreground="#8192A7" /><TextBox x:Name="FrequencyBox" Grid.Row="1" Grid.Column="1" Text="440" HorizontalContentAlignment="Right" LostFocus="OnSignalValueCommitted" />
-                <TextBlock Grid.Row="2" Text="Linear gain" Foreground="#8192A7" /><TextBox x:Name="GainBox" Grid.Row="2" Grid.Column="1" Text="0.800" HorizontalContentAlignment="Right" LostFocus="OnSignalValueCommitted" />
-                <TextBlock Grid.Row="3" Text="Emitter mode" Foreground="#8192A7" /><TextBlock Grid.Row="3" Grid.Column="1" Classes="value" Text="Point / mono" TextAlignment="Right" />
-                <TextBlock Grid.Row="4" Text="Propagation" Foreground="#8192A7" /><TextBlock Grid.Row="4" Grid.Column="1" Classes="value" Text="Retarded" TextAlignment="Right" />
-              </Grid>
+              <TextBlock x:Name="ReadOnlySelectionTitle" Text="Selection" Foreground="#E9F3F4" FontWeight="SemiBold" />
+              <TextBlock x:Name="ReadOnlySelectionMessage" Text="This object remains visible here while its dedicated controls are developed." TextWrapping="Wrap" Foreground="#8192A7" />
             </StackPanel>
           </Border>
+
           <Border Classes="panel" Padding="12">
             <StackPanel Spacing="8">
-              <TextBlock Classes="sectionTitle" Text="MOTION AT PLAYHEAD" />
-              <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto" RowSpacing="5">
-                <TextBlock Text="Position X" Foreground="#8192A7" /><TextBlock x:Name="PositionX" Grid.Column="1" Classes="value" Text="−28.000 m" />
-                <TextBlock Grid.Row="1" Text="Position Y" Foreground="#8192A7" /><TextBlock x:Name="PositionY" Grid.Row="1" Grid.Column="1" Classes="value" Text="1.700 m" />
-                <TextBlock Grid.Row="2" Text="Position Z" Foreground="#8192A7" /><TextBlock x:Name="PositionZ" Grid.Row="2" Grid.Column="1" Classes="value" Text="4.000 m" />
-                <TextBlock Grid.Row="3" Text="Radial velocity" Foreground="#8192A7" /><TextBlock x:Name="VelocityText" Grid.Row="3" Grid.Column="1" Classes="value" Text="9.73 m/s" />
-              </Grid>
-              <Border Height="1" Background="#293444" Margin="0,4" />
-              <TextBlock x:Name="SelectedPointText" Text="KEYFRAME 1 · t 0.000 s" Classes="sectionTitle" />
-              <Grid ColumnDefinitions="Auto,*,Auto,*,Auto,*" ColumnSpacing="5">
-                <TextBlock Text="X" Foreground="#8192A7" VerticalAlignment="Center" />
-                <TextBox x:Name="KeyframeX" Grid.Column="1" Text="-28.000" LostFocus="OnKeyframeValueCommitted" />
-                <TextBlock Grid.Column="2" Text="Y" Foreground="#8192A7" VerticalAlignment="Center" />
-                <TextBox x:Name="KeyframeY" Grid.Column="3" Text="1.700" LostFocus="OnKeyframeValueCommitted" />
-                <TextBlock Grid.Column="4" Text="Z" Foreground="#8192A7" VerticalAlignment="Center" />
-                <TextBox x:Name="KeyframeZ" Grid.Column="5" Text="4.000" LostFocus="OnKeyframeValueCommitted" />
-              </Grid>
-              <TextBlock Text="Drag a path point in the world for X/Z; use these fields for exact SI coordinates." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
-            </StackPanel>
-          </Border>
-          <Border Classes="panel" Padding="12">
-            <StackPanel Spacing="8">
-              <TextBlock Classes="sectionTitle" Text="ATMOSPHERE" />
+              <TextBlock Classes="sectionTitle" Text="FIELD SUMMARY" />
               <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="5">
                 <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock x:Name="TemperatureText" Grid.Column="1" Classes="value" Text="20.0 °C" />
                 <TextBlock Grid.Row="1" Text="Humidity" Foreground="#8192A7" /><TextBlock x:Name="HumidityText" Grid.Row="1" Grid.Column="1" Classes="value" Text="50.0 %" />

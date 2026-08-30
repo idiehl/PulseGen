@@ -25,11 +25,14 @@ public sealed partial class MainWindow : Window
     private CancellationTokenSource? analysisCancellation;
     private CancellationTokenSource? syncCancellation;
     private NativeSceneRenderer.PreviewSession? audioPreview;
+    private SceneSelection currentSelection;
+    private bool refreshingSceneTree;
     private readonly HttpClient atlasHttp = new(new SocketsHttpHandler
     {
         AllowAutoRedirect = false,
         AutomaticDecompression = System.Net.DecompressionMethods.All
-    }) { Timeout = Timeout.InfiniteTimeSpan };
+    })
+    { Timeout = Timeout.InfiniteTimeSpan };
     private readonly WorkspaceIndex workspaceIndex = WorkspaceIndex.CreateDefault();
     private AtlasOidcClient? atlasIdentity;
     private AtlasLibraryClient? atlasLibrary;
@@ -41,14 +44,15 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         Viewport.PlayheadChanged += (_, time) => UpdatePlayhead(time);
         Viewport.PathPointSelected += (_, index) => SelectKeyframe(index);
-        Viewport.SceneEdited += (_, message) =>
+        Viewport.SceneObjectSelected += selection => SelectSceneObject(selection, refreshTree: true);
+        Viewport.SpatialObjectMoved += selection => PopulateInspector(selection);
+        Viewport.SceneEditRejected += message =>
         {
-            StopPreviewTransport();
-            sceneDirty = true;
-            SelectKeyframe(Viewport.SelectedKeyframeIndex);
             StatusText.Text = message;
             GestureButton.Content = "●  Gesture";
+            PopulateInspector(currentSelection);
         };
+        Viewport.SceneEdited += (_, message) => MarkSceneEdited(message);
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
@@ -66,6 +70,9 @@ public sealed partial class MainWindow : Window
         sceneDirty = false;
         Viewport.Scene = scene;
         Viewport.TimeSeconds = 0;
+        currentSelection = SceneSelection.Emitter(scene.Emitters[0].Id);
+        Viewport.Selection = currentSelection;
+        Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
         Title = $"PulseGen — {scene.Name}";
         SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion}";
         EmitterCountText.Text = $"{scene.Emitters.Count} source{(scene.Emitters.Count == 1 ? string.Empty : "s")}";
@@ -90,6 +97,256 @@ public sealed partial class MainWindow : Window
         SignalGainText.Text = $"gain {emitter.GainLinear:0.000}";
         TimelineSourceText.Text = $"{emitter.Name} · source active";
 
+        RefreshAtmosphereSummary();
+
+        ReceiverOneText.Text = scene.ReceiverRigs.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
+        ReceiverTwoText.Text = scene.ReceiverRigs.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";
+        var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
+        for (var index = 0; index < tickLabels.Length; index++)
+        {
+            var tick = scene.Timeline.DurationSeconds * index / (tickLabels.Length - 1);
+            tickLabels[index].Text = index is 0 or 6 ? $"{tick:0.##}s" : $"{tick:0.##}";
+        }
+        UpdatePlayhead(0);
+        SelectKeyframe(0);
+        PopulateInspector(currentSelection);
+    }
+
+    private void RefreshSceneTree()
+    {
+        refreshingSceneTree = true;
+        try
+        {
+            TreeViewItem Leaf(string header, SceneSelection selection) => new()
+            {
+                Header = header,
+                Tag = selection,
+                IsSelected = selection == currentSelection
+            };
+
+            var sourceItems = scene.Emitters
+                .Select(emitter => Leaf($"◉  {emitter.Name}", SceneSelection.Emitter(emitter.Id)))
+                .Concat(scene.MotionPaths.Select(path => Leaf($"⌁  {path.Name}", SceneSelection.MotionPath(path.Id))))
+                .ToList();
+            var atmosphereItems = new List<TreeViewItem>
+            {
+                Leaf("◫  Base air", SceneSelection.BaseAtmosphere())
+            };
+            atmosphereItems.AddRange(scene.Atmosphere.Layers.Select((layer, index) =>
+                Leaf($"≋  Layer {index + 1} · {layer.BaseAltitudeMetres:0.##}–{layer.TopAltitudeMetres:0.##} m", SceneSelection.AtmosphereLayer(index))));
+            atmosphereItems.AddRange(scene.Atmosphere.WindZones.Select(zone =>
+                Leaf($"➜  {zone.Name}", SceneSelection.WindZone(zone.Id))));
+
+            var worldItems = scene.Geometry
+                .Select(geometry => Leaf($"▱  {geometry.Name}", SceneSelection.Geometry(geometry.Id)))
+                .ToList();
+            worldItems.Add(new TreeViewItem
+            {
+                Header = "≋  ATMOSPHERE",
+                IsExpanded = true,
+                ItemsSource = atmosphereItems
+            });
+
+            var receiverItems = scene.ReceiverRigs.Select(rig => Leaf(
+                $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}",
+                SceneSelection.Receiver(rig.Id))).ToList();
+
+            SceneTree.ItemsSource = new[]
+            {
+                new TreeViewItem
+                {
+                    Header = $"▾  {scene.Name}",
+                    IsExpanded = true,
+                    ItemsSource = new[]
+                    {
+                        new TreeViewItem { Header = "◉  SOURCES & PATHS", IsExpanded = true, ItemsSource = sourceItems },
+                        new TreeViewItem { Header = "▱  ACOUSTIC WORLD", IsExpanded = true, ItemsSource = worldItems },
+                        new TreeViewItem { Header = "⌇  RECEIVERS", IsExpanded = true, ItemsSource = receiverItems }
+                    }
+                }
+            };
+        }
+        finally
+        {
+            refreshingSceneTree = false;
+        }
+    }
+
+    private void OnSceneTreeSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (refreshingSceneTree || initializingControls)
+        {
+            return;
+        }
+        var item = e.AddedItems.OfType<TreeViewItem>().FirstOrDefault() ?? SceneTree.SelectedItem as TreeViewItem;
+        if (item?.Tag is SceneSelection selection)
+        {
+            SelectSceneObject(selection, refreshTree: false);
+        }
+    }
+
+    private void SelectSceneObject(SceneSelection selection, bool refreshTree)
+    {
+        if (!SelectionExists(selection))
+        {
+            return;
+        }
+        currentSelection = selection;
+        Viewport.Selection = selection;
+        Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, selection)?.Id;
+        PopulateInspector(selection);
+        if (refreshTree)
+        {
+            RefreshSceneTree();
+        }
+    }
+
+    private bool SelectionExists(SceneSelection selection) => SceneSelectionResolver.Exists(scene, selection);
+
+    private void PopulateInspector(SceneSelection selection)
+    {
+        var wasInitializing = initializingControls;
+        initializingControls = true;
+        try
+        {
+            EmitterInspectorPanel.IsVisible = false;
+            GeometryInspectorPanel.IsVisible = false;
+            WindInspectorPanel.IsVisible = false;
+            LayerInspectorPanel.IsVisible = false;
+            BaseAtmosphereInspectorPanel.IsVisible = false;
+            ReadOnlyInspectorPanel.IsVisible = false;
+
+            switch (selection.Kind)
+            {
+                case SceneSelectionKind.Emitter:
+                    {
+                        var emitter = SceneSelectionResolver.Emitter(scene, selection) ?? scene.Emitters[0];
+                        var sourceNode = emitter.SignalGraph.Nodes.FirstOrDefault(node => node.Kind == SignalNodeKind.Oscillator);
+                        var waveform = sourceNode?.Waveform ?? WaveformKind.Sine;
+                        var frequency = sourceNode?.NumericParameters.GetValueOrDefault("frequencyHz", 440) ?? 440;
+                        InspectorSelectionText.Text = emitter.Name;
+                        InspectorKindBadge.Text = "SOURCE";
+                        EmitterNameText.Text = emitter.Name;
+                        WaveformBox.SelectedItem = waveform.ToString();
+                        WaveformBox.IsEnabled = sourceNode is not null;
+                        FrequencyBox.IsEnabled = sourceNode is not null;
+                        FrequencyBox.Text = FormatNumber(frequency);
+                        GainBox.Text = FormatNumber(emitter.GainLinear);
+                        SignalNodeTitle.Text = waveform.ToString().ToUpperInvariant();
+                        SignalFrequencyText.Text = $"{frequency:0.00} Hz";
+                        SignalGainText.Text = $"gain {emitter.GainLinear:0.000}";
+                        TimelineSourceText.Text = $"{emitter.Name} · source active";
+                        EmitterInspectorPanel.IsVisible = true;
+                        UpdatePlayhead(Viewport.TimeSeconds);
+                        SelectKeyframe(selectedKeyframeIndex);
+                        break;
+                    }
+                case SceneSelectionKind.Geometry:
+                    {
+                        var geometry = scene.Geometry.First(item => item.Id == selection.Id);
+                        InspectorSelectionText.Text = geometry.Name;
+                        InspectorKindBadge.Text = geometry.Kind == GeometryKind.ParametricRoom ? "ROOM" : "SURFACE";
+                        GeometryKindText.Text = geometry.Kind switch
+                        {
+                            GeometryKind.ParametricRoom => "Parametric reflective room",
+                            GeometryKind.ImportedMesh => "Imported acoustic mesh",
+                            _ => $"{geometry.Kind} acoustic primitive"
+                        };
+                        SetVectorFields(geometry.Transform.PositionMetres, GeometryPositionX, GeometryPositionY, GeometryPositionZ);
+                        SetVectorFields(geometry.DimensionsMetres, GeometryDimensionX, GeometryDimensionY, GeometryDimensionZ);
+                        SetVectorFields(geometry.Transform.RotationDegrees, GeometryRotationX, GeometryRotationY, GeometryRotationZ);
+                        SetVectorFields(geometry.Transform.Scale, GeometryScaleX, GeometryScaleY, GeometryScaleZ);
+                        var materials = scene.Materials.Select(item => new MaterialChoice(item.Id, item.Name)).ToList();
+                        GeometryMaterialBox.ItemsSource = materials;
+                        GeometryMaterialBox.SelectedItem = materials.FirstOrDefault(item => item.Id == geometry.MaterialId);
+                        GeometryOccludesBox.IsChecked = geometry.Occludes;
+                        GeometryReflectsBox.IsChecked = geometry.Reflects;
+                        var room = geometry.Kind == GeometryKind.ParametricRoom;
+                        GeometryRotationX.IsEnabled = !room;
+                        GeometryRotationY.IsEnabled = !room;
+                        GeometryRotationZ.IsEnabled = !room;
+                        GeometryReflectsBox.IsEnabled = geometry.Kind != GeometryKind.ImportedMesh;
+                        GeometryConstraintText.Text = room
+                            ? "The current modal-room solver keeps rooms axis-aligned. Position and size remain fully editable."
+                            : geometry.Kind == GeometryKind.ImportedMesh
+                                ? "Dimensions describe the visible authored-bounds proxy; scale and rotation transform the verified mesh itself. Imported-mesh echoes remain disabled."
+                                : "Drag the selected centre handle in the world for X/Z movement; use these fields for exact position, size, and rotation.";
+                        GeometryInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                case SceneSelectionKind.WindZone:
+                    {
+                        var zone = scene.Atmosphere.WindZones.First(item => item.Id == selection.Id);
+                        InspectorSelectionText.Text = zone.Name;
+                        InspectorKindBadge.Text = "WIND";
+                        SetVectorFields(zone.Transform.PositionMetres, WindPositionX, WindPositionY, WindPositionZ);
+                        SetVectorFields(zone.DimensionsMetres, WindDimensionX, WindDimensionY, WindDimensionZ);
+                        SetVectorFields(zone.Transform.RotationDegrees, WindRotationX, WindRotationY, WindRotationZ);
+                        SetVectorFields(zone.Transform.Scale, WindScaleX, WindScaleY, WindScaleZ);
+                        SetVectorFields(zone.VelocityMetresPerSecond, WindVelocityX, WindVelocityY, WindVelocityZ);
+                        WindTurbulence.Text = FormatNumber(zone.Turbulence);
+                        WindNoiseSeed.Text = FormatNumber(zone.NoiseSeed);
+                        WindInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                case SceneSelectionKind.AtmosphereLayer:
+                    {
+                        var layer = scene.Atmosphere.Layers[selection.Index];
+                        InspectorSelectionText.Text = $"Atmosphere layer {selection.Index + 1}";
+                        InspectorKindBadge.Text = "AIR LAYER";
+                        LayerBaseAltitude.Text = FormatNumber(layer.BaseAltitudeMetres);
+                        LayerTopAltitude.Text = FormatNumber(layer.TopAltitudeMetres);
+                        LayerTemperature.Text = FormatNumber(layer.TemperatureCelsius);
+                        LayerHumidity.Text = FormatNumber(layer.RelativeHumidityPercent);
+                        LayerPressure.Text = FormatNumber(layer.PressureKilopascals);
+                        LayerInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                case SceneSelectionKind.BaseAtmosphere:
+                    InspectorSelectionText.Text = "Base atmosphere";
+                    InspectorKindBadge.Text = "BASE AIR";
+                    BaseTemperature.Text = FormatNumber(scene.Atmosphere.TemperatureCelsius);
+                    BaseHumidity.Text = FormatNumber(scene.Atmosphere.RelativeHumidityPercent);
+                    BasePressure.Text = FormatNumber(scene.Atmosphere.PressureKilopascals);
+                    BaseAtmosphereInspectorPanel.IsVisible = true;
+                    break;
+                case SceneSelectionKind.MotionPath:
+                    {
+                        var path = scene.MotionPaths.First(item => item.Id == selection.Id);
+                        InspectorSelectionText.Text = path.Name;
+                        InspectorKindBadge.Text = "PATH";
+                        ReadOnlySelectionTitle.Text = $"{path.Kind} motion path";
+                        ReadOnlySelectionMessage.Text = "Select and drag a path point in the world, or select the source to use exact keyframe coordinates.";
+                        ReadOnlyInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                case SceneSelectionKind.Receiver:
+                    {
+                        var receiver = scene.ReceiverRigs.First(item => item.Id == selection.Id);
+                        InspectorSelectionText.Text = receiver.Name;
+                        InspectorKindBadge.Text = "RECEIVER";
+                        ReadOnlySelectionTitle.Text = receiver.Kind == ReceiverRigKind.BinauralHead ? "Binaural head receiver" : "Stereo microphone receiver";
+                        ReadOnlySelectionMessage.Text = "This rig remains active and visible. Detailed capsule and HRTF authoring is the next receiver-focused milestone.";
+                        ReadOnlyInspectorPanel.IsVisible = true;
+                        break;
+                    }
+                default:
+                    InspectorSelectionText.Text = "Scene selection";
+                    InspectorKindBadge.Text = "WORLD";
+                    ReadOnlySelectionTitle.Text = "No editable object selected";
+                    ReadOnlySelectionMessage.Text = "Choose a room, surface, atmosphere layer, or wind zone from the scene tree or world view.";
+                    ReadOnlyInspectorPanel.IsVisible = true;
+                    break;
+            }
+        }
+        finally
+        {
+            initializingControls = wasInitializing;
+        }
+    }
+
+    private void RefreshAtmosphereSummary()
+    {
         TemperatureText.Text = $"{scene.Atmosphere.TemperatureCelsius:0.0} °C";
         HumidityText.Text = $"{scene.Atmosphere.RelativeHumidityPercent:0.0} %";
         PressureText.Text = $"{scene.Atmosphere.PressureKilopascals:0.###} kPa";
@@ -104,38 +361,343 @@ public sealed partial class MainWindow : Window
             : $"{scene.Atmosphere.WindZones.Count} bounded · {strongestWind.VelocityMetresPerSecond.Length:0.00} m/s";
         EffectiveSpeedText.Text = $"{SceneValidator.EffectiveSpeedOfSound(scene.Atmosphere.TemperatureCelsius, scene.Atmosphere.RelativeHumidityPercent):0.00} m/s";
         FieldQualityText.Text = "1 / path leg";
-
-        ReceiverOneText.Text = scene.ReceiverRigs.ElementAtOrDefault(0)?.Name ?? "Receiver take 1";
-        ReceiverTwoText.Text = scene.ReceiverRigs.ElementAtOrDefault(1)?.Name ?? "Receiver take 2";
-        var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
-        for (var index = 0; index < tickLabels.Length; index++)
-        {
-            var tick = scene.Timeline.DurationSeconds * index / (tickLabels.Length - 1);
-            tickLabels[index].Text = index is 0 or 6 ? $"{tick:0.##}s" : $"{tick:0.##}";
-        }
-        UpdatePlayhead(0);
-        SelectKeyframe(0);
     }
 
-    private void RefreshSceneTree()
+    private void MarkSceneEdited(string message)
     {
-        var treeItems = new List<TreeViewItem>();
-        treeItems.AddRange(scene.Emitters.Select((emitter, index) => new TreeViewItem
+        StopPreviewTransport();
+        sceneDirty = true;
+        lastRenderDirectory = null;
+        if (currentSelection.Kind == SceneSelectionKind.Emitter)
         {
-            Header = $"◉  {emitter.Name}",
-            IsSelected = index == 0
-        }));
-        treeItems.AddRange(scene.MotionPaths.Select(path => new TreeViewItem { Header = $"⌁  {path.Name}" }));
-        treeItems.AddRange(scene.Geometry.Select(geometry => new TreeViewItem { Header = $"▱  {geometry.Name}" }));
-        treeItems.AddRange(scene.Atmosphere.WindZones.Select(zone => new TreeViewItem { Header = $"≋  {zone.Name}" }));
-        treeItems.AddRange(scene.ReceiverRigs.Select(rig => new TreeViewItem
+            SelectKeyframe(Viewport.SelectedKeyframeIndex);
+        }
+        RefreshAtmosphereSummary();
+        Viewport.Scene = scene;
+        Viewport.Selection = currentSelection;
+        Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
+        StatusText.Text = message;
+        GestureButton.Content = "●  Gesture";
+    }
+
+    private static string FormatNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
+
+    private static void SetVectorFields(Vector3d value, TextBox x, TextBox y, TextBox z)
+    {
+        x.Text = FormatNumber(value.X);
+        y.Text = FormatNumber(value.Y);
+        z.Text = FormatNumber(value.Z);
+    }
+
+    private static bool TryReadNumber(TextBox field, out double value) =>
+        double.TryParse(field.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
+
+    private static bool TryReadVector(TextBox x, TextBox y, TextBox z, out Vector3d value)
+    {
+        if (TryReadNumber(x, out var xValue) && TryReadNumber(y, out var yValue) && TryReadNumber(z, out var zValue))
         {
-            Header = $"{(rig.Kind == ReceiverRigKind.BinauralHead ? "◌" : "⌇")}  {rig.Name}"
-        }));
-        SceneTree.ItemsSource = new[]
+            value = new Vector3d(xValue, yValue, zValue);
+            return true;
+        }
+        value = default;
+        return false;
+    }
+
+    private void CommitSceneEdit(string description) =>
+        MarkSceneEdited($"{description} committed · scene is dirty");
+
+    private void RejectSceneEdit(string description, ValidationIssue? error)
+    {
+        Viewport.Scene = scene;
+        Viewport.Selection = currentSelection;
+        StatusText.Text = $"{description} rejected · {error?.Message ?? "the scene object is no longer available"}";
+    }
+
+    private void OnAddPlaneClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.Plane);
+
+    private void OnAddBoxClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.Box);
+
+    private void OnAddRoomClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.ParametricRoom);
+
+    private void AddGeometry(GeometryKind kind)
+    {
+        if (kind == GeometryKind.ParametricRoom && scene.Geometry.Any(item => item.Kind == GeometryKind.ParametricRoom))
         {
-            new TreeViewItem { Header = $"▾  {scene.Name}", IsExpanded = true, ItemsSource = treeItems }
+            StatusText.Text = "Only one parametric room can feed the current modal-room solver; select the existing room to edit it";
+            return;
+        }
+        var material = scene.Materials.FirstOrDefault();
+        if (material is null)
+        {
+            StatusText.Text = "A verified acoustic material is required before adding geometry";
+            return;
+        }
+        var stem = kind switch
+        {
+            GeometryKind.Plane => "Reflective plane",
+            GeometryKind.Box => "Acoustic box",
+            GeometryKind.ParametricRoom => "Simulation room",
+            _ => kind.ToString()
         };
+        var geometry = new AcousticGeometry
+        {
+            Id = Guid.NewGuid(),
+            Name = SceneSelectionResolver.UniqueName(stem, scene.Geometry.Select(item => item.Name)),
+            Kind = kind,
+            Transform = new Transform
+            {
+                PositionMetres = kind == GeometryKind.ParametricRoom ? new Vector3d(0, 2.5, 0) : new Vector3d(0, 2, 0)
+            },
+            MaterialId = material.Id,
+            DimensionsMetres = kind switch
+            {
+                GeometryKind.Plane => new Vector3d(6, 4, 0),
+                GeometryKind.Box => new Vector3d(2, 2, 2),
+                _ => new Vector3d(20, 5, 14)
+            },
+            Occludes = true,
+            Reflects = true
+        };
+        if (!SceneAuthoringOperations.TryAddGeometry(scene, geometry, out var error))
+        {
+            RejectSceneEdit($"Add {geometry.Name}", error);
+            return;
+        }
+        currentSelection = SceneSelection.Geometry(geometry.Id);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit($"{geometry.Name} added");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnAddWindZoneClicked(object? sender, RoutedEventArgs e)
+    {
+        var zone = new WindZone
+        {
+            Id = Guid.NewGuid(),
+            Name = SceneSelectionResolver.UniqueName("Wind zone", scene.Atmosphere.WindZones.Select(item => item.Name)),
+            Transform = new Transform { PositionMetres = new Vector3d(0, 3, 0) },
+            DimensionsMetres = new Vector3d(12, 6, 8),
+            VelocityMetresPerSecond = new Vector3d(5, 0, 0),
+            Turbulence = 0.1,
+            NoiseSeed = scene.Atmosphere.WindZones.Count + 1
+        };
+        if (!SceneAuthoringOperations.TryAddWindZone(scene, zone, out var error))
+        {
+            RejectSceneEdit($"Add {zone.Name}", error);
+            return;
+        }
+        currentSelection = SceneSelection.WindZone(zone.Id);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit($"{zone.Name} added");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnAddAtmosphereLayerClicked(object? sender, RoutedEventArgs e)
+    {
+        var baseAltitude = scene.Atmosphere.Layers.Count == 0
+            ? 0
+            : scene.Atmosphere.Layers.Max(item => item.TopAltitudeMetres) + 0.5;
+        var layer = new AtmosphereLayer
+        {
+            BaseAltitudeMetres = baseAltitude,
+            TopAltitudeMetres = baseAltitude + 5,
+            TemperatureCelsius = scene.Atmosphere.TemperatureCelsius,
+            RelativeHumidityPercent = scene.Atmosphere.RelativeHumidityPercent,
+            PressureKilopascals = scene.Atmosphere.PressureKilopascals
+        };
+        if (!SceneAuthoringOperations.TryAddAtmosphereLayer(scene, layer, out var error))
+        {
+            RejectSceneEdit("Add atmosphere layer", error);
+            return;
+        }
+        currentSelection = SceneSelection.AtmosphereLayer(scene.Atmosphere.Layers.Count - 1);
+        Viewport.ActiveMotionPathId = null;
+        CommitSceneEdit("Atmosphere layer added");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnApplyGeometryClicked(object? sender, RoutedEventArgs e)
+    {
+        var index = scene.Geometry.FindIndex(item => item.Id == currentSelection.Id);
+        if (currentSelection.Kind != SceneSelectionKind.Geometry || index < 0)
+        {
+            return;
+        }
+        if (!TryReadVector(GeometryPositionX, GeometryPositionY, GeometryPositionZ, out var position) ||
+            !TryReadVector(GeometryDimensionX, GeometryDimensionY, GeometryDimensionZ, out var dimensions) ||
+            !TryReadVector(GeometryRotationX, GeometryRotationY, GeometryRotationZ, out var rotation) ||
+            !TryReadVector(GeometryScaleX, GeometryScaleY, GeometryScaleZ, out var scale))
+        {
+            StatusText.Text = "Geometry edit rejected · every transform and dimension must be a finite SI value";
+            return;
+        }
+        var original = scene.Geometry[index];
+        var isRoom = original.Kind == GeometryKind.ParametricRoom;
+        var materialId = (GeometryMaterialBox.SelectedItem as MaterialChoice)?.Id;
+        var replacement = original with
+        {
+            Transform = original.Transform with
+            {
+                PositionMetres = position,
+                RotationDegrees = isRoom ? Vector3d.Zero : rotation,
+                Scale = scale
+            },
+            DimensionsMetres = dimensions,
+            MaterialId = materialId,
+            Occludes = GeometryOccludesBox.IsChecked == true,
+            Reflects = original.Kind == GeometryKind.ImportedMesh ? false : GeometryReflectsBox.IsChecked == true
+        };
+        if (!SceneAuthoringOperations.TryReplaceGeometry(scene, original.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{original.Name} geometry", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+        CommitSceneEdit($"{original.Name} geometry");
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnApplyWindClicked(object? sender, RoutedEventArgs e)
+    {
+        var index = scene.Atmosphere.WindZones.FindIndex(item => item.Id == currentSelection.Id);
+        if (currentSelection.Kind != SceneSelectionKind.WindZone || index < 0)
+        {
+            return;
+        }
+        if (!TryReadVector(WindPositionX, WindPositionY, WindPositionZ, out var position) ||
+            !TryReadVector(WindDimensionX, WindDimensionY, WindDimensionZ, out var dimensions) ||
+            !TryReadVector(WindRotationX, WindRotationY, WindRotationZ, out var rotation) ||
+            !TryReadVector(WindScaleX, WindScaleY, WindScaleZ, out var scale) ||
+            !TryReadVector(WindVelocityX, WindVelocityY, WindVelocityZ, out var velocity) ||
+            !TryReadNumber(WindTurbulence, out var turbulence) ||
+            !TryReadNumber(WindNoiseSeed, out var noiseSeed))
+        {
+            StatusText.Text = "Wind edit rejected · bounds, transform, velocity, turbulence, and seed must be finite numbers";
+            return;
+        }
+        var original = scene.Atmosphere.WindZones[index];
+        var replacement = original with
+        {
+            Transform = original.Transform with
+            {
+                PositionMetres = position,
+                RotationDegrees = rotation,
+                Scale = scale
+            },
+            DimensionsMetres = dimensions,
+            VelocityMetresPerSecond = velocity,
+            Turbulence = turbulence,
+            NoiseSeed = noiseSeed
+        };
+        if (!SceneAuthoringOperations.TryReplaceWindZone(scene, original.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{original.Name} wind field", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+        CommitSceneEdit($"{original.Name} wind field");
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnApplyLayerClicked(object? sender, RoutedEventArgs e)
+    {
+        var index = currentSelection.Index;
+        if (currentSelection.Kind != SceneSelectionKind.AtmosphereLayer || index < 0 || index >= scene.Atmosphere.Layers.Count)
+        {
+            return;
+        }
+        if (!TryReadNumber(LayerBaseAltitude, out var baseAltitude) ||
+            !TryReadNumber(LayerTopAltitude, out var topAltitude) ||
+            !TryReadNumber(LayerTemperature, out var temperature) ||
+            !TryReadNumber(LayerHumidity, out var humidity) ||
+            !TryReadNumber(LayerPressure, out var pressure))
+        {
+            StatusText.Text = "Air-layer edit rejected · enter finite altitude and atmosphere values";
+            return;
+        }
+        var original = scene.Atmosphere.Layers[index];
+        var replacement = original with
+        {
+            BaseAltitudeMetres = baseAltitude,
+            TopAltitudeMetres = topAltitude,
+            TemperatureCelsius = temperature,
+            RelativeHumidityPercent = humidity,
+            PressureKilopascals = pressure
+        };
+        if (!SceneAuthoringOperations.TryReplaceAtmosphereLayer(scene, index, replacement, out var error))
+        {
+            RejectSceneEdit($"Atmosphere layer {index + 1}", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+        CommitSceneEdit($"Atmosphere layer {index + 1}");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnApplyBaseAtmosphereClicked(object? sender, RoutedEventArgs e)
+    {
+        if (!TryReadNumber(BaseTemperature, out var temperature) ||
+            !TryReadNumber(BaseHumidity, out var humidity) ||
+            !TryReadNumber(BasePressure, out var pressure))
+        {
+            StatusText.Text = "Base-air edit rejected · enter finite temperature, humidity, and pressure";
+            return;
+        }
+        var replacement = scene.Atmosphere with
+        {
+            TemperatureCelsius = temperature,
+            RelativeHumidityPercent = humidity,
+            PressureKilopascals = pressure
+        };
+        if (!SceneAuthoringOperations.TryReplaceBaseAtmosphere(scene, replacement, out var updatedScene, out var error))
+        {
+            RejectSceneEdit("Base atmosphere", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+        scene = updatedScene;
+        CommitSceneEdit("Base atmosphere");
+        PopulateInspector(currentSelection);
+    }
+
+    private void OnRemoveSelectedClicked(object? sender, RoutedEventArgs e)
+    {
+        StopPreviewTransport();
+        string? removedName = null;
+        switch (currentSelection.Kind)
+        {
+            case SceneSelectionKind.Geometry:
+                {
+                    var index = scene.Geometry.FindIndex(item => item.Id == currentSelection.Id);
+                    if (index < 0) return;
+                    removedName = scene.Geometry[index].Name;
+                    scene.Geometry.RemoveAt(index);
+                    break;
+                }
+            case SceneSelectionKind.WindZone:
+                {
+                    var index = scene.Atmosphere.WindZones.FindIndex(item => item.Id == currentSelection.Id);
+                    if (index < 0) return;
+                    removedName = scene.Atmosphere.WindZones[index].Name;
+                    scene.Atmosphere.WindZones.RemoveAt(index);
+                    break;
+                }
+            case SceneSelectionKind.AtmosphereLayer:
+                if (currentSelection.Index < 0 || currentSelection.Index >= scene.Atmosphere.Layers.Count) return;
+                removedName = $"Atmosphere layer {currentSelection.Index + 1}";
+                scene.Atmosphere.Layers.RemoveAt(currentSelection.Index);
+                break;
+            default:
+                return;
+        }
+        currentSelection = SceneSelection.BaseAtmosphere();
+        MarkSceneEdited($"{removedName} removed from the scene · save to persist this change");
+        RefreshSceneTree();
+        PopulateInspector(currentSelection);
     }
 
     private void OnPlayClicked(object? sender, RoutedEventArgs e)
@@ -173,6 +735,13 @@ public sealed partial class MainWindow : Window
     private void OnGestureClicked(object? sender, RoutedEventArgs e)
     {
         StopPreviewTransport();
+        if (SceneSelectionResolver.MotionPath(scene, currentSelection) is null)
+        {
+            Viewport.IsGestureRecording = false;
+            GestureButton.Content = "●  Gesture";
+            StatusText.Text = "Gesture capture requires a selected source, receiver, or motion path that already owns a path";
+            return;
+        }
         Viewport.IsGestureRecording = !Viewport.IsGestureRecording;
         GestureButton.Content = Viewport.IsGestureRecording ? "●  Draw in world…" : "●  Gesture";
         StatusText.Text = Viewport.IsGestureRecording
@@ -281,6 +850,7 @@ public sealed partial class MainWindow : Window
         }
 
         ImportMeshButton.IsEnabled = false;
+        string? newlyDeclaredAssetHash = null;
         try
         {
             StopPreviewTransport();
@@ -315,6 +885,7 @@ public sealed partial class MainWindow : Window
             if (existing is null)
             {
                 scene.Assets.Add(imported);
+                newlyDeclaredAssetHash = imported.Sha256;
             }
 
             var baseName = Path.GetFileNameWithoutExtension(imported.FileName);
@@ -322,12 +893,10 @@ public sealed partial class MainWindow : Window
             {
                 baseName = "Imported mesh";
             }
-            var geometryName = baseName;
-            for (var suffix = 2; scene.Geometry.Any(item => string.Equals(item.Name, geometryName, StringComparison.OrdinalIgnoreCase)); suffix++)
-            {
-                geometryName = $"{baseName} {suffix}";
-            }
-            scene.Geometry.Add(new AcousticGeometry
+            var geometryName = SceneSelectionResolver.UniqueName(
+                baseName,
+                scene.Geometry.Select(item => item.Name));
+            var geometry = new AcousticGeometry
             {
                 Id = Guid.NewGuid(),
                 Name = geometryName,
@@ -337,10 +906,23 @@ public sealed partial class MainWindow : Window
                 DimensionsMetres = new(2, 2, 2),
                 Occludes = true,
                 Reflects = false
-            });
-            sceneDirty = true;
-            Viewport.Scene = scene;
+            };
+            if (!SceneAuthoringOperations.TryAddGeometry(scene, geometry, out var error))
+            {
+                if (newlyDeclaredAssetHash is not null)
+                {
+                    scene.Assets.RemoveAll(asset => string.Equals(
+                        asset.Sha256,
+                        newlyDeclaredAssetHash,
+                        StringComparison.OrdinalIgnoreCase));
+                }
+                throw new InvalidDataException(error?.Message ?? "The imported mesh could not be added to the scene.");
+            }
+
+            currentSelection = SceneSelection.Geometry(geometry.Id);
+            CommitSceneEdit($"Imported {imported.FileName}");
             RefreshSceneTree();
+            PopulateInspector(currentSelection);
             StatusText.Text = $"Imported {imported.FileName} · direct occlusion active · authored bounds proxy 2 m · save to commit the manifest";
         }
         catch (Exception exception)
@@ -690,17 +1272,20 @@ public sealed partial class MainWindow : Window
 
         StopPreviewTransport();
 
-        var emitter = scene.Emitters[0];
+        var emitter = SceneSelectionResolver.Emitter(scene, currentSelection);
+        if (emitter is null)
+        {
+            return;
+        }
         var nodeIndex = emitter.SignalGraph.Nodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
         if (nodeIndex < 0)
         {
             return;
         }
-        emitter.SignalGraph.Nodes[nodeIndex] = emitter.SignalGraph.Nodes[nodeIndex] with { Waveform = waveform };
-        sceneDirty = true;
-        if (waveform == WaveformKind.Additive && !emitter.SignalGraph.Nodes[nodeIndex].NumericParameters.ContainsKey("partial.0.amplitude"))
+        var originalNode = emitter.SignalGraph.Nodes[nodeIndex];
+        var parameters = new Dictionary<string, double>(originalNode.NumericParameters, StringComparer.Ordinal);
+        if (waveform == WaveformKind.Additive && !parameters.ContainsKey("partial.0.amplitude"))
         {
-            var parameters = emitter.SignalGraph.Nodes[nodeIndex].NumericParameters;
             parameters["partial.0.ratio"] = 1;
             parameters["partial.0.amplitude"] = 1;
             parameters["partial.1.ratio"] = 2;
@@ -708,8 +1293,21 @@ public sealed partial class MainWindow : Window
             parameters["partial.2.ratio"] = 3;
             parameters["partial.2.amplitude"] = 0.18;
         }
-        SignalNodeTitle.Text = selected.ToUpperInvariant();
-        StatusText.Text = $"Primitive changed to {selected} · scene is dirty";
+        var nodes = emitter.SignalGraph.Nodes.ToList();
+        nodes[nodeIndex] = originalNode with { Waveform = waveform, NumericParameters = parameters };
+        var replacement = emitter with
+        {
+            SignalGraph = emitter.SignalGraph with { Nodes = nodes }
+        };
+        if (!SceneAuthoringOperations.TryReplaceEmitter(scene, emitter.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{emitter.Name} primitive", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+
+        CommitSceneEdit($"{emitter.Name} primitive changed to {selected}");
+        PopulateInspector(currentSelection);
     }
 
     private void OnSignalValueCommitted(object? sender, RoutedEventArgs e)
@@ -723,15 +1321,39 @@ public sealed partial class MainWindow : Window
 
         StopPreviewTransport();
 
-        var emitter = scene.Emitters[0];
-        var node = emitter.SignalGraph.Nodes.First(item => item.Kind == SignalNodeKind.Oscillator);
-        node.NumericParameters["frequencyHz"] = frequency;
-        scene.Emitters[0] = emitter with { GainLinear = gain };
-        sceneDirty = true;
-        FrequencyBox.Text = frequency.ToString("0.###", CultureInfo.InvariantCulture);
-        GainBox.Text = gain.ToString("0.###", CultureInfo.InvariantCulture);
-        SignalFrequencyText.Text = $"{frequency:0.00} Hz";
-        StatusText.Text = "Primitive parameters committed · scene is dirty";
+        var emitter = SceneSelectionResolver.Emitter(scene, currentSelection);
+        if (emitter is null)
+        {
+            return;
+        }
+        var nodeIndex = emitter.SignalGraph.Nodes.FindIndex(item => item.Kind == SignalNodeKind.Oscillator);
+        if (nodeIndex < 0)
+        {
+            StatusText.Text = "Signal edit rejected · the selected source has no oscillator node";
+            return;
+        }
+
+        var nodes = emitter.SignalGraph.Nodes.ToList();
+        var node = nodes[nodeIndex];
+        var parameters = new Dictionary<string, double>(node.NumericParameters, StringComparer.Ordinal)
+        {
+            ["frequencyHz"] = frequency
+        };
+        nodes[nodeIndex] = node with { NumericParameters = parameters };
+        var replacement = emitter with
+        {
+            GainLinear = gain,
+            SignalGraph = emitter.SignalGraph with { Nodes = nodes }
+        };
+        if (!SceneAuthoringOperations.TryReplaceEmitter(scene, emitter.Id, replacement, out var error))
+        {
+            RejectSceneEdit($"{emitter.Name} signal", error);
+            PopulateInspector(currentSelection);
+            return;
+        }
+
+        CommitSceneEdit($"{emitter.Name} primitive parameters");
+        PopulateInspector(currentSelection);
     }
 
     private void OnKeyframeValueCommitted(object? sender, RoutedEventArgs e)
@@ -866,8 +1488,17 @@ public sealed partial class MainWindow : Window
         var duration = scene.Timeline.DurationSeconds;
         var time = Math.Clamp(timeSeconds, 0, duration);
         Viewport.TimeSeconds = time;
-        var position = SceneKinematics.PositionAt(scene.MotionPaths[0], time);
-        var velocity = SceneKinematics.VelocityAt(scene.MotionPaths[0], time);
+        var path = SceneSelectionResolver.MotionPath(scene, currentSelection);
+        var emitter = SceneSelectionResolver.Emitter(scene, currentSelection);
+        var receiver = currentSelection.Kind == SceneSelectionKind.Receiver
+            ? scene.ReceiverRigs.FirstOrDefault(item => item.Id == currentSelection.Id)
+            : null;
+        var position = path is not null
+            ? SceneKinematics.PositionAt(path, time)
+            : emitter?.Transform.PositionMetres ?? receiver?.Transform.PositionMetres ?? Vector3d.Zero;
+        var velocity = path is not null
+            ? SceneKinematics.VelocityAt(path, time)
+            : Vector3d.Zero;
         PositionText.Text = $"t  {time:0.000} s";
         PositionX.Text = $"{position.X,8:0.000} m";
         PositionY.Text = $"{position.Y,8:0.000} m";
@@ -879,11 +1510,23 @@ public sealed partial class MainWindow : Window
 
     private void SelectKeyframe(int index)
     {
-        var path = scene.MotionPaths[0];
-        if (path.Keyframes.Count == 0)
+        var path = SceneSelectionResolver.MotionPath(scene, currentSelection);
+        if (path is null || path.Keyframes.Count == 0)
         {
+            var emitter = SceneSelectionResolver.Emitter(scene, currentSelection);
+            var position = emitter?.Transform.PositionMetres ?? Vector3d.Zero;
+            SelectedPointText.Text = "STATIC SOURCE · no motion path";
+            KeyframeX.Text = position.X.ToString("0.000", CultureInfo.InvariantCulture);
+            KeyframeY.Text = position.Y.ToString("0.000", CultureInfo.InvariantCulture);
+            KeyframeZ.Text = position.Z.ToString("0.000", CultureInfo.InvariantCulture);
+            KeyframeX.IsEnabled = false;
+            KeyframeY.IsEnabled = false;
+            KeyframeZ.IsEnabled = false;
             return;
         }
+        KeyframeX.IsEnabled = true;
+        KeyframeY.IsEnabled = true;
+        KeyframeZ.IsEnabled = true;
         selectedKeyframeIndex = Math.Clamp(index, 0, path.Keyframes.Count - 1);
         var keyframe = path.Keyframes[selectedKeyframeIndex];
         SelectedPointText.Text = $"KEYFRAME {selectedKeyframeIndex + 1} · t {keyframe.TimeSeconds:0.000} s";

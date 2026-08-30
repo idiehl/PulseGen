@@ -17,4 +17,7 @@
     <ProjectReference Include="..\PulseGen.ModelHost.Client\PulseGen.ModelHost.Client.csproj" />
     <ProjectReference Include="..\PulseGen.Workspace\PulseGen.Workspace.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PulseGen.Editor.Tests" />
+  </ItemGroup>
 </Project>

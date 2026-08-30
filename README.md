@@ -38,9 +38,12 @@ commands and reads bounded telemetry.
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
 - Avalonia editor with linked World, Signal, Physics, Timeline, Receiver, and
-  Library views; validated project reopening; a guarded acoustic-mesh picker;
-  numerical SI editing; draggable paths; raw gesture retention; audible preview;
-  atomic save; isolated-take rendering; and analysis import.
+  Library views; hierarchical scene selection; validated add/edit/remove flows
+  for rooms, acoustic surfaces, atmosphere layers, and bounded wind zones;
+  numerical SI editing; synchronized world highlighting and X/Z manipulation;
+  selection-aware source paths; rollback of physically invalid edits; a guarded
+  acoustic-mesh picker; raw gesture retention; audible preview; atomic save;
+  isolated-take rendering; and analysis import.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
   runtime, multi-resolution STFT decomposition, partial tracks, transient and
   stochastic layers, and exact-residual reconstruction.
