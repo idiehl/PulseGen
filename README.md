@@ -65,8 +65,14 @@ commands and reads bounded telemetry.
   are intentionally labeled as simulation starting points rather than certified
   measurements.
 - Local model-host protocol, an application-owned checksum-pinned Python 3.11
-  runtime, multi-resolution STFT decomposition, partial tracks, transient and
-  stochastic layers, and exact-residual reconstruction.
+  runtime, multi-resolution STFT decomposition, editable sinusoidal partial
+  tracks, transient and stochastic layers, and exact-residual reconstruction.
+  The editor can analyze a chosen receiver take as linked stereo, independent
+  left/right, or center/width (mid-side), with an adjustable 1–256 tones per
+  frame. Before declaring any result, it verifies the untouched source identity,
+  layer hashes, timing/channel alignment, null error, local-only provenance, and
+  partial-track count; the three audio layers, track data, and analysis receipt
+  then become immutable content-addressed assets in the saved project.
 - Demucs/AudioSep adapter manifests that deliberately remain unavailable until
   their weight artifacts, checksums, and licenses are audited.
 - Content-addressed project assets, guarded portable PulsePack archives, bounded

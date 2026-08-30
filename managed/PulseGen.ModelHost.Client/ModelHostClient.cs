@@ -8,6 +8,13 @@ public sealed record ModelHostProgress(string JobId, double Progress, string Mes
 
 public sealed record ModelHostAnalysisResult(string JobId, string OutputDirectory, JsonElement Manifest);
 
+public enum ModelHostChannelMode
+{
+    LinkedStereo,
+    IndependentChannels,
+    MidSide
+}
+
 public sealed class ModelHostClient : IAsyncDisposable
 {
     private const int MaximumProtocolLineCharacters = 16 * 1024 * 1024;
@@ -78,10 +85,23 @@ public sealed class ModelHostClient : IAsyncDisposable
     public async Task<ModelHostAnalysisResult> AnalyzeAsync(
         string inputPath,
         string outputDirectory,
-        string channelMode = "linked",
+        ModelHostChannelMode channelMode = ModelHostChannelMode.LinkedStereo,
+        int maxPartials = 24,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
+        var protocolChannelMode = channelMode switch
+        {
+            ModelHostChannelMode.LinkedStereo => "linked",
+            ModelHostChannelMode.IndependentChannels => "independent",
+            ModelHostChannelMode.MidSide => "mid-side",
+            _ => throw new ArgumentOutOfRangeException(nameof(channelMode), channelMode, "Unsupported channel analysis mode.")
+        };
+        if (maxPartials is < 1 or > 256)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxPartials), maxPartials, "Partial density must be in 1..256.");
+        }
+
         var jobId = Guid.NewGuid().ToString("N");
         var completion = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!jobs.TryAdd(jobId, completion))
@@ -97,10 +117,10 @@ public sealed class ModelHostClient : IAsyncDisposable
                 jobId,
                 inputPath = Path.GetFullPath(inputPath),
                 outputDirectory = Path.GetFullPath(outputDirectory),
-                channelMode,
+                channelMode = protocolChannelMode,
                 windowSizes = new[] { 1024, 4096, 16384 },
                 synthesisWindow = 2048,
-                maxPartials = 24
+                maxPartials
             }, cancellationToken);
             EnsureSuccess(accepted);
 

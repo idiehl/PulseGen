@@ -484,6 +484,23 @@
 
           <Border Classes="panel" Padding="12">
             <StackPanel Spacing="8">
+              <TextBlock Classes="sectionTitle" Text="SPECTRAL DECOMPOSITION" />
+              <TextBlock Text="Break a rendered stereo take into editable tones, transients, and remaining texture. The untouched take is retained as the reference." TextWrapping="Wrap" Foreground="#8192A7" FontSize="10" />
+              <TextBlock Text="Receiver take" Foreground="#8192A7" />
+              <ComboBox x:Name="AnalysisTakeBox" />
+              <TextBlock Text="How to interpret stereo" Foreground="#8192A7" />
+              <ComboBox x:Name="AnalysisChannelModeBox" SelectionChanged="OnAnalysisChannelModeChanged" />
+              <TextBlock x:Name="AnalysisModeHelpText" Text="Track the same tones across left and right while retaining each channel's level and phase." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+              <Grid ColumnDefinitions="*,90">
+                <TextBlock Text="Tones kept per frame" Foreground="#8192A7" VerticalAlignment="Center" />
+                <TextBox x:Name="AnalysisMaxPartialsBox" Grid.Column="1" Text="24" HorizontalContentAlignment="Right" />
+              </Grid>
+              <TextBlock x:Name="AnalysisResultText" Text="Render a receiver take, save the project, then choose Analyze." TextWrapping="Wrap" Foreground="#83D8CD" FontSize="10" />
+            </StackPanel>
+          </Border>
+
+          <Border Classes="panel" Padding="12">
+            <StackPanel Spacing="8">
               <TextBlock Classes="sectionTitle" Text="FIELD SUMMARY" />
               <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,Auto" RowSpacing="5">
                 <TextBlock Text="Temperature" Foreground="#8192A7" /><TextBlock x:Name="TemperatureText" Grid.Column="1" Classes="value" Text="20.0 °C" />

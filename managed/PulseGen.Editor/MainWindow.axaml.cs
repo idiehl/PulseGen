@@ -21,6 +21,19 @@ public sealed partial class MainWindow : Window
         TextBox Scattering,
         TextBox Transmission);
 
+    private sealed record AnalysisTakeChoice(string FilePath, string DisplayName)
+    {
+        public override string ToString() => DisplayName;
+    }
+
+    private sealed record AnalysisModeChoice(
+        ModelHostChannelMode Mode,
+        string DisplayName,
+        string Description)
+    {
+        public override string ToString() => DisplayName;
+    }
+
     private SceneDocument scene = SampleScenes.CreateFlyby();
     private readonly DispatcherTimer previewTimer;
     private DateTimeOffset previewStarted;
@@ -75,6 +88,22 @@ public sealed partial class MainWindow : Window
         RenderSampleRateBox.ItemsSource = RenderProfileChoices.SampleRates;
         RenderSampleFormatBox.ItemsSource = RenderProfileChoices.SampleFormats;
         RenderDitherBox.ItemsSource = RenderProfileChoices.Dithers;
+        AnalysisChannelModeBox.ItemsSource = new[]
+        {
+            new AnalysisModeChoice(
+                ModelHostChannelMode.LinkedStereo,
+                "Linked stereo",
+                "Track the same tones across left and right while retaining each channel's level and phase."),
+            new AnalysisModeChoice(
+                ModelHostChannelMode.IndependentChannels,
+                "Independent left / right",
+                "Find tones separately in each channel when the two sides contain substantially different material."),
+            new AnalysisModeChoice(
+                ModelHostChannelMode.MidSide,
+                "Center / width (mid-side)",
+                "Analyze the shared center and stereo width as separate signals, then reconstruct ordinary left and right audio.")
+        };
+        AnalysisChannelModeBox.SelectedIndex = 0;
         ApplySceneToControls(scene, projectDirectory: null);
         initializingControls = false;
     }
@@ -120,6 +149,7 @@ public sealed partial class MainWindow : Window
         RefreshRenderProfileSummary();
 
         RefreshReceiverSummary();
+        RefreshAnalysisTakeChoices();
         var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
         for (var index = 0; index < tickLabels.Length; index++)
         {
@@ -811,6 +841,7 @@ public sealed partial class MainWindow : Window
         StopPreviewTransport();
         sceneDirty = true;
         lastRenderDirectory = null;
+        RefreshAnalysisTakeChoices();
         if (currentSelection.Kind == SceneSelectionKind.Emitter)
         {
             SelectKeyframe(Viewport.SelectedKeyframeIndex);
@@ -2318,6 +2349,7 @@ public sealed partial class MainWindow : Window
             var profile = GetActiveRenderProfile();
             var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output, profile, lastProjectDirectory));
             lastRenderDirectory = output;
+            RefreshAnalysisTakeChoices();
             StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes with {profile.Name} + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
         }
         catch (Exception exception)
@@ -2340,35 +2372,76 @@ public sealed partial class MainWindow : Window
             StatusText.Text = "Render receiver takes first; analysis never substitutes an unrelated source";
             return;
         }
-        var input = Directory.EnumerateFiles(lastRenderDirectory, "*.wav").Order(StringComparer.Ordinal).FirstOrDefault();
-        if (input is null)
+        if (lastProjectDirectory is null)
         {
-            StatusText.Text = "The latest render directory contains no WAV take";
+            StatusText.Text = "Save this scene as a .pulseproj before analysis so verified layers have a private asset store";
+            return;
+        }
+        if (sceneDirty)
+        {
+            StatusText.Text = "Save the current scene before analysis so the receiver take and project revision stay together";
+            return;
+        }
+        if (AnalysisTakeBox.SelectedItem is not AnalysisTakeChoice take || !File.Exists(take.FilePath))
+        {
+            StatusText.Text = "Choose an available stereo receiver take from the decomposition panel";
+            return;
+        }
+        if (AnalysisChannelModeBox.SelectedItem is not AnalysisModeChoice mode)
+        {
+            StatusText.Text = "Choose how the left and right channels should be interpreted";
+            return;
+        }
+        if (!TryReadInteger(AnalysisMaxPartialsBox, out var maxPartials) || maxPartials is < 1 or > 256)
+        {
+            StatusText.Text = "Tones kept per frame must be a whole number from 1 to 256";
             return;
         }
 
+        var input = take.FilePath;
         var output = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
             "PulseGen",
             "Analysis",
-            $"{Path.GetFileNameWithoutExtension(input)}-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+            $"{Path.GetFileNameWithoutExtension(input)}-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}");
         analysisCancellation = new CancellationTokenSource();
         AnalyzeButton.Content = "■  Cancel analysis";
+        AnalysisResultText.Text = $"Analyzing {take.DisplayName} locally…";
         try
         {
             await using var host = await ModelHostClient.StartAsync(analysisCancellation.Token);
             host.ProgressChanged += (_, progress) => Dispatcher.UIThread.Post(() =>
                 StatusText.Text = $"Analysis {progress.Progress:P0} · {progress.Message}");
-            var result = await host.AnalyzeAsync(input, output, "linked", analysisCancellation.Token);
-            var reconstruction = result.Manifest.GetProperty("reconstruction");
-            StatusText.Text = $"Analysis committed · null RMS {reconstruction.GetProperty("rmsNull").GetDouble():0.0e+0} · {output}";
+            var hostResult = await host.AnalyzeAsync(
+                input,
+                output,
+                mode.Mode,
+                maxPartials,
+                analysisCancellation.Token);
+            StatusText.Text = "Verifying hashes and reconstruction before changing the project…";
+            var imported = await AnalysisArtifactImporter.ImportAsync(
+                scene,
+                lastProjectDirectory,
+                hostResult.OutputDirectory,
+                input,
+                mode.Mode,
+                maxPartials,
+                analysisCancellation.Token);
+            scene = imported.Scene;
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            var artifactCount = imported.DeclaredAssetCount + imported.ReusedAssetCount;
+            AnalysisResultText.Text = $"{imported.PartialTrackCount:N0} tone tracks · null RMS {imported.RmsNull:0.0e+0} · {artifactCount} verified artifacts ({imported.DeclaredAssetCount} new)";
+            StatusText.Text = $"Analysis imported atomically · {mode.DisplayName} · {imported.PartialTrackCount:N0} tone tracks · {output}";
         }
         catch (OperationCanceledException)
         {
+            AnalysisResultText.Text = "Analysis cancelled. No analysis assets were declared by the project.";
             StatusText.Text = "Analysis cancelled · no partial result was imported";
         }
         catch (Exception exception)
         {
+            AnalysisResultText.Text = $"Analysis was not imported: {exception.Message}";
             StatusText.Text = $"Analysis failed: {exception.Message}";
         }
         finally
@@ -2376,6 +2449,34 @@ public sealed partial class MainWindow : Window
             analysisCancellation.Dispose();
             analysisCancellation = null;
             AnalyzeButton.Content = "⌁  Analyze";
+        }
+    }
+
+    private void OnAnalysisChannelModeChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (AnalysisChannelModeBox.SelectedItem is AnalysisModeChoice mode)
+        {
+            AnalysisModeHelpText.Text = mode.Description;
+        }
+    }
+
+    private void RefreshAnalysisTakeChoices()
+    {
+        var selectedPath = (AnalysisTakeBox.SelectedItem as AnalysisTakeChoice)?.FilePath;
+        var choices = lastRenderDirectory is not null && Directory.Exists(lastRenderDirectory)
+            ? Directory.EnumerateFiles(lastRenderDirectory, "*.wav")
+                .Order(StringComparer.Ordinal)
+                .Select(path => new AnalysisTakeChoice(path, Path.GetFileNameWithoutExtension(path)))
+                .ToList()
+            : [];
+        AnalysisTakeBox.ItemsSource = choices;
+        AnalysisTakeBox.SelectedItem = choices.FirstOrDefault(choice =>
+            string.Equals(choice.FilePath, selectedPath, StringComparison.OrdinalIgnoreCase)) ?? choices.FirstOrDefault();
+        if (analysisCancellation is null)
+        {
+            AnalysisResultText.Text = choices.Count == 0
+                ? "Render a receiver take, save the project, then choose Analyze."
+                : $"{choices.Count} receiver take{(choices.Count == 1 ? string.Empty : "s")} ready · results will be verified before project import.";
         }
     }
 

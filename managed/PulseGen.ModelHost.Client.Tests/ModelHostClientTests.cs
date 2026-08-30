@@ -21,12 +21,14 @@ public sealed class ModelHostClientTests
             var output = Path.Combine(root, "analysis");
             var progressEvents = 0;
             host.ProgressChanged += (_, _) => Interlocked.Increment(ref progressEvents);
-            var result = await host.AnalyzeAsync(source, output, "mid-side");
+            var result = await host.AnalyzeAsync(source, output, ModelHostChannelMode.MidSide, maxPartials: 12);
 
             Assert.Equal(output, result.OutputDirectory);
             Assert.True(File.Exists(Path.Combine(output, "analysis.json")));
             Assert.True(File.Exists(Path.Combine(output, "partial-tracks.json")));
             Assert.True(File.Exists(Path.Combine(output, "stochastic-residual.wav")));
+            Assert.Equal("mid-side", result.Manifest.GetProperty("analysis").GetProperty("channelMode").GetString());
+            Assert.Equal(12, result.Manifest.GetProperty("analysis").GetProperty("maxPartialsPerFrame").GetInt32());
             Assert.True(result.Manifest.GetProperty("reconstruction").GetProperty("timingAndChannelAligned").GetBoolean());
             Assert.InRange(result.Manifest.GetProperty("reconstruction").GetProperty("maxAbsoluteError").GetDouble(), 0, 1.0e-6);
             Assert.True(progressEvents > 0);
