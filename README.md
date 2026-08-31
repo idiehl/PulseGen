@@ -108,11 +108,18 @@ commands and reads bounded telemetry.
   engine copies finite audio before device start, and its real-time callback only
   reads the preallocated buffer—no allocation, locks, file access, or managed
   callback occurs on the audio thread.
+- Protected editor autosave and crash recovery. After eight seconds without a
+  new scene edit, the editor writes a validated manifest snapshot to the local
+  SQLite index while leaving the `.pulseproj` untouched. The newest 50 snapshots
+  per project are retained. A process-ID/start-time session journal distinguishes
+  another live editor from a crashed window and from an intentional close that
+  still contained unsaved work. Startup restores only a valid, newer snapshot in
+  memory; the user must explicitly save it or use the two-step discard control.
+  Corrupt snapshots are quarantined rather than substituted for the current scene.
 - Demucs/AudioSep adapter manifests that deliberately remain unavailable until
   their weight artifacts, checksums, and licenses are audited.
-- Content-addressed project assets, guarded portable PulsePack archives, bounded
-  SQLite autosave history, recoverable multipart sync journals, and ETag-based
-  conflict branches.
+- Content-addressed project assets, guarded portable PulsePack archives,
+  recoverable multipart sync journals, and ETag-based conflict branches.
 - Explicit Atlas sign-in and project sync using authorization code + S256 PKCE,
   rotating refresh tokens in Windows Credential Manager, HTTPS presigned upload
   grants, and local-only defaults. The corresponding identity and immutable

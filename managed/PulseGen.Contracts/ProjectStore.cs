@@ -29,6 +29,21 @@ public static class ProjectStore
         return scene;
     }
 
+    public static string SerializeManifest(SceneDocument scene)
+    {
+        SceneValidator.EnsureValid(scene);
+        return JsonSerializer.Serialize(scene, JsonOptions);
+    }
+
+    public static SceneDocument DeserializeManifest(string manifestJson)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestJson);
+        var scene = JsonSerializer.Deserialize<SceneDocument>(manifestJson, JsonOptions)
+            ?? throw new InvalidDataException("Project manifest did not contain a scene document.");
+        SceneValidator.EnsureValid(scene);
+        return scene;
+    }
+
     public static async Task<string> SaveAsync(SceneDocument scene, string projectDirectory, CancellationToken cancellationToken = default)
     {
         SceneValidator.EnsureValid(scene);

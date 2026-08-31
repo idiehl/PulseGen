@@ -24,6 +24,10 @@ public sealed class WorkspaceIndexTests
             Assert.NotNull(recovered);
             Assert.Equal(latest.RevisionId, recovered.RevisionId);
             Assert.NotEqual(first.RevisionId, recovered.RevisionId);
+            var history = await index.GetAutosaveHistoryAsync(scene.ProjectId);
+            Assert.Equal(2, history.Count);
+            Assert.DoesNotContain(history, revision => revision.RevisionId == first.RevisionId);
+            Assert.Equal("Changed twice", ProjectStore.DeserializeManifest(history[0].ManifestJson).Name);
 
             var journalId = await index.EnqueueSyncAsync(scene.ProjectId, "base-17", "project.revision.create", new { scene.Name });
             await index.UpdateSyncPayloadAsync(journalId, new { scene.Name, SessionId = Guid.NewGuid() });
@@ -41,6 +45,56 @@ public sealed class WorkspaceIndexTests
             Assert.NotNull(syncState);
             Assert.Equal(remoteRevision, syncState.HeadRevisionId);
             Assert.Equal("\"etag-one\"", syncState.HeadETag);
+        }
+        finally
+        {
+            index?.Dispose();
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task EditorSessionJournalSeparatesRecoverableAndResolvedWindows()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-session-index-{Guid.NewGuid():N}");
+        WorkspaceIndex? index = null;
+        try
+        {
+            index = new WorkspaceIndex(Path.Combine(root, "index.sqlite3"));
+            await index.InitializeAsync();
+            var scene = SampleScenes.CreateFlyby();
+            var autosave = await index.AppendAutosaveAsync(scene with { Name = "Unsaved session" });
+            var sessionId = Guid.NewGuid().ToString("N");
+            var project = Path.Combine(root, "Journal.pulseproj");
+
+            await index.BeginEditorSessionAsync(
+                sessionId,
+                4242,
+                new DateTimeOffset(2026, 8, 30, 20, 0, 0, TimeSpan.Zero),
+                scene.ProjectId,
+                project);
+            await index.UpdateEditorSessionAsync(sessionId, scene.ProjectId, project, autosave.RevisionId);
+
+            var candidates = await index.GetEditorRecoveryCandidatesAsync();
+            var candidate = Assert.Single(candidates);
+            Assert.Equal(EditorSessionStates.Active, candidate.Session.State);
+            Assert.Equal(Path.GetFullPath(project), candidate.Session.ProjectDirectory);
+            Assert.Equal(autosave.RevisionId, candidate.Autosave?.RevisionId);
+            Assert.Equal("Unsaved session", ProjectStore.DeserializeManifest(candidate.Autosave!.ManifestJson).Name);
+
+            await index.SetEditorSessionStateAsync(sessionId, EditorSessionStates.ClosedDirty);
+            candidate = Assert.Single(await index.GetEditorRecoveryCandidatesAsync());
+            Assert.Equal(EditorSessionStates.ClosedDirty, candidate.Session.State);
+
+            await index.SetEditorSessionStateAsync(sessionId, EditorSessionStates.Recovered);
+            Assert.Empty(await index.GetEditorRecoveryCandidatesAsync());
+            await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+                index.SetEditorSessionStateAsync(sessionId, EditorSessionStates.Clean));
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                index.SetEditorSessionStateAsync(sessionId, EditorSessionStates.Active));
         }
         finally
         {

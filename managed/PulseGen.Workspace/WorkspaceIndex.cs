@@ -6,6 +6,32 @@ namespace PulseGen.Workspace;
 
 public sealed record AutosaveRevision(string RevisionId, Guid ProjectId, string ManifestJson, DateTimeOffset CreatedAtUtc);
 
+public static class EditorSessionStates
+{
+    public const string Active = "active";
+    public const string ClosedDirty = "closed-dirty";
+    public const string Clean = "clean";
+    public const string Recovered = "recovered";
+    public const string Superseded = "superseded";
+    public const string Invalid = "invalid";
+
+    public static bool IsTerminal(string state) =>
+        state is Clean or Recovered or Superseded or Invalid;
+}
+
+public sealed record EditorSessionState(
+    string SessionId,
+    int ProcessId,
+    DateTimeOffset ProcessStartedAtUtc,
+    Guid ProjectId,
+    string? ProjectDirectory,
+    string? AutosaveRevisionId,
+    string State,
+    DateTimeOffset StartedAtUtc,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record EditorRecoveryCandidate(EditorSessionState Session, AutosaveRevision? Autosave);
+
 public sealed record SyncJournalEntry(long Id, Guid ProjectId, string? BaseRevisionId, string Operation, string PayloadJson, string State, DateTimeOffset CreatedAtUtc);
 public sealed record ProjectSyncState(Guid ProjectId, Guid HeadRevisionId, string HeadETag, DateTimeOffset UpdatedAtUtc);
 
@@ -52,6 +78,26 @@ public sealed class WorkspaceIndex : IDisposable
             );
             CREATE INDEX IF NOT EXISTS ix_autosave_project_created
                 ON autosave_revision(project_id, created_at_utc DESC);
+            CREATE TABLE IF NOT EXISTS editor_session (
+                session_id TEXT PRIMARY KEY CHECK(length(session_id) = 32),
+                process_id INTEGER NOT NULL CHECK(process_id > 0),
+                process_started_at_utc TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                project_directory TEXT NULL,
+                autosave_revision_id TEXT NULL,
+                state TEXT NOT NULL CHECK(state IN ('active', 'closed-dirty', 'clean', 'recovered', 'superseded', 'invalid')),
+                started_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_editor_session_recovery
+                ON editor_session(state, updated_at_utc DESC);
+            DELETE FROM editor_session
+            WHERE state IN ('clean', 'recovered', 'superseded', 'invalid')
+              AND session_id NOT IN (
+                  SELECT session_id FROM editor_session
+                  WHERE state IN ('clean', 'recovered', 'superseded', 'invalid')
+                  ORDER BY updated_at_utc DESC LIMIT 200
+              );
             CREATE TABLE IF NOT EXISTS sync_journal (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id TEXT NOT NULL,
@@ -112,7 +158,7 @@ public sealed class WorkspaceIndex : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(keepLatest));
         }
-        var manifest = JsonSerializer.Serialize(scene);
+        var manifest = ProjectStore.SerializeManifest(scene);
         var created = DateTimeOffset.UtcNow;
         var revision = new AutosaveRevision(Guid.NewGuid().ToString("N"), scene.ProjectId, manifest, created);
         await using var connection = await OpenAsync(cancellationToken);
@@ -155,6 +201,229 @@ public sealed class WorkspaceIndex : IDisposable
         return await reader.ReadAsync(cancellationToken)
             ? new(reader.GetString(0), projectId, reader.GetString(1), DateTimeOffset.Parse(reader.GetString(2)))
             : null;
+    }
+
+    public async Task<IReadOnlyList<AutosaveRevision>> GetAutosaveHistoryAsync(
+        Guid projectId,
+        int limit = 50,
+        CancellationToken cancellationToken = default)
+    {
+        if (projectId == Guid.Empty)
+        {
+            throw new ArgumentException("Autosave project identity is required.", nameof(projectId));
+        }
+        if (limit is < 1 or > 500)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT revision_id, manifest_json, created_at_utc FROM autosave_revision WHERE project_id = $project ORDER BY created_at_utc DESC LIMIT $limit;";
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        command.Parameters.AddWithValue("$limit", limit);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var revisions = new List<AutosaveRevision>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            revisions.Add(new(reader.GetString(0), projectId, reader.GetString(1), DateTimeOffset.Parse(reader.GetString(2))));
+        }
+        return revisions;
+    }
+
+    public async Task BeginEditorSessionAsync(
+        string sessionId,
+        int processId,
+        DateTimeOffset processStartedAtUtc,
+        Guid projectId,
+        string? projectDirectory,
+        string? autosaveRevisionId = null,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSessionId(sessionId);
+        ValidateEditorContext(processId, projectId, autosaveRevisionId);
+        var normalizedProjectDirectory = NormalizeOptionalProjectDirectory(projectDirectory);
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO editor_session(
+                session_id, process_id, process_started_at_utc, project_id, project_directory,
+                autosave_revision_id, state, started_at_utc, updated_at_utc)
+            VALUES($session, $process, $processStarted, $project, $directory, $autosave, 'active', $now, $now);
+            """;
+        command.Parameters.AddWithValue("$session", sessionId);
+        command.Parameters.AddWithValue("$process", processId);
+        command.Parameters.AddWithValue("$processStarted", processStartedAtUtc.ToUniversalTime().ToString("O"));
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        command.Parameters.AddWithValue("$directory", (object?)normalizedProjectDirectory ?? DBNull.Value);
+        command.Parameters.AddWithValue("$autosave", (object?)autosaveRevisionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$now", now);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task UpdateEditorSessionAsync(
+        string sessionId,
+        Guid projectId,
+        string? projectDirectory,
+        string? autosaveRevisionId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSessionId(sessionId);
+        ValidateEditorContext(1, projectId, autosaveRevisionId);
+        var normalizedProjectDirectory = NormalizeOptionalProjectDirectory(projectDirectory);
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE editor_session
+            SET project_id = $project,
+                project_directory = $directory,
+                autosave_revision_id = $autosave,
+                updated_at_utc = $updated
+            WHERE session_id = $session AND state = 'active';
+            """;
+        command.Parameters.AddWithValue("$project", projectId.ToString("D"));
+        command.Parameters.AddWithValue("$directory", (object?)normalizedProjectDirectory ?? DBNull.Value);
+        command.Parameters.AddWithValue("$autosave", (object?)autosaveRevisionId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", sessionId);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new KeyNotFoundException($"Active editor session {sessionId} does not exist.");
+        }
+    }
+
+    public async Task<bool> ClaimRecoveryAndBeginEditorSessionAsync(
+        string sourceSessionId,
+        string newSessionId,
+        int processId,
+        DateTimeOffset processStartedAtUtc,
+        Guid projectId,
+        string? projectDirectory,
+        string autosaveRevisionId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSessionId(sourceSessionId);
+        ValidateSessionId(newSessionId);
+        ValidateEditorContext(processId, projectId, autosaveRevisionId);
+        var normalizedProjectDirectory = NormalizeOptionalProjectDirectory(projectDirectory);
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        await using (var claim = connection.CreateCommand())
+        {
+            claim.Transaction = (SqliteTransaction)transaction;
+            claim.CommandText = "UPDATE editor_session SET state = 'recovered', updated_at_utc = $updated WHERE session_id = $session AND state IN ('active', 'closed-dirty');";
+            claim.Parameters.AddWithValue("$updated", now);
+            claim.Parameters.AddWithValue("$session", sourceSessionId);
+            if (await claim.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+        await using (var insert = connection.CreateCommand())
+        {
+            insert.Transaction = (SqliteTransaction)transaction;
+            insert.CommandText = """
+                INSERT INTO editor_session(
+                    session_id, process_id, process_started_at_utc, project_id, project_directory,
+                    autosave_revision_id, state, started_at_utc, updated_at_utc)
+                VALUES($session, $process, $processStarted, $project, $directory, $autosave, 'active', $now, $now);
+                """;
+            insert.Parameters.AddWithValue("$session", newSessionId);
+            insert.Parameters.AddWithValue("$process", processId);
+            insert.Parameters.AddWithValue("$processStarted", processStartedAtUtc.ToUniversalTime().ToString("O"));
+            insert.Parameters.AddWithValue("$project", projectId.ToString("D"));
+            insert.Parameters.AddWithValue("$directory", (object?)normalizedProjectDirectory ?? DBNull.Value);
+            insert.Parameters.AddWithValue("$autosave", autosaveRevisionId);
+            insert.Parameters.AddWithValue("$now", now);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    public async Task SetEditorSessionStateAsync(
+        string sessionId,
+        string state,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSessionId(sessionId);
+        if (state != EditorSessionStates.ClosedDirty && !EditorSessionStates.IsTerminal(state))
+        {
+            throw new ArgumentException("Editor session can only transition to a completed or recoverable state.", nameof(state));
+        }
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "UPDATE editor_session SET state = $state, updated_at_utc = $updated WHERE session_id = $session AND state IN ('active', 'closed-dirty');";
+        command.Parameters.AddWithValue("$state", state);
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.Parameters.AddWithValue("$session", sessionId);
+        if (await command.ExecuteNonQueryAsync(cancellationToken) != 1)
+        {
+            throw new KeyNotFoundException($"Recoverable editor session {sessionId} does not exist.");
+        }
+    }
+
+    public async Task<IReadOnlyList<EditorRecoveryCandidate>> GetEditorRecoveryCandidatesAsync(
+        int limit = 20,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is < 1 or > 100)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit));
+        }
+        await using var connection = await OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                session.session_id,
+                session.process_id,
+                session.process_started_at_utc,
+                session.project_id,
+                session.project_directory,
+                session.autosave_revision_id,
+                session.state,
+                session.started_at_utc,
+                session.updated_at_utc,
+                autosave.project_id,
+                autosave.manifest_json,
+                autosave.created_at_utc
+            FROM editor_session AS session
+            LEFT JOIN autosave_revision AS autosave ON autosave.revision_id = session.autosave_revision_id
+            WHERE session.state IN ('active', 'closed-dirty')
+            ORDER BY session.updated_at_utc DESC
+            LIMIT $limit;
+            """;
+        command.Parameters.AddWithValue("$limit", limit);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        var candidates = new List<EditorRecoveryCandidate>();
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var projectId = Guid.Parse(reader.GetString(3));
+            var autosaveRevisionId = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var session = new EditorSessionState(
+                reader.GetString(0),
+                reader.GetInt32(1),
+                DateTimeOffset.Parse(reader.GetString(2)),
+                projectId,
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                autosaveRevisionId,
+                reader.GetString(6),
+                DateTimeOffset.Parse(reader.GetString(7)),
+                DateTimeOffset.Parse(reader.GetString(8)));
+            AutosaveRevision? autosave = null;
+            if (autosaveRevisionId is not null && !reader.IsDBNull(9) && !reader.IsDBNull(10) && !reader.IsDBNull(11))
+            {
+                autosave = new(
+                    autosaveRevisionId,
+                    Guid.Parse(reader.GetString(9)),
+                    reader.GetString(10),
+                    DateTimeOffset.Parse(reader.GetString(11)));
+            }
+            candidates.Add(new(session, autosave));
+        }
+        return candidates;
     }
 
     public async Task<long> EnqueueSyncAsync(Guid projectId, string? baseRevisionId, string operation, object payload, CancellationToken cancellationToken = default)
@@ -295,6 +564,41 @@ public sealed class WorkspaceIndex : IDisposable
         command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;";
         await command.ExecuteNonQueryAsync(cancellationToken);
         return connection;
+    }
+
+    private static void ValidateSessionId(string sessionId)
+    {
+        if (!Guid.TryParseExact(sessionId, "N", out _))
+        {
+            throw new ArgumentException("Editor session identity must be a 32-character GUID.", nameof(sessionId));
+        }
+    }
+
+    private static void ValidateEditorContext(int processId, Guid projectId, string? autosaveRevisionId)
+    {
+        if (processId < 1 || projectId == Guid.Empty)
+        {
+            throw new ArgumentException("Editor session process and project identities are required.");
+        }
+        if (autosaveRevisionId is not null &&
+            (autosaveRevisionId.Length != 32 || !autosaveRevisionId.All(Uri.IsHexDigit)))
+        {
+            throw new ArgumentException("Autosave revision identity must be a 32-character GUID.", nameof(autosaveRevisionId));
+        }
+    }
+
+    private static string? NormalizeOptionalProjectDirectory(string? projectDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(projectDirectory))
+        {
+            return null;
+        }
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectDirectory));
+        if (!fullPath.EndsWith(".pulseproj", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Editor project directories must end in .pulseproj.", nameof(projectDirectory));
+        }
+        return fullPath;
     }
 
     public void Dispose()

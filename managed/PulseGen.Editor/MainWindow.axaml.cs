@@ -18,6 +18,8 @@ namespace PulseGen.Editor;
 
 public sealed partial class MainWindow : Window
 {
+    private static readonly TimeSpan AutosaveDelay = TimeSpan.FromSeconds(8);
+
     private sealed record MaterialBandEditorRow(
         double FrequencyHz,
         TextBox Absorption,
@@ -39,6 +41,7 @@ public sealed partial class MainWindow : Window
 
     private SceneDocument scene = SampleScenes.CreateFlyby();
     private readonly DispatcherTimer previewTimer;
+    private readonly DispatcherTimer autosaveTimer;
     private DateTimeOffset previewStarted;
     private double previewDurationSeconds;
     private bool previewAdvancesScene = true;
@@ -83,6 +86,15 @@ public sealed partial class MainWindow : Window
     private bool refreshingReceiverTakeControls;
     private bool receiverTakeAuditionPlaying;
     private bool refreshingStudioExportControls;
+    private readonly EditorRecoveryService recoveryService;
+    private readonly CancellationTokenSource recoveryCancellation = new();
+    private DateTimeOffset? sceneEditedAtUtc;
+    private bool recoveryReady;
+    private bool autosaveInProgress;
+    private bool recoveredAutosaveActive;
+    private bool discardRecoveryArmed;
+    private bool closingInProgress;
+    private bool closeFinalized;
 
     public MainWindow()
     {
@@ -102,6 +114,10 @@ public sealed partial class MainWindow : Window
         ReceiverTakeTimeline.TakeSelected += SelectReceiverTake;
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
+        autosaveTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Background, OnAutosaveTick);
+        autosaveTimer.Stop();
+        recoveryService = EditorRecoveryService.CreateForCurrentProcess(workspaceIndex);
+        Opened += OnEditorOpened;
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
         MaterialPresetBox.ItemsSource = AcousticMaterialPresets.All;
         MaterialAuditionBandBox.ItemsSource = MaterialAuditionBands.All;
@@ -872,6 +888,9 @@ public sealed partial class MainWindow : Window
     {
         StopPreviewTransport();
         sceneDirty = true;
+        sceneEditedAtUtc = DateTimeOffset.UtcNow;
+        AutosaveStateText.Text = "UNSAVED · AUTOSAVE PENDING";
+        AutosaveStateText.Foreground = Avalonia.Media.Brushes.Goldenrod;
         lastRenderDirectory = null;
         RefreshAnalysisTakeChoices();
         if (currentSelection.Kind == SceneSelectionKind.Emitter)
@@ -1681,9 +1700,20 @@ public sealed partial class MainWindow : Window
                 throw new InvalidDataException("The current editor surface requires at least one emitter, motion path, and receiver rig.");
             }
             StopPreviewTransport();
+            string? recoveryWarning = null;
+            try
+            {
+                await ResetRecoveryContextAsync(loaded, projectDirectory);
+            }
+            catch (Exception exception)
+            {
+                DisableRecovery(exception);
+                recoveryWarning = " · autosave unavailable for this session";
+            }
             initializingControls = true;
             ApplySceneToControls(loaded, projectDirectory);
-            StatusText.Text = $"Project opened · {projectDirectory}";
+            ClearRecoveredState();
+            StatusText.Text = $"Project opened · {projectDirectory}{recoveryWarning}";
         }
         catch (Exception exception)
         {
@@ -1712,21 +1742,36 @@ public sealed partial class MainWindow : Window
             projectDirectory = Path.Combine(folders[0].Path.LocalPath, ProjectFolderName(scene.Name));
         }
 
+        string hash;
         try
         {
             scene = scene with { UpdatedAtUtc = DateTimeOffset.UtcNow };
             Viewport.Scene = scene;
-            var hash = await ProjectStore.SaveAsync(scene, projectDirectory);
-            lastProjectDirectory = projectDirectory;
-            sceneDirty = false;
-            RefreshSpectralWorkspace();
-            RefreshReceiverTakeWorkspace();
-            StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}";
+            hash = await ProjectStore.SaveAsync(scene, projectDirectory);
         }
         catch (Exception exception)
         {
             StatusText.Text = $"Project save failed: {exception.Message}";
+            return;
         }
+
+        lastProjectDirectory = projectDirectory;
+        sceneDirty = false;
+        sceneEditedAtUtc = null;
+        string? recoveryWarning = null;
+        try
+        {
+            await MarkRecoverySavedAsync(scene, projectDirectory);
+        }
+        catch (Exception exception)
+        {
+            DisableRecovery(exception);
+            recoveryWarning = " · autosave index unavailable";
+        }
+        ClearRecoveredState();
+        RefreshSpectralWorkspace();
+        RefreshReceiverTakeWorkspace();
+        StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}{recoveryWarning}";
     }
 
     private async void OnImportSofaClicked(object? sender, RoutedEventArgs e)
@@ -3577,8 +3622,248 @@ public sealed partial class MainWindow : Window
         ReceiverMasterHearButton.Content = "▶ Master";
     }
 
+    private async void OnEditorOpened(object? sender, EventArgs e)
+    {
+        Opened -= OnEditorOpened;
+        IsEnabled = false;
+        AutosaveStateText.Text = "CHECKING RECOVERY…";
+        StatusText.Text = "Checking protected local autosave history…";
+        try
+        {
+            var recovered = await recoveryService.InitializeAsync(scene, lastProjectDirectory, recoveryCancellation.Token);
+            recoveryReady = true;
+            if (recovered.Recovered)
+            {
+                initializingControls = true;
+                ApplySceneToControls(recovered.Scene, recovered.ProjectDirectory);
+                sceneDirty = true;
+                sceneEditedAtUtc = null;
+                recoveredAutosaveActive = true;
+                discardRecoveryArmed = false;
+                DiscardRecoveryButton.Content = "Discard recovery";
+                DiscardRecoveryButton.IsVisible = true;
+                AutosaveStateText.Text = recovered.AutosavedAtUtc is { } created
+                    ? $"RECOVERED · {created.ToLocalTime():t}"
+                    : "RECOVERED AUTOSAVE";
+                AutosaveStateText.Foreground = Avalonia.Media.Brushes.Goldenrod;
+                Title = $"PulseGen — {scene.Name} · Recovered";
+                SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion} · RECOVERED";
+                var reason = recovered.Kind == EditorRecoveryKind.UnexpectedExit
+                    ? "PulseGen did not close cleanly"
+                    : "the previous window closed with unsaved work";
+                var missing = recovered.ProjectDirectoryMissing
+                    ? " The original project folder is unavailable, so linked assets may need to be restored before saving."
+                    : string.Empty;
+                StatusText.Text = $"Recovered the latest valid autosave because {reason}. It is in memory only until you choose Save.{missing}";
+            }
+            else
+            {
+                AutosaveStateText.Text = "AUTOSAVE READY";
+                AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+                StatusText.Text = "Ready · protected local autosave is active";
+            }
+            autosaveTimer.Start();
+        }
+        catch (OperationCanceledException) when (recoveryCancellation.IsCancellationRequested)
+        {
+            // Window shutdown cancelled startup recovery.
+        }
+        catch (Exception exception)
+        {
+            recoveryReady = false;
+            AutosaveStateText.Text = "AUTOSAVE UNAVAILABLE";
+            AutosaveStateText.Foreground = Avalonia.Media.Brushes.IndianRed;
+            StatusText.Text = $"Editor ready, but protected autosave could not start: {exception.Message}";
+        }
+        finally
+        {
+            initializingControls = false;
+            IsEnabled = true;
+        }
+    }
+
+    private async void OnAutosaveTick(object? sender, EventArgs e)
+    {
+        if (!recoveryReady || autosaveInProgress || !sceneDirty || sceneEditedAtUtc is not { } editedAt ||
+            DateTimeOffset.UtcNow - editedAt < AutosaveDelay)
+        {
+            return;
+        }
+
+        autosaveInProgress = true;
+        AutosaveStateText.Text = "AUTOSAVING…";
+        AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSteelBlue;
+        try
+        {
+            var result = await recoveryService.AutosaveAsync(scene, lastProjectDirectory, cancellationToken: recoveryCancellation.Token);
+            var currentRevision = ProjectStore.ComputeSceneRevisionSha256(scene);
+            if (string.Equals(currentRevision, result.SceneRevisionSha256, StringComparison.Ordinal))
+            {
+                sceneEditedAtUtc = null;
+                AutosaveStateText.Text = result.CreatedAtUtc is { } created
+                    ? $"AUTOSAVED · {created.ToLocalTime():t}"
+                    : "AUTOSAVE CURRENT";
+                AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+            }
+            else
+            {
+                sceneEditedAtUtc = DateTimeOffset.UtcNow;
+                AutosaveStateText.Text = "UNSAVED · AUTOSAVE PENDING";
+                AutosaveStateText.Foreground = Avalonia.Media.Brushes.Goldenrod;
+            }
+        }
+        catch (OperationCanceledException) when (recoveryCancellation.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            sceneEditedAtUtc = DateTimeOffset.UtcNow;
+            AutosaveStateText.Text = "AUTOSAVE RETRY PENDING";
+            AutosaveStateText.Foreground = Avalonia.Media.Brushes.IndianRed;
+        }
+        finally
+        {
+            autosaveInProgress = false;
+        }
+    }
+
+    private async void OnDiscardRecoveryClicked(object? sender, RoutedEventArgs e)
+    {
+        if (!recoveredAutosaveActive || !recoveryReady)
+        {
+            return;
+        }
+        if (!discardRecoveryArmed)
+        {
+            discardRecoveryArmed = true;
+            DiscardRecoveryButton.Content = "Confirm discard";
+            StatusText.Text = "Discarding will reload the last explicit save. The recovered snapshot remains in local history; click Confirm discard to continue.";
+            return;
+        }
+
+        try
+        {
+            SceneDocument replacement;
+            string? replacementDirectory;
+            if (lastProjectDirectory is { } projectDirectory && File.Exists(Path.Combine(projectDirectory, "project.json")))
+            {
+                replacement = await ProjectStore.LoadAsync(projectDirectory, recoveryCancellation.Token);
+                replacementDirectory = projectDirectory;
+            }
+            else
+            {
+                replacement = SampleScenes.CreateFlyby();
+                replacementDirectory = null;
+            }
+            await recoveryService.ResetContextAsync(replacement, replacementDirectory, recoveryCancellation.Token);
+            initializingControls = true;
+            ApplySceneToControls(replacement, replacementDirectory);
+            ClearRecoveredState();
+            AutosaveStateText.Text = "AUTOSAVE READY";
+            AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+            StatusText.Text = replacementDirectory is null
+                ? "Recovered work discarded · opened a fresh unsaved scene"
+                : $"Recovered work discarded · reloaded the last explicit save · {replacementDirectory}";
+        }
+        catch (Exception exception)
+        {
+            discardRecoveryArmed = false;
+            DiscardRecoveryButton.Content = "Discard recovery";
+            StatusText.Text = $"Recovery was preserved because the saved project could not be reloaded safely: {exception.Message}";
+        }
+        finally
+        {
+            initializingControls = false;
+        }
+    }
+
+    private async Task ResetRecoveryContextAsync(SceneDocument replacement, string? projectDirectory)
+    {
+        if (!recoveryReady)
+        {
+            return;
+        }
+        await recoveryService.ResetContextAsync(replacement, projectDirectory, recoveryCancellation.Token);
+        AutosaveStateText.Text = "AUTOSAVE READY";
+        AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+    }
+
+    private async Task MarkRecoverySavedAsync(SceneDocument savedScene, string projectDirectory)
+    {
+        if (!recoveryReady)
+        {
+            return;
+        }
+        await recoveryService.MarkSavedAsync(savedScene, projectDirectory, recoveryCancellation.Token);
+        AutosaveStateText.Text = "SAVED · AUTOSAVE READY";
+        AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+    }
+
+    private void ClearRecoveredState()
+    {
+        var wasRecovered = recoveredAutosaveActive;
+        recoveredAutosaveActive = false;
+        discardRecoveryArmed = false;
+        DiscardRecoveryButton.Content = "Discard recovery";
+        DiscardRecoveryButton.IsVisible = false;
+        if (wasRecovered)
+        {
+            Title = $"PulseGen — {scene.Name}";
+            SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion}";
+        }
+    }
+
+    private void DisableRecovery(Exception exception)
+    {
+        recoveryReady = false;
+        autosaveTimer.Stop();
+        AutosaveStateText.Text = "AUTOSAVE UNAVAILABLE";
+        AutosaveStateText.Foreground = Avalonia.Media.Brushes.IndianRed;
+        System.Diagnostics.Trace.TraceError($"PulseGen autosave disabled: {exception}");
+    }
+
+    protected override async void OnClosing(WindowClosingEventArgs e)
+    {
+        if (closeFinalized || !recoveryReady)
+        {
+            if (!recoveryReady)
+            {
+                recoveryCancellation.Cancel();
+            }
+            base.OnClosing(e);
+            return;
+        }
+
+        base.OnClosing(e);
+        if (e.Cancel)
+        {
+            return;
+        }
+        if (closingInProgress)
+        {
+            e.Cancel = true;
+            return;
+        }
+        e.Cancel = true;
+        closingInProgress = true;
+        autosaveTimer.Stop();
+        AutosaveStateText.Text = sceneDirty ? "RETAINING UNSAVED WORK…" : "CLOSING CLEANLY…";
+        try
+        {
+            await recoveryService.CompleteAsync(scene, lastProjectDirectory, sceneDirty, CancellationToken.None);
+        }
+        catch
+        {
+            // Leave the session active. A prior snapshot can still be recovered after process exit.
+        }
+        closeFinalized = true;
+        Close();
+    }
+
     protected override void OnClosed(EventArgs e)
     {
+        autosaveTimer.Stop();
+        recoveryCancellation.Cancel();
         StopPreviewTransport();
         analysisCancellation?.Cancel();
         spectralCancellation?.Cancel();
@@ -3587,6 +3872,7 @@ public sealed partial class MainWindow : Window
         atlasIdentity?.Dispose();
         atlasHttp.Dispose();
         workspaceIndex.Dispose();
+        recoveryCancellation.Dispose();
         base.OnClosed(e);
     }
 
