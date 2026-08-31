@@ -1122,7 +1122,9 @@ int main(int argument_count, char** arguments)
     initial_device_status.version = PG_ABI_VERSION;
     REQUIRE(pg_engine_get_device_status(engine, &initial_device_status) == PG_STATUS_OK);
     REQUIRE(initial_device_status.running == 0U);
+    REQUIRE(initial_device_status.recoverable == 0U);
     REQUIRE(initial_device_status.frames_processed == 0U);
+    REQUIRE(pg_engine_recover_device(engine, 0U) == PG_STATUS_INVALID_ARGUMENT);
 
     pg_device_config invalid_device{};
     invalid_device.size = sizeof(invalid_device);
@@ -1206,18 +1208,27 @@ int main(int argument_count, char** arguments)
         status.version = PG_ABI_VERSION;
         REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
         REQUIRE(status.running == 1U);
+        REQUIRE(status.recoverable == 1U);
         REQUIRE(status.frames_processed > 0U);
         REQUIRE(status.callback_count > 0U);
+        REQUIRE(status.interruption_count == 0U);
+        REQUIRE(status.recovery_count == 0U);
+        REQUIRE(pg_engine_recover_device(audio_engine, 48000U) == PG_STATUS_OK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
+        REQUIRE(status.running == 1U);
+        REQUIRE(status.recoverable == 1U);
+        REQUIRE(status.frames_processed > 0U);
+        REQUIRE(status.callback_count > 0U);
+        REQUIRE(status.interruption_count == 0U);
+        REQUIRE(status.recovery_count == 1U);
         REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
         REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
         REQUIRE(status.running == 0U);
+        REQUIRE(status.recoverable == 0U);
+        REQUIRE(pg_engine_recover_device(audio_engine, 0U) == PG_STATUS_INVALID_ARGUMENT);
 
         std::vector<float> buffer_preview(4800U * 2U);
-        for (std::size_t frame = 0U; frame < buffer_preview.size() / 2U; ++frame) {
-            const float sample = static_cast<float>(0.1 * std::sin(2.0 * std::numbers::pi * 440.0 * static_cast<double>(frame) / 48000.0));
-            buffer_preview[frame * 2U] = sample;
-            buffer_preview[(frame * 2U) + 1U] = -sample;
-        }
         pg_buffer_device_config buffer_config{};
         buffer_config.size = sizeof(buffer_config);
         buffer_config.version = PG_ABI_VERSION;
@@ -1231,6 +1242,14 @@ int main(int argument_count, char** arguments)
         REQUIRE(status.running == 1U);
         REQUIRE(status.receiver_index == std::numeric_limits<std::uint32_t>::max());
         REQUIRE(status.frames_processed > 0U);
+        REQUIRE(status.recoverable == 1U);
+        REQUIRE(pg_engine_recover_device(audio_engine, buffer_config.frame_count + 1U) == PG_STATUS_INVALID_ARGUMENT);
+        REQUIRE(pg_engine_recover_device(audio_engine, buffer_config.frame_count / 2U) == PG_STATUS_OK);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        REQUIRE(pg_engine_get_device_status(audio_engine, &status) == PG_STATUS_OK);
+        REQUIRE(status.running == 1U);
+        REQUIRE(status.frames_processed > 0U);
+        REQUIRE(status.recovery_count == 1U);
         REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
         pg_engine_destroy(audio_engine);
         std::cout << "PULSEGEN_WASAPI_DEVICE_OK frames=" << status.frames_processed

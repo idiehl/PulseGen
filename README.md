@@ -107,7 +107,12 @@ commands and reads bounded telemetry.
 - Bounded in-process stereo-buffer audition through miniaudio/WASAPI. The native
   engine copies finite audio before device start, and its real-time callback only
   reads the preallocated buffer—no allocation, locks, file access, or managed
-  callback occurs on the audio thread.
+  callback occurs on the audio thread. If Windows removes, replaces, or reroutes
+  the output endpoint, the editor retains that scene or copied buffer, makes up
+  to five short backoff attempts against the current default device, and resumes
+  at the current timeline frame instead of restarting the sound. Reopen work is
+  kept off the audio callback, stopped auditions fail clearly after the bounded
+  retry window, and a live scene can continue as a visual-only preview.
 - Protected editor autosave and crash recovery. After eight seconds without a
   new scene edit, the editor writes a validated manifest snapshot to the local
   SQLite index while leaving the `.pulseproj` untouched. The newest 50 snapshots

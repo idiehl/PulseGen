@@ -21,11 +21,14 @@ public readonly record struct RenderSummary(
 
 public readonly record struct PreviewDeviceStatus(
     bool Running,
+    bool Recoverable,
     uint SampleRate,
     uint PeriodFrames,
     uint ReceiverIndex,
     ulong FramesProcessed,
-    ulong CallbackCount);
+    ulong CallbackCount,
+    uint InterruptionCount,
+    uint RecoveryCount);
 
 public static unsafe class NativeSceneRenderer
 {
@@ -397,6 +400,7 @@ public static unsafe class NativeSceneRenderer
 
     public sealed unsafe class PreviewSession : IDisposable
     {
+        private readonly object gate = new();
         private nint engine;
 
         internal PreviewSession(nint engineHandle)
@@ -408,32 +412,72 @@ public static unsafe class NativeSceneRenderer
         {
             get
             {
+                lock (gate)
+                {
+                    return ReadStatus();
+                }
+            }
+        }
+
+        public PreviewDeviceStatus RecoverAt(double timelineSeconds)
+        {
+            if (!double.IsFinite(timelineSeconds) || timelineSeconds < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timelineSeconds));
+            }
+
+            lock (gate)
+            {
                 var current = engine;
                 if (current == 0)
                 {
-                    return default;
+                    throw new ObjectDisposedException(nameof(PreviewSession));
                 }
-                var status = new NativeDeviceStatus { Size = (uint)sizeof(NativeDeviceStatus), Version = AbiVersion };
-                Check(Native.pg_engine_get_device_status(current, &status), current, "read preview device status");
-                return new(
-                    status.Running != 0,
-                    status.SampleRate,
-                    status.PeriodFrames,
-                    status.ReceiverIndex,
-                    status.FramesProcessed,
-                    status.CallbackCount);
+                var before = ReadStatus();
+                if (!before.Recoverable || before.SampleRate == 0)
+                {
+                    throw new InvalidOperationException("The preview no longer has retained audio-device state to recover.");
+                }
+                var resumeFrame = checked((ulong)Math.Round(timelineSeconds * before.SampleRate));
+                Check(Native.pg_engine_recover_device(current, resumeFrame), current, "recover the WASAPI preview");
+                return ReadStatus();
             }
         }
 
         public void Dispose()
         {
-            var current = Interlocked.Exchange(ref engine, 0);
+            lock (gate)
+            {
+                var current = engine;
+                if (current == 0)
+                {
+                    return;
+                }
+                engine = 0;
+                _ = Native.pg_engine_stop_device(current);
+                Native.pg_engine_destroy(current);
+            }
+        }
+
+        private PreviewDeviceStatus ReadStatus()
+        {
+            var current = engine;
             if (current == 0)
             {
-                return;
+                return default;
             }
-            _ = Native.pg_engine_stop_device(current);
-            Native.pg_engine_destroy(current);
+            var status = new NativeDeviceStatus { Size = (uint)sizeof(NativeDeviceStatus), Version = AbiVersion };
+            Check(Native.pg_engine_get_device_status(current, &status), current, "read preview device status");
+            return new(
+                status.Running != 0,
+                status.Recoverable != 0,
+                status.SampleRate,
+                status.PeriodFrames,
+                status.ReceiverIndex,
+                status.FramesProcessed,
+                status.CallbackCount,
+                status.InterruptionCount,
+                status.RecoveryCount);
         }
     }
 
@@ -1008,7 +1052,8 @@ public static unsafe class NativeSceneRenderer
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_atmosphere_field", out _) ||
-                !NativeLibrary.TryGetExport(candidate, "pg_engine_set_receiver_motion", out _))
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_set_receiver_motion", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_recover_device", out _))
             {
                 return false;
             }
@@ -1065,7 +1110,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; public uint RayCount, Seed; public double ImpulseResponseSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeBufferDeviceConfig { public uint Size, Version; public float* InterleavedStereo; public ulong FrameCount; public uint SampleRate, PeriodFrames, ExclusiveMode, Loop; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; public uint Recoverable, InterruptionCount, RecoveryCount, Reserved; }
 
     private static class Native
     {
@@ -1085,6 +1130,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_render_offline(nint engine, NativeRenderRequest* request, NativeRenderReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_device(nint engine, NativeDeviceConfig* config);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_start_buffer_device(nint engine, NativeBufferDeviceConfig* config);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_recover_device(nint engine, ulong resumeFrame);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_stop_device(nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_get_device_status(nint engine, NativeDeviceStatus* status);
     }

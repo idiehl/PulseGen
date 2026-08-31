@@ -42,6 +42,7 @@ public sealed partial class MainWindow : Window
     private SceneDocument scene = SampleScenes.CreateFlyby();
     private readonly DispatcherTimer previewTimer;
     private readonly DispatcherTimer autosaveTimer;
+    private readonly AudioDeviceRecoveryController audioDeviceRecovery = new();
     private DateTimeOffset previewStarted;
     private double previewDurationSeconds;
     private bool previewAdvancesScene = true;
@@ -3588,17 +3589,9 @@ public sealed partial class MainWindow : Window
             StatusText.Text = completionStatus;
             return;
         }
-        if (audioPreview is not null && !audioPreview.Status.Running)
+        if (!MaintainAudioPreview(DateTimeOffset.UtcNow, elapsed))
         {
-            audioPreview.Dispose();
-            audioPreview = null;
-            if (!previewAdvancesScene)
-            {
-                StopPreviewTransport();
-                StatusText.Text = previewInterruptedStatus;
-                return;
-            }
-            StatusText.Text = "Visual-only preview · the WASAPI device stopped or was rerouted";
+            return;
         }
 
         if (previewAdvancesScene)
@@ -3607,9 +3600,86 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private bool MaintainAudioPreview(DateTimeOffset now, double timelineSeconds)
+    {
+        if (audioPreview is null)
+        {
+            return true;
+        }
+
+        try
+        {
+            var currentStatus = audioPreview.Status;
+            if (currentStatus.Running)
+            {
+                if (audioDeviceRecovery.IsActive)
+                {
+                    audioDeviceRecovery.Cancel();
+                    StatusText.Text = $"Audio restored · Windows resumed the output device · {currentStatus.SampleRate:N0} Hz";
+                }
+                return true;
+            }
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Trace.TraceWarning($"PulseGen could not read preview device status before recovery: {exception.Message}");
+        }
+
+        if (audioDeviceRecovery.Begin(now))
+        {
+            StatusText.Text = $"Audio output changed · reconnecting to the current Windows device (attempt 1/{audioDeviceRecovery.MaximumAttempts})…";
+        }
+        if (!audioDeviceRecovery.IsAttemptDue(now))
+        {
+            return true;
+        }
+
+        var attempt = audioDeviceRecovery.NextAttemptNumber;
+        try
+        {
+            var recovered = audioPreview.RecoverAt(timelineSeconds);
+            if (!recovered.Running)
+            {
+                throw new InvalidOperationException("Windows reopened the endpoint, but playback did not enter the running state.");
+            }
+            var result = audioDeviceRecovery.CompleteAttempt(recovered: true, DateTimeOffset.UtcNow);
+            StatusText.Text =
+                $"Audio restored · reconnected on attempt {result.AttemptsCompleted}/{result.MaximumAttempts} · resumed at {timelineSeconds:0.000} s · {recovered.SampleRate:N0} Hz";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            var completedAt = DateTimeOffset.UtcNow;
+            var result = audioDeviceRecovery.CompleteAttempt(recovered: false, completedAt);
+            if (result.Outcome == AudioDeviceRecoveryOutcome.Waiting)
+            {
+                var delay = result.NextAttemptAtUtc!.Value - completedAt;
+                StatusText.Text =
+                    $"Audio device unavailable · reconnect attempt {attempt}/{result.MaximumAttempts} failed · next try in {delay.TotalSeconds:0.##} s: {exception.Message}";
+                return true;
+            }
+
+            var interruptionStatus = previewInterruptedStatus;
+            var attempts = result.AttemptsCompleted;
+            audioPreview.Dispose();
+            audioPreview = null;
+            audioDeviceRecovery.Cancel();
+            if (!previewAdvancesScene)
+            {
+                StopPreviewTransport();
+                StatusText.Text = $"{interruptionStatus} · automatic reconnect failed after {attempts} attempts: {exception.Message}";
+                return false;
+            }
+            StatusText.Text =
+                $"Visual-only preview · audio could not reconnect after {attempts} attempts: {exception.Message}";
+            return true;
+        }
+    }
+
     private void StopPreviewTransport()
     {
         previewTimer.Stop();
+        audioDeviceRecovery.Cancel();
         audioPreview?.Dispose();
         audioPreview = null;
         spectralAuditionPlaying = false;

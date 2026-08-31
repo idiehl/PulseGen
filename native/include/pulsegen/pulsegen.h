@@ -390,6 +390,10 @@ typedef struct pg_device_status {
     uint32_t receiver_index;
     uint64_t frames_processed;
     uint64_t callback_count;
+    uint32_t recoverable;
+    uint32_t interruption_count;
+    uint32_t recovery_count;
+    uint32_t reserved;
 } pg_device_status;
 
 PG_API uint32_t PG_CALL pg_get_abi_version(void);
@@ -431,6 +435,13 @@ PG_API pg_status PG_CALL pg_engine_render_offline(
 
 PG_API pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_config* config);
 PG_API pg_status PG_CALL pg_engine_start_buffer_device(pg_engine* engine, const pg_buffer_device_config* config);
+/*
+ * Reopens the current default output endpoint while retaining the configured
+ * scene or copied stereo buffer. The caller supplies the absolute scene or
+ * buffer frame at which playback should resume. This operation is never called
+ * from the real-time audio callback.
+ */
+PG_API pg_status PG_CALL pg_engine_recover_device(pg_engine* engine, uint64_t resume_frame);
 PG_API pg_status PG_CALL pg_engine_stop_device(pg_engine* engine);
 PG_API pg_status PG_CALL pg_engine_get_device_status(const pg_engine* engine, pg_device_status* status);
 
