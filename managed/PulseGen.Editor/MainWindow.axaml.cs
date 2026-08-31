@@ -3356,11 +3356,12 @@ public sealed partial class MainWindow : Window
                 var compatible = StudioExportChoices.EncodingsFor(container.Container);
                 StudioEncodingBox.ItemsSource = compatible;
                 StudioEncodingBox.SelectedItem = compatible.FirstOrDefault(choice => choice.Encoding == previousEncoding)
-                    ?? compatible.First(choice => choice.Encoding == StudioSampleEncoding.Pcm24);
+                    ?? compatible.FirstOrDefault(choice => choice.Encoding == StudioSampleEncoding.Pcm24)
+                    ?? compatible[0];
             }
 
             var encoding = (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding ?? StudioSampleEncoding.Pcm24;
-            if (encoding == StudioSampleEncoding.Float32)
+            if (encoding == StudioSampleEncoding.Float32 || StudioExportChoices.IsLossy(container.Container))
             {
                 StudioDitherBox.SelectedItem = StudioExportChoices.Dithers.First(choice => choice.Dither == DitherMode.None);
                 StudioDitherBox.IsEnabled = false;
@@ -3394,7 +3395,7 @@ public sealed partial class MainWindow : Window
             StudioEncodingBox.SelectedItem is not StudioEncodingChoice encoding ||
             StudioDitherBox.SelectedItem is not StudioDitherChoice dither)
         {
-            StatusText.Text = "Choose a studio file type, precision, and dither setting first";
+            StatusText.Text = "Choose a studio file type, encoding, and dither setting first";
             return;
         }
 
@@ -3455,7 +3456,8 @@ public sealed partial class MainWindow : Window
             var overload = exported.Metrics.TruePeakDbTp is > 0
                 ? " · WARNING: true peak exceeds 0 dBTP; no normalization was applied"
                 : " · normalization none";
-            StatusText.Text = $"{container.Name} master exported from {rendered.TakeIds.Count} takes · {StudioMetricsSummary(exported.Metrics)}{overload} · {exported.OutputPath}";
+            var rateConversion = exported.SampleRateConversion is null ? string.Empty : $" · {exported.SampleRateConversion}";
+            StatusText.Text = $"{container.Name} master exported from {rendered.TakeIds.Count} takes · {StudioMetricsSummary(exported.Metrics)}{overload}{rateConversion} · {exported.OutputPath}";
         }
         catch (OperationCanceledException)
         {
@@ -3498,7 +3500,10 @@ public sealed partial class MainWindow : Window
         ReceiverMasterRenderButton.IsEnabled = !busy && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
         StudioContainerBox.IsEnabled = !busy;
         StudioEncodingBox.IsEnabled = !busy;
-        StudioDitherBox.IsEnabled = !busy && (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding != StudioSampleEncoding.Float32;
+        var studioContainer = (StudioContainerBox.SelectedItem as StudioContainerChoice)?.Container ?? StudioExportContainer.BroadcastWave;
+        StudioDitherBox.IsEnabled = !busy &&
+            (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding != StudioSampleEncoding.Float32 &&
+            !StudioExportChoices.IsLossy(studioContainer);
     }
 
     private void SetReceiverTakeActionsEnabled(bool enabled)

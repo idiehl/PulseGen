@@ -22,6 +22,9 @@ jobs:
           python -m pip install numpy==2.0.2
           "PULSEGEN_MODELHOST_PYTHON=$((Get-Command python).Source)" | Out-File -FilePath $env:GITHUB_ENV -Append
           "PULSEGEN_MODELHOST_ROOT=$((Resolve-Path modelhost).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Bootstrap checksum-pinned codec runtime
+        shell: pwsh
+        run: ./scripts/bootstrap-codecs.ps1
       - name: Restore managed projects
         run: dotnet restore PulseGen.sln
       - name: Build managed projects

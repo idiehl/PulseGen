@@ -13,7 +13,11 @@ internal enum StudioExportContainer
     Wave,
     BroadcastWave,
     Rf64BroadcastWave,
-    Aiff
+    Aiff,
+    Flac,
+    Mp3,
+    OggVorbis,
+    Opus
 }
 
 internal enum StudioSampleEncoding
@@ -21,7 +25,9 @@ internal enum StudioSampleEncoding
     Pcm16,
     Pcm24,
     Pcm32,
-    Float32
+    Float32,
+    LossyHigh,
+    LossyCompact
 }
 
 internal sealed record StudioContainerChoice(
@@ -52,7 +58,11 @@ internal static class StudioExportChoices
         new(StudioExportContainer.Wave, "WAV", ".wav", "Standard WAVE; PCM or 32-bit float."),
         new(StudioExportContainer.BroadcastWave, "BWF", ".wav", "Broadcast WAVE with embedded provenance and loudness fields."),
         new(StudioExportContainer.Rf64BroadcastWave, "RF64 / BWF", ".wav", "Large-file broadcast WAVE using 64-bit size fields."),
-        new(StudioExportContainer.Aiff, "AIFF", ".aiff", "Big-endian uncompressed PCM for studio interchange.")
+        new(StudioExportContainer.Aiff, "AIFF", ".aiff", "Big-endian uncompressed PCM for studio interchange."),
+        new(StudioExportContainer.Flac, "FLAC", ".flac", "Lossless compression with explicit 16-bit or 24-bit PCM precision."),
+        new(StudioExportContainer.Mp3, "MP3", ".mp3", "Widely compatible lossy delivery using deterministic LAME variable-bitrate encoding."),
+        new(StudioExportContainer.OggVorbis, "Ogg Vorbis", ".ogg", "Open lossy delivery format with a canonical, repeatable Ogg stream identity."),
+        new(StudioExportContainer.Opus, "Opus", ".opus", "Efficient open delivery codec; unsupported source rates are explicitly converted to an Opus rate.")
     ];
 
     public static IReadOnlyList<StudioEncodingChoice> Encodings { get; } =
@@ -63,16 +73,37 @@ internal static class StudioExportChoices
         new(StudioSampleEncoding.Float32, "32-bit float")
     ];
 
+    public static IReadOnlyList<StudioEncodingChoice> LosslessEncodings { get; } =
+    [
+        new(StudioSampleEncoding.Pcm16, "16-bit PCM"),
+        new(StudioSampleEncoding.Pcm24, "24-bit PCM")
+    ];
+
+    public static IReadOnlyList<StudioEncodingChoice> LossyEncodings { get; } =
+    [
+        new(StudioSampleEncoding.LossyHigh, "High-quality VBR"),
+        new(StudioSampleEncoding.LossyCompact, "Compact VBR")
+    ];
+
     public static IReadOnlyList<StudioDitherChoice> Dithers { get; } =
     [
         new(DitherMode.Tpdf, "TPDF"),
         new(DitherMode.None, "None")
     ];
 
-    public static IReadOnlyList<StudioEncodingChoice> EncodingsFor(StudioExportContainer container) =>
-        container == StudioExportContainer.Wave
-            ? Encodings
-            : Encodings.Where(choice => choice.Encoding != StudioSampleEncoding.Float32).ToArray();
+    public static IReadOnlyList<StudioEncodingChoice> EncodingsFor(StudioExportContainer container) => container switch
+    {
+        StudioExportContainer.Wave => Encodings,
+        StudioExportContainer.Flac => LosslessEncodings,
+        StudioExportContainer.Mp3 or StudioExportContainer.OggVorbis or StudioExportContainer.Opus => LossyEncodings,
+        _ => Encodings.Where(choice => choice.Encoding != StudioSampleEncoding.Float32).ToArray()
+    };
+
+    public static bool IsLossy(StudioExportContainer container) =>
+        container is StudioExportContainer.Mp3 or StudioExportContainer.OggVorbis or StudioExportContainer.Opus;
+
+    public static bool UsesCodecAdapter(StudioExportContainer container) =>
+        container is StudioExportContainer.Flac or StudioExportContainer.Mp3 or StudioExportContainer.OggVorbis or StudioExportContainer.Opus;
 }
 
 internal sealed record StudioExportRequest
@@ -100,7 +131,14 @@ internal sealed record StudioExportResult(
     StudioAudioMetrics Metrics,
     int SampleRate,
     int Frames,
-    int BitsPerSample,
+    int? BitsPerSample,
+    int MeasurementSourceSampleRate,
+    int MeasurementSourceFrames,
+    bool Lossy,
+    string EncoderName,
+    string EncoderVersion,
+    string EncoderSettings,
+    string? SampleRateConversion,
     IReadOnlyList<Guid> TakeIds,
     long QuantizerSaturationCount);
 
@@ -111,7 +149,7 @@ internal sealed record StudioExportImportResult(
 
 internal sealed record StudioExportReceipt
 {
-    public int ReceiptVersion { get; init; } = 1;
+    public int ReceiptVersion { get; init; } = 2;
     public required Guid ProjectId { get; init; }
     public required string ProjectName { get; init; }
     public required string SceneRevisionSha256 { get; init; }
@@ -121,11 +159,18 @@ internal sealed record StudioExportReceipt
     public required long OutputSizeBytes { get; init; }
     public required StudioExportContainer Container { get; init; }
     public required StudioSampleEncoding Encoding { get; init; }
-    public required int BitsPerSample { get; init; }
+    public int? BitsPerSample { get; init; }
     public required int SampleRate { get; init; }
     public int Channels { get; init; } = 2;
     public required int Frames { get; init; }
     public required double DurationSeconds { get; init; }
+    public required int MeasurementSourceSampleRate { get; init; }
+    public required int MeasurementSourceFrames { get; init; }
+    public required bool Lossy { get; init; }
+    public required string EncoderName { get; init; }
+    public required string EncoderVersion { get; init; }
+    public required string EncoderSettings { get; init; }
+    public string? SampleRateConversion { get; init; }
     public required DitherMode Dither { get; init; }
     public required ulong DitherSeed { get; init; }
     public bool NormalizationApplied { get; init; }
@@ -155,20 +200,38 @@ internal static class StudioMasterExporter
         var directory = Path.GetDirectoryName(output) ?? throw new InvalidOperationException("The export destination needs a parent directory.");
         Directory.CreateDirectory(directory);
         var temporary = output + $".{Guid.NewGuid():N}.tmp";
-        long quantizerSaturationCount;
+        CodecWriteSummary writeSummary;
         try
         {
-            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.WriteThrough))
+            if (StudioExportChoices.UsesCodecAdapter(request.Container))
             {
-                quantizerSaturationCount = request.Container switch
+                writeSummary = SndFileCodecAdapter.Write(temporary, request, buffer, cancellationToken);
+            }
+            else
+            {
+                long quantizerSaturationCount;
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1024 * 1024, FileOptions.WriteThrough))
                 {
-                    StudioExportContainer.Wave => WriteWave(stream, request, buffer, metrics, broadcast: false, rf64: false, cancellationToken),
-                    StudioExportContainer.BroadcastWave => WriteWave(stream, request, buffer, metrics, broadcast: true, rf64: false, cancellationToken),
-                    StudioExportContainer.Rf64BroadcastWave => WriteWave(stream, request, buffer, metrics, broadcast: true, rf64: true, cancellationToken),
-                    StudioExportContainer.Aiff => WriteAiff(stream, request, buffer, cancellationToken),
-                    _ => throw new ArgumentOutOfRangeException(nameof(request), "Unknown studio container.")
-                };
-                stream.Flush(flushToDisk: true);
+                    quantizerSaturationCount = request.Container switch
+                    {
+                        StudioExportContainer.Wave => WriteWave(stream, request, buffer, metrics, broadcast: false, rf64: false, cancellationToken),
+                        StudioExportContainer.BroadcastWave => WriteWave(stream, request, buffer, metrics, broadcast: true, rf64: false, cancellationToken),
+                        StudioExportContainer.Rf64BroadcastWave => WriteWave(stream, request, buffer, metrics, broadcast: true, rf64: true, cancellationToken),
+                        StudioExportContainer.Aiff => WriteAiff(stream, request, buffer, cancellationToken),
+                        _ => throw new ArgumentOutOfRangeException(nameof(request), "Unknown studio container.")
+                    };
+                    stream.Flush(flushToDisk: true);
+                }
+                writeSummary = new(
+                    buffer.SampleRate,
+                    buffer.Frames,
+                    BitsPerSample(request.Encoding),
+                    quantizerSaturationCount,
+                    false,
+                    "PulseGen direct writer",
+                    request.EngineVersion,
+                    DirectWriterSettings(request),
+                    null);
             }
             File.Move(temporary, output, overwrite: true);
         }
@@ -182,7 +245,6 @@ internal static class StudioMasterExporter
 
         var file = new FileInfo(output);
         var hash = ComputeSha256(output);
-        var bits = BitsPerSample(request.Encoding);
         var receipt = new StudioExportReceipt
         {
             ProjectId = request.ProjectId,
@@ -194,27 +256,65 @@ internal static class StudioMasterExporter
             OutputSizeBytes = file.Length,
             Container = request.Container,
             Encoding = request.Encoding,
-            BitsPerSample = bits,
-            SampleRate = buffer.SampleRate,
-            Frames = buffer.Frames,
-            DurationSeconds = buffer.DurationSeconds,
+            BitsPerSample = writeSummary.BitsPerSample,
+            SampleRate = writeSummary.SampleRate,
+            Frames = writeSummary.Frames,
+            DurationSeconds = (double)writeSummary.Frames / writeSummary.SampleRate,
+            MeasurementSourceSampleRate = buffer.SampleRate,
+            MeasurementSourceFrames = buffer.Frames,
+            Lossy = writeSummary.Lossy,
+            EncoderName = writeSummary.EncoderName,
+            EncoderVersion = writeSummary.EncoderVersion,
+            EncoderSettings = writeSummary.EncoderSettings,
+            SampleRateConversion = writeSummary.SampleRateConversion,
             Dither = request.Dither,
             DitherSeed = request.DitherSeed,
             Metrics = metrics,
-            QuantizerSaturationCount = quantizerSaturationCount,
+            QuantizerSaturationCount = writeSummary.QuantizerSaturationCount,
             CreatedAtUtc = request.CreatedAtUtc,
             EngineVersion = request.EngineVersion
         };
         var receiptPath = output + ".pulse-receipt.json";
         WriteReceiptAtomic(receiptPath, receipt);
-        return new(output, receiptPath, hash, file.Length, metrics, buffer.SampleRate, buffer.Frames, bits, request.TakeIds, quantizerSaturationCount);
+        return new(
+            output,
+            receiptPath,
+            hash,
+            file.Length,
+            metrics,
+            writeSummary.SampleRate,
+            writeSummary.Frames,
+            writeSummary.BitsPerSample,
+            buffer.SampleRate,
+            buffer.Frames,
+            writeSummary.Lossy,
+            writeSummary.EncoderName,
+            writeSummary.EncoderVersion,
+            writeSummary.EncoderSettings,
+            writeSummary.SampleRateConversion,
+            request.TakeIds,
+            writeSummary.QuantizerSaturationCount);
     }
 
-    public static string MediaType(StudioExportContainer container) =>
-        container == StudioExportContainer.Aiff ? "audio/aiff" : "audio/wav";
+    public static string MediaType(StudioExportContainer container) => container switch
+    {
+        StudioExportContainer.Aiff => "audio/aiff",
+        StudioExportContainer.Flac => "audio/flac",
+        StudioExportContainer.Mp3 => "audio/mpeg",
+        StudioExportContainer.OggVorbis => "audio/ogg",
+        StudioExportContainer.Opus => "audio/opus",
+        _ => "audio/wav"
+    };
 
-    public static string Extension(StudioExportContainer container) =>
-        container == StudioExportContainer.Aiff ? ".aiff" : ".wav";
+    public static string Extension(StudioExportContainer container) => container switch
+    {
+        StudioExportContainer.Aiff => ".aiff",
+        StudioExportContainer.Flac => ".flac",
+        StudioExportContainer.Mp3 => ".mp3",
+        StudioExportContainer.OggVorbis => ".ogg",
+        StudioExportContainer.Opus => ".opus",
+        _ => ".wav"
+    };
 
     private static void Validate(StudioExportRequest request, FloatWaveBuffer buffer)
     {
@@ -235,10 +335,14 @@ internal static class StudioMasterExporter
         var extension = Path.GetExtension(request.DestinationPath);
         var extensionMatches = request.Container == StudioExportContainer.Aiff
             ? extension.Equals(".aif", StringComparison.OrdinalIgnoreCase) || extension.Equals(".aiff", StringComparison.OrdinalIgnoreCase)
-            : extension.Equals(".wav", StringComparison.OrdinalIgnoreCase);
+            : extension.Equals(Extension(request.Container), StringComparison.OrdinalIgnoreCase);
         if (!extensionMatches)
         {
             throw new ArgumentException($"The selected container requires a {Extension(request.Container)} file name.", nameof(request));
+        }
+        if (!StudioExportChoices.EncodingsFor(request.Container).Any(choice => choice.Encoding == request.Encoding))
+        {
+            throw new ArgumentException($"{request.Encoding} is not available in {request.Container}.", nameof(request));
         }
         if (request.Encoding == StudioSampleEncoding.Float32)
         {
@@ -251,6 +355,13 @@ internal static class StudioMasterExporter
                 throw new ArgumentException("Dither applies only when reducing audio to integer PCM.", nameof(request));
             }
         }
+        else if (StudioExportChoices.IsLossy(request.Container))
+        {
+            if (request.Dither != DitherMode.None)
+            {
+                throw new ArgumentException("Lossy encoders accept the measured floating-point master directly; PCM dither does not apply.", nameof(request));
+            }
+        }
         else if (request.Dither is not (DitherMode.None or DitherMode.Tpdf))
         {
             throw new ArgumentException("The selected integer dither mode is unsupported.", nameof(request));
@@ -260,6 +371,11 @@ internal static class StudioMasterExporter
             throw new InvalidOperationException("The mix exceeds 0 dBFS. Choose 32-bit float WAV or reduce the arranged take gain; PulseGen will not silently normalize or clip it.");
         }
     }
+
+    private static string DirectWriterSettings(StudioExportRequest request) =>
+        request.Encoding == StudioSampleEncoding.Float32
+            ? "32-bit IEEE float; no normalization"
+            : $"{BitsPerSample(request.Encoding)}-bit PCM; dither={request.Dither}; no normalization";
 
     private static long WriteWave(
         Stream stream,
@@ -738,7 +854,15 @@ internal static class StudioExportProjectImporter
         var receiptTakeIds = root.GetProperty("takeIds").EnumerateArray().Select(value => value.GetGuid()).ToArray();
         var standards = root.GetProperty("measurementStandards").EnumerateArray().Select(value => value.GetString()).ToArray();
         var metrics = root.GetProperty("metrics");
-        var valid = root.GetProperty("receiptVersion").GetInt32() == 1 &&
+        var bitsElement = root.GetProperty("bitsPerSample");
+        var bitsValid = exported.BitsPerSample is { } bits
+            ? bitsElement.ValueKind == JsonValueKind.Number && bitsElement.GetInt32() == bits
+            : bitsElement.ValueKind == JsonValueKind.Null;
+        var conversionElement = root.GetProperty("sampleRateConversion");
+        var conversionValid = exported.SampleRateConversion is null
+            ? conversionElement.ValueKind == JsonValueKind.Null
+            : string.Equals(conversionElement.GetString(), exported.SampleRateConversion, StringComparison.Ordinal);
+        var valid = root.GetProperty("receiptVersion").GetInt32() == 2 &&
             root.GetProperty("projectId").GetGuid() == scene.ProjectId &&
             string.Equals(root.GetProperty("projectName").GetString(), request.ProjectName, StringComparison.Ordinal) &&
             string.Equals(root.GetProperty("sceneRevisionSha256").GetString(), revision, StringComparison.OrdinalIgnoreCase) &&
@@ -748,11 +872,18 @@ internal static class StudioExportProjectImporter
             root.GetProperty("outputSizeBytes").GetInt64() == output.Length &&
             string.Equals(root.GetProperty("container").GetString(), request.Container.ToString(), StringComparison.Ordinal) &&
             string.Equals(root.GetProperty("encoding").GetString(), request.Encoding.ToString(), StringComparison.Ordinal) &&
-            root.GetProperty("bitsPerSample").GetInt32() == exported.BitsPerSample &&
+            bitsValid &&
             root.GetProperty("sampleRate").GetInt32() == exported.SampleRate &&
             root.GetProperty("channels").GetInt32() == 2 &&
             root.GetProperty("frames").GetInt32() == exported.Frames &&
             SameDouble(root.GetProperty("durationSeconds"), (double)exported.Frames / exported.SampleRate) &&
+            root.GetProperty("measurementSourceSampleRate").GetInt32() == exported.MeasurementSourceSampleRate &&
+            root.GetProperty("measurementSourceFrames").GetInt32() == exported.MeasurementSourceFrames &&
+            root.GetProperty("lossy").GetBoolean() == exported.Lossy &&
+            string.Equals(root.GetProperty("encoderName").GetString(), exported.EncoderName, StringComparison.Ordinal) &&
+            string.Equals(root.GetProperty("encoderVersion").GetString(), exported.EncoderVersion, StringComparison.Ordinal) &&
+            string.Equals(root.GetProperty("encoderSettings").GetString(), exported.EncoderSettings, StringComparison.Ordinal) &&
+            conversionValid &&
             string.Equals(root.GetProperty("dither").GetString(), request.Dither.ToString(), StringComparison.Ordinal) &&
             root.GetProperty("ditherSeed").GetUInt64() == request.DitherSeed &&
             !root.GetProperty("normalizationApplied").GetBoolean() &&

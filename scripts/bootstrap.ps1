@@ -51,6 +51,11 @@ foreach ($path in ($cmake, $ninja, $vcvars)) {
     }
 }
 
+& (Join-Path $PSScriptRoot 'bootstrap-codecs.ps1')
+if ($LASTEXITCODE -ne 0) {
+    throw 'Codec runtime bootstrap failed.'
+}
+
 if ($IncludeModelHost) {
     & (Join-Path $PSScriptRoot 'bootstrap-modelhost.ps1')
     if ($LASTEXITCODE -ne 0) {

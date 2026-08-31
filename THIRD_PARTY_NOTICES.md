@@ -1,8 +1,9 @@
 # PulseGen third-party dependency ledger
 
-No third-party source or model weights are committed in this initial foundation.
-Pinned sources are downloaded into ignored build output and verified before
-compilation. `dependencies.lock.json` records active and intended adapters.
+No third-party source, binary, or model weights are committed in this repository.
+Pinned sources and runtime binaries are downloaded into ignored build output and
+verified before compilation or loading. `dependencies.lock.json` records active
+and intended adapters.
 
 Before a dependency moves from `planned` or `interface-ready-not-vendored` to
 enabled, record its exact release/commit, downloaded artifact SHA-256, license
@@ -30,3 +31,26 @@ disabled in production builds. Source is fetched from immutable commit
 SHA-256 recorded in `dependencies.lock.json`. The upstream license text remains
 available in the checksum-verified fetched source tree and must be included in
 packaged distributions.
+
+## libsndfile 1.2.2 and bundled codec implementations
+
+PulseGen dynamically loads the official `libsndfile-1.2.2-win64.zip` release to
+write and verify FLAC, MP3, Ogg Vorbis, and Ogg Opus masters. The release archive
+and extracted `sndfile.dll` are checked against the SHA-256 values in
+`dependencies.lock.json`; the managed loader repeats the DLL check before any
+native code executes. `dumpbin /DEPENDENTS` reports only `KERNEL32.dll`, so the
+codec implementations are contained within that official DLL rather than copied
+into PulseGen itself.
+
+libsndfile is used under LGPL-2.1-or-later through a replaceable DLL boundary.
+The exact LGPL 2.1 text from the 1.2.2 tag is downloaded, checksum-verified, and
+stored beside the runtime as `COPYING-libsndfile-LGPL-2.1.txt`. Packaged builds
+must include that file, identify the DLL as replaceable, and preserve access to
+the corresponding upstream source.
+
+The pinned DLL identifies its bundled encoders as libFLAC 1.4.2, LAME 3.100,
+libopus 1.4, and Xiph.Org libVorbis I 20200704. FLAC, Ogg, Vorbis, and Opus use
+Xiph/BSD-style licenses; LAME uses LGPL. Their copyright notices and applicable
+license texts must accompany a distributable PulseGen package. This development
+milestone does not yet produce the signed installer, so installer-level license
+assembly remains part of packaging hardening rather than being implied complete.

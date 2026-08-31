@@ -634,10 +634,10 @@
                     <TextBlock x:Name="StudioExportDescriptionText" Grid.Column="1" Text="Broadcast WAV with embedded measurements" Foreground="#67798E" FontSize="9" TextTrimming="CharacterEllipsis" />
                     <TextBlock Grid.Row="1" Text="File" Foreground="#8192A7" VerticalAlignment="Center" />
                     <ComboBox x:Name="StudioContainerBox" Grid.Row="1" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" />
-                    <TextBlock Grid.Row="2" Text="Depth" Foreground="#8192A7" VerticalAlignment="Center" />
+                    <TextBlock Grid.Row="2" Text="Encoding" Foreground="#8192A7" VerticalAlignment="Center" />
                     <ComboBox x:Name="StudioEncodingBox" Grid.Row="2" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" />
                     <TextBlock Grid.Row="3" Text="Dither" Foreground="#8192A7" VerticalAlignment="Center" />
-                    <ComboBox x:Name="StudioDitherBox" Grid.Row="3" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" ToolTip.Tip="TPDF adds a tiny, repeatable noise floor when reducing audio to integer precision. Float exports do not use dither." />
+                    <ComboBox x:Name="StudioDitherBox" Grid.Row="3" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" ToolTip.Tip="TPDF adds a tiny, repeatable noise floor when reducing audio to integer precision. Float and lossy exports do not use PCM dither." />
                   </Grid>
                 </Border>
                 <TextBlock x:Name="ReceiverMasterMetricsText" Text="Export measures LUFS and true peak; it never auto-normalizes." TextWrapping="Wrap" Foreground="#8C9EB2" FontSize="9" />

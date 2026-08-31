@@ -89,12 +89,19 @@ commands and reads bounded telemetry.
   auditioned in process. The studio-master workflow exports standard WAV,
   metadata-rich BWF, RF64/BWF, or AIFF with explicit 16/24/32-bit PCM choices,
   deterministic optional TPDF dither, plus unclipped 32-bit-float standard WAV.
+  It also exports 16/24-bit lossless FLAC and high-quality or compact VBR MP3,
+  Ogg Vorbis, and Opus. MP3 and Opus use deterministic offline sample-rate
+  conversion when the project rate is outside the codec's valid set; the UI and
+  receipt disclose both rates instead of silently relabeling the audio.
   Each master is measured for gated programme loudness (LUFS), loudness range,
   sample peak, and oversampled true peak. No normalization is applied: integer
   export rejects an overloaded mix and float WAV preserves it with an explicit
   warning. A SHA-256 receipt records scene revision, included take IDs, file
-  identity, precision, dither seed, measurements, and engine version; both the
-  verified audio and receipt become immutable project assets. Render receipts
+  identity, precision or VBR profile, lossiness, encoder/version/settings,
+  source and encoded rates, dither seed, measurements, and engine version; both
+  the verified audio and receipt become immutable project assets. Ogg exports
+  receive a deterministic stream identity with repaired page checksums, so all
+  eight containers are repeatable for the same input and request. Render receipts
   identify each source output by receiver GUID and name before any project import
   is accepted.
 - Bounded in-process stereo-buffer audition through miniaudio/WASAPI. The native
@@ -112,9 +119,8 @@ commands and reads bounded telemetry.
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
-Steam Audio, KISS FFT, libsndfile, compressed codec packs (FLAC, MP3, Vorbis,
-and Opus), GPU model execution, full mesh
-authoring, and triangle-level imported-mesh viewport rendering remain explicit
+Steam Audio, KISS FFT, GPU model execution, full mesh authoring, and
+triangle-level imported-mesh viewport rendering remain explicit
 adapters; their dependency records prevent an unfinished integration from being
 presented as active.
 
@@ -130,6 +136,11 @@ than reflection paths.
 ./scripts/build.ps1 -Configuration Release
 ./scripts/verify.ps1 -Configuration Release
 ```
+
+Bootstrap downloads the official libsndfile 1.2.2 Windows codec package into
+the ignored `.runtime` directory, verifies the archive, DLL, and license with
+the hashes in `dependencies.lock.json`, and never accepts a different DLL at
+runtime. The application links to it dynamically.
 
 Run the editor after a successful build:
 

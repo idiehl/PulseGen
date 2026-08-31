@@ -29,9 +29,22 @@
       "purpose": "STFT and convolution"
     },
     "libsndfile": {
-      "status": "adapter-planned",
+      "version": "1.2.2",
+      "archiveUrl": "https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2-win64.zip",
+      "archiveSha256": "2173935c0c1ed13cf627951d34483f9d405ead2eb473190461c42ba220643a3f",
+      "binarySha256": "4e3bd2de8e1485110eaebef8e1239471f73d608773831c323bf528e05645655e",
+      "licenseUrl": "https://raw.githubusercontent.com/libsndfile/libsndfile/1.2.2/COPYING",
+      "licenseSha256": "ad01ea5cd2755f6048383c8d54c88459cd6fcb17757c5c8892f8c5ea060f6140",
+      "status": "active-dynamic-codec-export",
       "license": "LGPL-2.1-or-later",
-      "purpose": "lossless audio formats"
+      "linkage": "runtime-dynamic",
+      "purpose": "FLAC, MP3, Ogg Vorbis, and Ogg Opus export/import verification",
+      "bundledCodecVersions": {
+        "flac": "1.4.2",
+        "lame": "3.100",
+        "opus": "1.4",
+        "vorbis": "20200704"
+      }
     },
     "assimp": {
       "version": "6.0.5",

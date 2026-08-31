@@ -30,6 +30,10 @@ if (Test-Path -LiteralPath $nativeCache) {
 $originalLocation = Get-Location
 try {
     Set-Location -LiteralPath $repositoryRoot
+    & (Join-Path $PSScriptRoot 'bootstrap-codecs.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Codec runtime bootstrap failed.'
+    }
     # Expand the caller PATH before vcvars augments it. Appending %PATH% after
     # vcvars on the same cmd.exe line expands too early and silently discards cl.exe.
     $nativeCommand = "set `"PATH=$cmakeDirectory;$ninjaDirectory;%PATH%`" && call `"$vcvars`" && cmake$refreshConfigure --preset $preset && cmake --build --preset $preset"

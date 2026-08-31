@@ -20,4 +20,13 @@
   <ItemGroup>
     <InternalsVisibleTo Include="PulseGen.Editor.Tests" />
   </ItemGroup>
+  <PropertyGroup>
+    <PulseGenSndFilePath>$(MSBuildProjectDirectory)\..\..\.runtime\codecs\libsndfile-1.2.2\sndfile.dll</PulseGenSndFilePath>
+  </PropertyGroup>
+  <Target Name="RequirePulseGenCodecRuntime" BeforeTargets="PrepareForBuild" Condition="!Exists('$(PulseGenSndFilePath)')">
+    <Error Text="The pinned libsndfile runtime is missing. Run scripts/bootstrap-codecs.ps1." />
+  </Target>
+  <ItemGroup>
+    <None Include="$(PulseGenSndFilePath)" Link="sndfile.dll" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
