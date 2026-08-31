@@ -621,18 +621,30 @@
           </Border>
         </Grid>
 
-        <Grid x:Name="ReceiverTakesWorkspace" Grid.Row="1" ColumnDefinitions="250,*,320" Margin="10,0,10,10" IsVisible="False">
+        <Grid x:Name="ReceiverTakesWorkspace" Grid.Row="1" ColumnDefinitions="285,*,320" Margin="10,0,10,10" IsVisible="False">
           <Border Classes="panel" Padding="11">
             <Grid RowDefinitions="Auto,*,Auto">
               <TextBlock Classes="sectionTitle" Text="RECORDED LISTENING POINTS" />
               <ListBox x:Name="ReceiverTakeList" Grid.Row="1" Margin="0,7" SelectionChanged="OnReceiverTakeSelectionChanged" />
               <StackPanel Grid.Row="2" Spacing="4">
                 <TextBlock x:Name="ReceiverTakeCountText" Text="No project takes yet" Foreground="#83D8CD" FontSize="10" />
+                <Border Background="#121A24" BorderBrush="#29364A" BorderThickness="1" CornerRadius="5" Padding="7,5">
+                  <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="7" RowSpacing="3">
+                    <TextBlock Text="STUDIO MASTER" Classes="sectionTitle" />
+                    <TextBlock x:Name="StudioExportDescriptionText" Grid.Column="1" Text="Broadcast WAV with embedded measurements" Foreground="#67798E" FontSize="9" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Grid.Row="1" Text="File" Foreground="#8192A7" VerticalAlignment="Center" />
+                    <ComboBox x:Name="StudioContainerBox" Grid.Row="1" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" />
+                    <TextBlock Grid.Row="2" Text="Depth" Foreground="#8192A7" VerticalAlignment="Center" />
+                    <ComboBox x:Name="StudioEncodingBox" Grid.Row="2" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" />
+                    <TextBlock Grid.Row="3" Text="Dither" Foreground="#8192A7" VerticalAlignment="Center" />
+                    <ComboBox x:Name="StudioDitherBox" Grid.Row="3" Grid.Column="1" SelectionChanged="OnStudioExportSelectionChanged" ToolTip.Tip="TPDF adds a tiny, repeatable noise floor when reducing audio to integer precision. Float exports do not use dither." />
+                  </Grid>
+                </Border>
+                <TextBlock x:Name="ReceiverMasterMetricsText" Text="Export measures LUFS and true peak; it never auto-normalizes." TextWrapping="Wrap" Foreground="#8C9EB2" FontSize="9" />
                 <Grid ColumnDefinitions="*,*" ColumnSpacing="5">
                   <Button x:Name="ReceiverMasterHearButton" Content="▶ Master" IsEnabled="False" Click="OnHearReceiverMasterClicked" />
-                  <Button x:Name="ReceiverMasterRenderButton" Grid.Column="1" Content="⇥ Export WAV" IsEnabled="False" Background="#353056" Foreground="#DED7FA" Click="OnRenderReceiverMasterClicked" />
+                  <Button x:Name="ReceiverMasterRenderButton" Grid.Column="1" Content="⇥ Studio export" IsEnabled="False" Background="#353056" Foreground="#DED7FA" Click="OnRenderReceiverMasterClicked" ToolTip.Tip="Writes the chosen studio container plus a SHA-256 receipt. No normalization is applied." />
                 </Grid>
-                <TextBlock Text="Each saved render adds one take per receiver rig." TextWrapping="Wrap" Foreground="#67798E" FontSize="9" />
               </StackPanel>
             </Grid>
           </Border>

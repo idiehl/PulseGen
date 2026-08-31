@@ -86,10 +86,17 @@ commands and reads bounded telemetry.
   shows both channels on an arrangement timeline, and supports linked or
   independent mute/gain, non-destructive in/out trims, and timeline placement.
   A take, either isolated channel, or the selected multi-take master can be
-  auditioned in process. Adjusted mono L/R files and deterministic 32-bit-float
-  stereo masters export without hidden normalization; peaks above 0 dBFS are
-  reported instead of silently changed. Render receipts identify each output by
-  receiver GUID and name before any project import is accepted.
+  auditioned in process. The studio-master workflow exports standard WAV,
+  metadata-rich BWF, RF64/BWF, or AIFF with explicit 16/24/32-bit PCM choices,
+  deterministic optional TPDF dither, plus unclipped 32-bit-float standard WAV.
+  Each master is measured for gated programme loudness (LUFS), loudness range,
+  sample peak, and oversampled true peak. No normalization is applied: integer
+  export rejects an overloaded mix and float WAV preserves it with an explicit
+  warning. A SHA-256 receipt records scene revision, included take IDs, file
+  identity, precision, dither seed, measurements, and engine version; both the
+  verified audio and receipt become immutable project assets. Render receipts
+  identify each source output by receiver GUID and name before any project import
+  is accepted.
 - Bounded in-process stereo-buffer audition through miniaudio/WASAPI. The native
   engine copies finite audio before device start, and its real-time callback only
   reads the preallocated buffer—no allocation, locks, file access, or managed
@@ -105,7 +112,8 @@ commands and reads bounded telemetry.
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
-Steam Audio, KISS FFT, libsndfile, codec packs, GPU model execution, full mesh
+Steam Audio, KISS FFT, libsndfile, compressed codec packs (FLAC, MP3, Vorbis,
+and Opus), GPU model execution, full mesh
 authoring, and triangle-level imported-mesh viewport rendering remain explicit
 adapters; their dependency records prevent an unfinished integration from being
 presented as active.

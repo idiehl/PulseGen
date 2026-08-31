@@ -8,7 +8,10 @@ using PulseGen.Contracts;
 using PulseGen.Engine.Client;
 using PulseGen.ModelHost.Client;
 using PulseGen.Workspace;
+using System.Buffers.Binary;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace PulseGen.Editor;
@@ -79,6 +82,7 @@ public sealed partial class MainWindow : Window
     private int receiverTakeLoadVersion;
     private bool refreshingReceiverTakeControls;
     private bool receiverTakeAuditionPlaying;
+    private bool refreshingStudioExportControls;
 
     public MainWindow()
     {
@@ -106,6 +110,13 @@ public sealed partial class MainWindow : Window
         RenderSampleRateBox.ItemsSource = RenderProfileChoices.SampleRates;
         RenderSampleFormatBox.ItemsSource = RenderProfileChoices.SampleFormats;
         RenderDitherBox.ItemsSource = RenderProfileChoices.Dithers;
+        StudioContainerBox.ItemsSource = StudioExportChoices.Containers;
+        StudioContainerBox.SelectedItem = StudioExportChoices.Containers.First(choice => choice.Container == StudioExportContainer.BroadcastWave);
+        StudioEncodingBox.ItemsSource = StudioExportChoices.EncodingsFor(StudioExportContainer.BroadcastWave);
+        StudioEncodingBox.SelectedItem = StudioExportChoices.Encodings.First(choice => choice.Encoding == StudioSampleEncoding.Pcm24);
+        StudioDitherBox.ItemsSource = StudioExportChoices.Dithers;
+        StudioDitherBox.SelectedItem = StudioExportChoices.Dithers.First(choice => choice.Dither == DitherMode.Tpdf);
+        RefreshStudioExportChoices(refreshEncodingSource: true);
         AnalysisChannelModeBox.ItemsSource = new[]
         {
             new AnalysisModeChoice(
@@ -3322,6 +3333,51 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnStudioExportSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (!initializingControls && !refreshingStudioExportControls)
+        {
+            RefreshStudioExportChoices(refreshEncodingSource: ReferenceEquals(sender, StudioContainerBox));
+        }
+    }
+
+    private void RefreshStudioExportChoices(bool refreshEncodingSource)
+    {
+        if (StudioContainerBox.SelectedItem is not StudioContainerChoice container)
+        {
+            return;
+        }
+        refreshingStudioExportControls = true;
+        try
+        {
+            if (refreshEncodingSource)
+            {
+                var previousEncoding = (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding ?? StudioSampleEncoding.Pcm24;
+                var compatible = StudioExportChoices.EncodingsFor(container.Container);
+                StudioEncodingBox.ItemsSource = compatible;
+                StudioEncodingBox.SelectedItem = compatible.FirstOrDefault(choice => choice.Encoding == previousEncoding)
+                    ?? compatible.First(choice => choice.Encoding == StudioSampleEncoding.Pcm24);
+            }
+
+            var encoding = (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding ?? StudioSampleEncoding.Pcm24;
+            if (encoding == StudioSampleEncoding.Float32)
+            {
+                StudioDitherBox.SelectedItem = StudioExportChoices.Dithers.First(choice => choice.Dither == DitherMode.None);
+                StudioDitherBox.IsEnabled = false;
+            }
+            else
+            {
+                StudioDitherBox.IsEnabled = receiverTakeCancellation is null;
+                StudioDitherBox.SelectedItem ??= StudioExportChoices.Dithers.First(choice => choice.Dither == DitherMode.Tpdf);
+            }
+            StudioExportDescriptionText.Text = container.Description;
+        }
+        finally
+        {
+            refreshingStudioExportControls = false;
+        }
+    }
+
     private async void OnRenderReceiverMasterClicked(object? sender, RoutedEventArgs e)
     {
         if (lastProjectDirectory is null)
@@ -3329,51 +3385,85 @@ public sealed partial class MainWindow : Window
             StatusText.Text = "Save the project before building a recorded stereo master";
             return;
         }
+        if (sceneDirty)
+        {
+            StatusText.Text = "Save the current scene and take arrangement before exporting a studio master";
+            return;
+        }
+        if (StudioContainerBox.SelectedItem is not StudioContainerChoice container ||
+            StudioEncodingBox.SelectedItem is not StudioEncodingChoice encoding ||
+            StudioDitherBox.SelectedItem is not StudioDitherChoice dither)
+        {
+            StatusText.Text = "Choose a studio file type, precision, and dither setting first";
+            return;
+        }
+
+        var extension = StudioMasterExporter.Extension(container.Container);
+        var fileType = new FilePickerFileType(container.Name)
+        {
+            Patterns = [$"*{extension}"],
+            MimeTypes = [StudioMasterExporter.MediaType(container.Container)]
+        };
+        var destination = await StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Export a PulseGen stereo studio master",
+            SuggestedFileName = $"{SafeName(scene.Name)}-master-{DateTime.UtcNow:yyyyMMdd-HHmmss}{extension}",
+            DefaultExtension = extension[1..],
+            FileTypeChoices = [fileType],
+            SuggestedFileType = fileType,
+            ShowOverwritePrompt = true
+        });
+        if (destination is null)
+        {
+            return;
+        }
+
         StopPreviewTransport();
         SetReceiverTakeBusy(true);
         receiverTakeCancellation = new CancellationTokenSource();
         try
         {
+            StatusText.Text = "Building and measuring the arranged stereo master from verified take channels…";
             var rendered = await ReceiverTakeMixer.BuildMasterAsync(receiverTakeSessions, receiverTakeCancellation.Token);
-            var outputDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-                "PulseGen",
-                "Masters");
-            var output = Path.Combine(outputDirectory, $"{SafeName(scene.Name)}-master-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.wav");
-            await Task.Run(() => FloatWaveFile.WriteAtomic(output, rendered.Buffer), receiverTakeCancellation.Token);
-            var imported = await ProjectStore.ImportAssetAsync(
-                lastProjectDirectory,
-                output,
-                AssetKind.Render,
-                "audio/wav",
-                $"PulseGen receiver master; takes={string.Join(',', rendered.TakeIds.Select(id => id.ToString("D")))}; normalization=none",
-                cancellationToken: receiverTakeCancellation.Token);
-            imported = imported with
+            var revision = ProjectStore.ComputeSceneRevisionSha256(scene);
+            var request = new StudioExportRequest
             {
-                SampleRate = rendered.Buffer.SampleRate,
-                Channels = 2,
-                DurationSeconds = rendered.Buffer.DurationSeconds
+                DestinationPath = destination.Path.LocalPath,
+                Container = container.Container,
+                Encoding = encoding.Encoding,
+                Dither = dither.Dither,
+                DitherSeed = ComputeStudioDitherSeed(revision, rendered.TakeIds, encoding.Encoding),
+                ProjectId = scene.ProjectId,
+                ProjectName = scene.Name,
+                SceneRevisionSha256 = revision,
+                TakeIds = rendered.TakeIds,
+                CreatedAtUtc = DateTimeOffset.UtcNow
             };
-            var assets = scene.Assets.ToList();
-            var existing = assets.FirstOrDefault(asset => string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
-            if (existing is null)
-            {
-                assets.Add(imported);
-            }
-            else if (existing.Kind != imported.Kind || !string.Equals(existing.MediaType, imported.MediaType, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidDataException("The master collides with an existing asset that has incompatible metadata.");
-            }
-            scene = scene with { Assets = assets, UpdatedAtUtc = DateTimeOffset.UtcNow };
-            await ProjectStore.SaveAsync(scene, lastProjectDirectory, receiverTakeCancellation.Token);
+            var exported = await Task.Run(
+                () => StudioMasterExporter.Export(request, rendered.Buffer, receiverTakeCancellation.Token),
+                receiverTakeCancellation.Token);
+            var imported = await StudioExportProjectImporter.ImportAsync(
+                scene,
+                lastProjectDirectory,
+                request,
+                exported,
+                receiverTakeCancellation.Token);
+            scene = imported.Scene;
             Viewport.Scene = scene;
             sceneDirty = false;
-            var overload = rendered.Peak > 1 ? " · peak exceeds 0 dBFS; float samples were preserved without normalization" : string.Empty;
-            StatusText.Text = $"Stereo master rendered from {rendered.TakeIds.Count} takes · peak {rendered.Peak:0.000}{overload} · {output}";
+            ReceiverMasterMetricsText.Text = StudioMetricsSummary(exported.Metrics);
+            var overload = exported.Metrics.TruePeakDbTp is > 0
+                ? " · WARNING: true peak exceeds 0 dBTP; no normalization was applied"
+                : " · normalization none";
+            StatusText.Text = $"{container.Name} master exported from {rendered.TakeIds.Count} takes · {StudioMetricsSummary(exported.Metrics)}{overload} · {exported.OutputPath}";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText.Text = "Studio master export cancelled · saved project was not changed";
         }
         catch (Exception exception)
         {
-            StatusText.Text = $"Receiver master render failed: {exception.Message}";
+            StatusText.Text = $"Studio master export failed without changing the saved project: {exception.Message}";
         }
         finally
         {
@@ -3383,12 +3473,32 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private static ulong ComputeStudioDitherSeed(
+        string sceneRevisionSha256,
+        IReadOnlyList<Guid> takeIds,
+        StudioSampleEncoding encoding)
+    {
+        var identity = $"{sceneRevisionSha256}|{encoding}|{string.Join(',', takeIds.Select(id => id.ToString("D")))}";
+        return BinaryPrimitives.ReadUInt64LittleEndian(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+    }
+
+    private static string StudioMetricsSummary(StudioAudioMetrics metrics)
+    {
+        var loudness = metrics.IntegratedLoudnessLufs is { } lufs ? $"{lufs:0.0} LUFS" : "LUFS unavailable (short/silent)";
+        var truePeak = metrics.TruePeakDbTp is { } dbTp ? $"{dbTp:0.00} dBTP" : "true peak −∞ dBTP";
+        var range = metrics.LoudnessRangeLu is { } lra ? $" · LRA {lra:0.0} LU" : string.Empty;
+        return $"{loudness} · {truePeak}{range}";
+    }
+
     private void SetReceiverTakeBusy(bool busy)
     {
         SetReceiverTakeActionsEnabled(!busy && activeReceiverTake is not null);
         ReceiverTakeList.IsEnabled = !busy && receiverTakeSessions.Count > 0;
         ReceiverMasterHearButton.IsEnabled = !busy && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
         ReceiverMasterRenderButton.IsEnabled = !busy && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
+        StudioContainerBox.IsEnabled = !busy;
+        StudioEncodingBox.IsEnabled = !busy;
+        StudioDitherBox.IsEnabled = !busy && (StudioEncodingBox.SelectedItem as StudioEncodingChoice)?.Encoding != StudioSampleEncoding.Float32;
     }
 
     private void SetReceiverTakeActionsEnabled(bool enabled)
