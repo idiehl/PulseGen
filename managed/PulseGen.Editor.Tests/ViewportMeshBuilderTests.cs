@@ -1,4 +1,5 @@
 using PulseGen.Contracts;
+using System.Text;
 using Xunit;
 
 namespace PulseGen.Editor.Tests;
@@ -63,5 +64,81 @@ public sealed class ViewportMeshBuilderTests
             Transform = terrain.Transform with { PositionMetres = new(3, -1.5, 0) }
         };
         Assert.NotEqual(original, ViewportMeshBuilder.KeyFor(scene));
+    }
+
+    [Fact]
+    public async Task VerifiedObjTrianglesAreCombinedWithTerrainInsteadOfUsingTheAuthoredProxy()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-viewport-mesh-{Guid.NewGuid():N}");
+        var project = Path.Combine(root, "ViewportMesh.pulseproj");
+        var sourcePath = Path.Combine(root, "wall.obj");
+        const string obj = """
+            o VisibleWall
+            v -1 -1 0
+            v 1 -1 0
+            v 1 1 0
+            v -1 1 0
+            f 1 2 3
+            f 1 3 4
+            """;
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(sourcePath, obj, Encoding.UTF8);
+            var scene = SampleScenes.CreateFlyby();
+            scene.Geometry.Clear();
+            await ProjectStore.SaveAsync(scene, project);
+            var asset = await ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj");
+            scene.Assets.Add(asset);
+            scene.Geometry.Add(new AcousticGeometry
+            {
+                Id = Guid.NewGuid(),
+                Name = "Actual imported wall",
+                Kind = GeometryKind.ImportedMesh,
+                MaterialId = scene.Materials[0].Id,
+                MeshAssetHash = asset.Sha256,
+                Transform = new Transform
+                {
+                    PositionMetres = new(2, 0, 4),
+                    Scale = new(2, 1, 1)
+                },
+                DimensionsMetres = new(99, 99, 99),
+                Occludes = true,
+                Reflects = false
+            });
+            scene.Geometry.Add(new AcousticGeometry
+            {
+                Id = Guid.NewGuid(),
+                Name = "Small terrain",
+                Kind = GeometryKind.Terrain,
+                MaterialId = scene.Materials[0].Id,
+                DimensionsMetres = new(1, 1, 1),
+                Occludes = false,
+                Reflects = false
+            });
+            await ProjectStore.SaveAsync(scene, project);
+
+            var mesh = ViewportMeshBuilder.Build(scene, project);
+
+            Assert.Equal(202, mesh.TriangleCount);
+            Assert.Equal(200, mesh.TerrainTriangleCount);
+            Assert.Equal(2, mesh.ImportedTriangleCount);
+            Assert.Equal(1, mesh.ImportedMeshCount);
+            Assert.Equal(127, mesh.VertexCount);
+            Assert.Contains(mesh.InterleavedPositionNormals.Chunk(ViewportMesh.FloatsPerVertex), vertex =>
+                Math.Abs(vertex[0] + 0.0F) < 1.0e-6F &&
+                Math.Abs(vertex[1] + 1.0F) < 1.0e-6F &&
+                Math.Abs(vertex[2] - 4.0F) < 1.0e-6F);
+            Assert.NotEqual(
+                ViewportMeshBuilder.KeyFor(scene, project),
+                ViewportMeshBuilder.KeyFor(scene, Path.Combine(root, "Other.pulseproj")));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 }

@@ -12,6 +12,9 @@ internal readonly record struct ViewportPerformanceStatus(
     bool Ready,
     string Backend,
     int TriangleCount,
+    int TerrainTriangleCount,
+    int ImportedTriangleCount,
+    int ImportedMeshCount,
     long FrameCount,
     double ElapsedSeconds,
     double FramesPerSecond,
@@ -39,6 +42,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     private const double SlowFrameThresholdMilliseconds = 1000.0 / 55.0;
 
     private SceneDocument? scene;
+    private string? projectDirectory;
     private ViewportMeshBuildKey queuedMeshKey;
     private bool hasQueuedMeshKey;
     private CancellationTokenSource? meshBuildCancellation;
@@ -65,11 +69,21 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     public SceneDocument? Scene
     {
         get => scene;
-        set
-        {
-            scene = value;
-            QueueMeshBuild(value);
-        }
+        set => SetScene(value, projectDirectory);
+    }
+
+    public string? ProjectDirectory
+    {
+        get => projectDirectory;
+        set => SetScene(scene, value);
+    }
+
+    public void SetScene(SceneDocument? value, string? owningProjectDirectory)
+    {
+        var normalized = owningProjectDirectory is null ? null : Path.GetFullPath(owningProjectDirectory);
+        scene = value;
+        projectDirectory = normalized;
+        QueueMeshBuild(value);
     }
 
     public bool ContinuousRendering
@@ -97,6 +111,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     {
         ArgumentNullException.ThrowIfNull(mesh);
         Interlocked.Exchange(ref pendingMesh, mesh);
+        error = null;
         ResetPerformanceMeasurement();
         RequestNextFrameRendering();
     }
@@ -221,7 +236,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
 
     private void QueueMeshBuild(SceneDocument? value)
     {
-        var nextKey = value is null ? default : ViewportMeshBuilder.KeyFor(value);
+        var nextKey = value is null ? default : ViewportMeshBuilder.KeyFor(value, projectDirectory);
         if (hasQueuedMeshKey && nextKey == queuedMeshKey)
         {
             return;
@@ -239,7 +254,10 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
 
         var cancellation = new CancellationTokenSource();
         meshBuildCancellation = cancellation;
-        _ = Task.Run(() => ViewportMeshBuilder.Build(value, cancellation.Token), cancellation.Token)
+        var buildProjectDirectory = projectDirectory;
+        _ = Task.Run(
+                () => ViewportMeshBuilder.Build(value, buildProjectDirectory, cancellation.Token),
+                cancellation.Token)
             .ContinueWith(
                 task =>
                 {
@@ -418,6 +436,9 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
             initialized,
             backend,
             activeMesh.TriangleCount,
+            activeMesh.TerrainTriangleCount,
+            activeMesh.ImportedTriangleCount,
+            activeMesh.ImportedMeshCount,
             frameCount,
             elapsed,
             fps,

@@ -48,6 +48,18 @@ public readonly record struct PreviewDeviceStatus(
         CallbackLoadPartsPerMillionMaximum / 10_000.0;
 }
 
+public sealed record ImportedMeshTriangleData(
+    Guid GeometryId,
+    string AssetSha256,
+    Vector3d[] TriangleVertices,
+    uint SourceMeshCount,
+    uint SourceVertexCount,
+    Vector3d BoundsMinimum,
+    Vector3d BoundsMaximum)
+{
+    public int TriangleCount => TriangleVertices.Length / 3;
+}
+
 public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 4;
@@ -65,6 +77,98 @@ public static unsafe class NativeSceneRenderer
     }
 
     public static string EngineVersion => Marshal.PtrToStringUTF8(Native.pg_get_engine_version()) ?? "unknown";
+
+    public static IReadOnlyList<ImportedMeshTriangleData> DecodeImportedMeshes(
+        SceneDocument scene,
+        IReadOnlyCollection<Guid> geometryIds,
+        string projectDirectory)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        ArgumentNullException.ThrowIfNull(geometryIds);
+        ArgumentException.ThrowIfNullOrWhiteSpace(projectDirectory);
+        SceneValidator.EnsureValid(scene);
+
+        var requestedIds = geometryIds.Distinct().ToArray();
+        if (requestedIds.Length == 0)
+        {
+            return [];
+        }
+        var geometries = requestedIds.Select(id =>
+        {
+            var geometry = scene.Geometry.SingleOrDefault(item => item.Id == id)
+                ?? throw new ArgumentException($"Scene does not contain geometry '{id}'.", nameof(geometryIds));
+            if (geometry.Kind != GeometryKind.ImportedMesh)
+            {
+                throw new ArgumentException($"Geometry '{geometry.Name}' is not an imported mesh.", nameof(geometryIds));
+            }
+            if (geometry.IsDynamic)
+            {
+                throw new NotSupportedException($"Dynamic acoustic geometry '{geometry.Name}' requires the motion adapter that is not active yet.");
+            }
+            return geometry;
+        }).ToArray();
+
+        var config = new NativeEngineConfig
+        {
+            Size = (uint)sizeof(NativeEngineConfig),
+            Version = AbiVersion,
+            MaxEmitters = 1,
+            MaxReceivers = 1,
+            MaxKeyframesPerPath = 2
+        };
+        Check(Native.pg_engine_create(&config, out var engine), engine, "create mesh decode engine");
+        try
+        {
+            var materialIndexes = ConfigureMaterials(scene, engine);
+            var results = new List<ImportedMeshTriangleData>(geometries.Length);
+            foreach (var geometry in geometries)
+            {
+                if (geometry.MaterialId is not { } materialId || !materialIndexes.TryGetValue(materialId, out var materialIndex))
+                {
+                    throw new InvalidOperationException($"Imported mesh '{geometry.Name}' references a missing material.");
+                }
+                var receipt = ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory, out var meshIndex);
+                Check(
+                    Native.pg_engine_copy_mesh_triangles(engine, meshIndex, null, 0, out var vertexCount),
+                    engine,
+                    "measure imported mesh triangle output");
+                if (vertexCount != checked(receipt.TriangleCount * 3U))
+                {
+                    throw new InvalidDataException($"Imported mesh '{geometry.Name}' returned an inconsistent triangle-copy count.");
+                }
+                var nativeVertices = new NativeVector[checked((int)vertexCount)];
+                fixed (NativeVector* nativeVertexPointer = nativeVertices)
+                {
+                    Check(
+                        Native.pg_engine_copy_mesh_triangles(engine, meshIndex, nativeVertexPointer, vertexCount, out var copiedVertexCount),
+                        engine,
+                        "copy imported mesh triangles");
+                    if (copiedVertexCount != vertexCount)
+                    {
+                        throw new InvalidDataException($"Imported mesh '{geometry.Name}' changed while copying triangle data.");
+                    }
+                }
+                var vertices = new Vector3d[nativeVertices.Length];
+                for (var index = 0; index < nativeVertices.Length; index++)
+                {
+                    vertices[index] = new(nativeVertices[index].X, nativeVertices[index].Y, nativeVertices[index].Z);
+                }
+                results.Add(new(
+                    geometry.Id,
+                    geometry.MeshAssetHash!,
+                    vertices,
+                    receipt.SourceMeshCount,
+                    receipt.SourceVertexCount,
+                    new(receipt.BoundsMinMetres.X, receipt.BoundsMinMetres.Y, receipt.BoundsMinMetres.Z),
+                    new(receipt.BoundsMaxMetres.X, receipt.BoundsMaxMetres.Y, receipt.BoundsMaxMetres.Z)));
+            }
+            return results;
+        }
+        finally
+        {
+            Native.pg_engine_destroy(engine);
+        }
+    }
 
     public static RenderSummary Render(
         SceneDocument scene,
@@ -614,7 +718,7 @@ public static unsafe class NativeSceneRenderer
 
             if (geometry.Kind == GeometryKind.ImportedMesh)
             {
-                ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory);
+                _ = ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory, out _);
                 continue;
             }
 
@@ -655,13 +759,15 @@ public static unsafe class NativeSceneRenderer
         }
     }
 
-    private static void ConfigureImportedMesh(
+    private static NativeMeshImportReceipt ConfigureImportedMesh(
         SceneDocument scene,
         nint engine,
         AcousticGeometry geometry,
         uint materialIndex,
-        string? projectDirectory)
+        string? projectDirectory,
+        out uint meshIndex)
     {
+        meshIndex = uint.MaxValue;
         if (geometry.Reflects)
         {
             throw new NotSupportedException(
@@ -705,6 +811,11 @@ public static unsafe class NativeSceneRenderer
 
         var namePointer = Marshal.StringToCoTaskMemUTF8(geometry.Name);
         var formatPointer = Marshal.StringToCoTaskMemUTF8(format);
+        var receipt = new NativeMeshImportReceipt
+        {
+            Size = (uint)sizeof(NativeMeshImportReceipt),
+            Version = AbiVersion
+        };
         try
         {
             fixed (byte* encodedPointer = encoded)
@@ -726,12 +837,7 @@ public static unsafe class NativeSceneRenderer
                     Enabled = 1U,
                     MaxTriangles = MaximumImportedMeshTriangles
                 };
-                var receipt = new NativeMeshImportReceipt
-                {
-                    Size = (uint)sizeof(NativeMeshImportReceipt),
-                    Version = AbiVersion
-                };
-                Check(Native.pg_engine_add_mesh_geometry(engine, &descriptor, out _, &receipt), engine, "import acoustic mesh");
+                Check(Native.pg_engine_add_mesh_geometry(engine, &descriptor, out meshIndex, &receipt), engine, "import acoustic mesh");
                 if (receipt.TriangleCount == 0 || receipt.TriangleCount > MaximumImportedMeshTriangles || receipt.BvhNodeCount == 0)
                 {
                     throw new InvalidDataException($"Imported mesh '{geometry.Name}' returned an invalid native import receipt.");
@@ -743,6 +849,7 @@ public static unsafe class NativeSceneRenderer
             Marshal.FreeCoTaskMem(namePointer);
             Marshal.FreeCoTaskMem(formatPointer);
         }
+        return receipt;
     }
 
     private static double BandValue(AcousticMaterial material, IReadOnlyList<double> values, double frequencyHz) =>
@@ -1074,6 +1181,7 @@ public static unsafe class NativeSceneRenderer
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_triangles", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_atmosphere_field", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_receiver_motion", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_recover_device", out _))
@@ -1146,6 +1254,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_acoustic_material(nint engine, NativeAcousticMaterial* material, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_geometry(nint engine, NativeGeometry* geometry, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_mesh_geometry(nint engine, NativeMeshGeometry* geometry, out uint index, NativeMeshImportReceipt* receipt);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_copy_mesh_triangles(nint engine, uint meshIndex, NativeVector* triangleVertices, uint vertexCapacity, out uint vertexCount);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_capsules(nint engine, uint receiverIndex, NativeReceiverCapsule* leftCapsule, NativeReceiverCapsule* rightCapsule);

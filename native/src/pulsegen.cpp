@@ -31,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.12";
+constexpr std::string_view engine_version = "0.1.0-alpha.13";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -2838,6 +2838,48 @@ pg_status PG_CALL pg_engine_add_mesh_geometry(
     } catch (...) {
         return fail(engine, PG_STATUS_INTERNAL_ERROR, "Imported mesh processing failed with an unknown error.");
     }
+}
+
+pg_status PG_CALL pg_engine_copy_mesh_triangles(
+    pg_engine* engine,
+    uint32_t mesh_index,
+    pg_vec3* out_triangle_vertices,
+    uint32_t vertex_capacity,
+    uint32_t* out_vertex_count)
+{
+    if (engine == nullptr || out_vertex_count == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (require_stopped_device(engine, "Copying imported mesh triangles") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (mesh_index >= engine->mesh_geometries.size()) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported mesh index is out of range.");
+    }
+
+    const mesh_geometry_state& mesh = engine->mesh_geometries[mesh_index];
+    const std::size_t required_size = mesh.triangles.size() * 3U;
+    if (required_size > std::numeric_limits<std::uint32_t>::max()) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, "Imported mesh vertex count exceeds the public copy range.");
+    }
+    const std::uint32_t required = static_cast<std::uint32_t>(required_size);
+    *out_vertex_count = required;
+    if (out_triangle_vertices == nullptr) {
+        return vertex_capacity == 0U
+            ? PG_STATUS_OK
+            : fail(engine, PG_STATUS_INVALID_ARGUMENT, "A non-zero mesh copy capacity requires an output buffer.");
+    }
+    if (vertex_capacity < required) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Imported mesh triangle output buffer is too small.");
+    }
+
+    std::uint32_t output_index = 0U;
+    for (const mesh_triangle& triangle : mesh.triangles) {
+        out_triangle_vertices[output_index++] = { triangle.a.x, triangle.a.y, triangle.a.z };
+        out_triangle_vertices[output_index++] = { triangle.b.x, triangle.b.y, triangle.b.z };
+        out_triangle_vertices[output_index++] = { triangle.c.x, triangle.c.y, triangle.c.z };
+    }
+    return PG_STATUS_OK;
 }
 
 pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index)

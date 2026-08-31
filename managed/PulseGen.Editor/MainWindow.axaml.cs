@@ -165,7 +165,7 @@ public sealed partial class MainWindow : Window
         atlasBaseETag = null;
         sceneDirty = false;
         Viewport.Scene = scene;
-        GpuViewport.Scene = scene;
+        GpuViewport.SetScene(scene, projectDirectory);
         Viewport.TimeSeconds = 0;
         activeRenderProfileId = scene.RenderProfiles.First().Id;
         currentSelection = SceneSelection.Emitter(scene.Emitters[0].Id);
@@ -401,7 +401,7 @@ public sealed partial class MainWindow : Window
                         GeometryConstraintText.Text = room
                             ? "The current modal-room solver keeps rooms axis-aligned. Position and size remain fully editable."
                             : geometry.Kind == GeometryKind.ImportedMesh
-                                ? "Dimensions describe the visible authored-bounds proxy; scale and rotation transform the verified mesh itself. Imported-mesh echoes remain disabled."
+                                ? "Dimensions control the editable selection handle; the shaded surface uses verified imported triangles. Scale and rotation transform both the acoustic and visible mesh. Imported-mesh echoes remain disabled."
                                 : "Drag the selected centre handle in the world for X/Z movement; use these fields for exact position, size, and rotation.";
                         GeometryInspectorPanel.IsVisible = true;
                         break;
@@ -1763,6 +1763,7 @@ public sealed partial class MainWindow : Window
         }
 
         lastProjectDirectory = projectDirectory;
+        GpuViewport.SetScene(scene, projectDirectory);
         sceneDirty = false;
         sceneEditedAtUtc = null;
         string? recoveryWarning = null;
@@ -1975,7 +1976,7 @@ public sealed partial class MainWindow : Window
             CommitSceneEdit($"Imported {imported.FileName}");
             RefreshSceneTree();
             PopulateInspector(currentSelection);
-            StatusText.Text = $"Imported {imported.FileName} · direct occlusion active · authored bounds proxy 2 m · save to commit the manifest";
+            StatusText.Text = $"Imported {imported.FileName} · verified triangles loading in the viewport · direct occlusion active · save to commit the manifest";
         }
         catch (Exception exception)
         {
@@ -3772,7 +3773,10 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            ViewportPerformanceText.Text = $"{status.FramesPerSecond:0} FPS · {status.TriangleCount / 1000.0:0}K TRI";
+            var imported = status.ImportedMeshCount == 0
+                ? string.Empty
+                : $" · {status.ImportedMeshCount} MESH";
+            ViewportPerformanceText.Text = $"{status.FramesPerSecond:0} FPS · {status.TriangleCount / 1000.0:0}K TRI{imported}";
             ViewportPerformanceText.Foreground = status.FramesPerSecond >= 57
                 ? Avalonia.Media.Brushes.LightSeaGreen
                 : status.FramesPerSecond >= 50
@@ -3784,6 +3788,7 @@ public sealed partial class MainWindow : Window
             ViewportPerformanceText,
             status.Error ??
             $"{status.Backend}\nGPU scene: {status.TriangleCount:N0} triangles. " +
+            $"Imported surfaces: {status.ImportedMeshCount:N0} meshes / {status.ImportedTriangleCount:N0} triangles. " +
             $"CPU submission averages {status.CpuSubmitMillisecondsAverage:0.000} ms and peaks at {status.CpuSubmitMillisecondsMaximum:0.000} ms. " +
             $"Longest observed frame interval: {status.FrameIntervalMillisecondsMaximum:0.000} ms.");
     }

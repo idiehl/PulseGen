@@ -58,7 +58,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.12", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.13", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
@@ -279,6 +279,18 @@ public sealed class PrimitiveAcousticsTests
             });
             await ProjectStore.SaveAsync(scene, project);
 
+            var decodedMeshes = NativeSceneRenderer.DecodeImportedMeshes(scene, [scene.Geometry[0].Id], project);
+            var decoded = Assert.Single(decodedMeshes);
+            Assert.Equal(scene.Geometry[0].Id, decoded.GeometryId);
+            Assert.Equal(asset.Sha256, decoded.AssetSha256);
+            Assert.Equal(2, decoded.TriangleCount);
+            Assert.Equal(6, decoded.TriangleVertices.Length);
+            Assert.Equal(1U, decoded.SourceMeshCount);
+            Assert.Equal(4U, decoded.SourceVertexCount);
+            Assert.All(decoded.TriangleVertices, vertex => Assert.Equal(1, vertex.Z, 9));
+            Assert.Equal(new Vector3d(-5, -5, 1), decoded.BoundsMinimum);
+            Assert.Equal(new Vector3d(5, 5, 1), decoded.BoundsMaximum);
+
             var baselineDirectory = Path.Combine(root, "baseline");
             var firstDirectory = Path.Combine(root, "mesh-first");
             var secondDirectory = Path.Combine(root, "mesh-second");
@@ -311,6 +323,8 @@ public sealed class PrimitiveAcousticsTests
             await File.WriteAllBytesAsync(storedAssetPath, tampered);
             Assert.Throws<InvalidDataException>(() =>
                 NativeSceneRenderer.Render(scene, Path.Combine(root, "tampered"), projectDirectory: project));
+            Assert.Throws<InvalidDataException>(() =>
+                NativeSceneRenderer.DecodeImportedMeshes(scene, [scene.Geometry[0].Id], project));
             await Assert.ThrowsAsync<InvalidDataException>(() =>
                 ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj"));
         }

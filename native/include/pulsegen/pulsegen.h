@@ -414,6 +414,14 @@ PG_API pg_status PG_CALL pg_engine_set_room(pg_engine* engine, const pg_room_des
 PG_API pg_status PG_CALL pg_engine_add_acoustic_material(pg_engine* engine, const pg_acoustic_material_desc* material, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_geometry(pg_engine* engine, const pg_geometry_desc* geometry, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_mesh_geometry(pg_engine* engine, const pg_mesh_geometry_desc* geometry, uint32_t* out_index, pg_mesh_import_receipt* out_receipt);
+/* Returns the transformed, non-degenerate triangle soup accepted by the importer.
+   Pass a null output buffer with zero capacity to query the required vertex count. */
+PG_API pg_status PG_CALL pg_engine_copy_mesh_triangles(
+    pg_engine* engine,
+    uint32_t mesh_index,
+    pg_vec3* out_triangle_vertices,
+    uint32_t vertex_capacity,
+    uint32_t* out_vertex_count);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);

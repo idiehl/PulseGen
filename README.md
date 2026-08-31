@@ -38,9 +38,11 @@ commands and reads bounded telemetry.
 - Checksum-pinned Assimp 6.0.5 import for static OBJ and self-contained
   glTF/GLB acoustic meshes. Project assets are size/SHA-256 verified before a
   memory-only native import, capped at 250,000 triangles per mesh, and compiled
-  into immutable BVHs for direct occlusion and transmission. The editor shows
-  an explicit authored-bounds proxy; imported-mesh reflections fail clearly
-  until the geometric reflection backend is active.
+  into immutable BVHs for direct occlusion and transmission. A read-only native
+  copy operation gives the editor the exact transformed, non-degenerate triangle
+  set accepted by that acoustic importer; the dashed authored bounds remain only
+  as an editable selection handle. Imported-mesh reflections fail clearly until
+  the geometric reflection backend is active.
 - WAV render output as 16/24-bit PCM with explicit TPDF dither or unclipped
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
@@ -54,12 +56,14 @@ commands and reads bounded telemetry.
   isolated-take rendering; and analysis import. Imported measured SOFA selections
   are content-addressed and deliberately render-gated until their Steam Audio
   adapter is active, so the analytic head model is never mislabeled as measured.
-- Retained OpenGL/ANGLE terrain rendering beneath the editable world overlay.
-  A terrain grid is prepared away from the UI thread, uploaded once to retained
-  vertex/index buffers, and submitted in one indexed draw. A live viewport badge
-  reports measured frame rate and triangle count. The dedicated acceptance scene
-  contains exactly 250,000 triangles and produces an atomic JSON performance
-  receipt instead of treating a successful build as a responsiveness result.
+- Retained OpenGL/ANGLE terrain and imported-mesh rendering beneath the editable
+  world overlay. Geometry is verified and prepared away from the UI thread,
+  uploaded once to retained vertex/index buffers, and submitted in one indexed
+  draw. Flat acoustic-surface normals make imported triangles readable without
+  inventing source materials. A live viewport badge reports measured frame rate,
+  triangle count, and imported-mesh count. Procedural and verified-OBJ acceptance
+  modes each exercise exactly 250,000 triangles and produce atomic JSON receipts
+  instead of treating a successful build as a responsiveness result.
 - First-class acoustic-material authoring with eight-band soak/scatter/pass
   controls, roughness, plain-language incoming-energy summaries, six adjustable
   starting points, independent duplication for comparisons, live surface usage
@@ -147,10 +151,10 @@ commands and reads bounded telemetry.
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
-Steam Audio, KISS FFT, GPU model execution, full mesh authoring, and
-triangle-level rendering of imported OBJ/glTF/GLB meshes remain explicit
-adapters; their dependency records prevent an unfinished integration from being
-presented as active.
+Steam Audio, KISS FFT, GPU model execution, full mesh authoring, and source
+material/texture recreation for imported meshes remain explicit adapters; their
+dependency records prevent an unfinished integration from being presented as
+active.
 
 Reflection depth 2 currently applies only to opposing wall pairs in an
 axis-aligned parametric room. Authored finite planes and boxes remain deliberately
@@ -193,6 +197,8 @@ built-in focused scenarios:
   parametric room, and the interactive 48 kHz / 512-frame profile.
 - The editor-only viewport stress scene supplies one visual-only 50 m by 25 m
   terrain tessellated to exactly 250,000 triangles for retained-GPU acceptance.
+  Its imported mode generates a content-addressed 250,000-triangle OBJ, verifies
+  it through the production Assimp boundary, and renders those accepted triangles.
 
 The render CLI can also create or render any built-in scene:
 
@@ -218,12 +224,15 @@ Run the hardware-backed viewport acceptance scenario for six measured seconds:
 
 ```powershell
 ./scripts/run-viewport-stress.ps1 -Seconds 6
+./scripts/run-viewport-stress.ps1 -ImportedMesh -Seconds 6
 ```
 
-The command warms the GPU path, requires the exact 250,000-triangle scene,
-enforces the requested frame-rate and CPU-submit thresholds, and prints the
-OpenGL backend plus measured timing. Results are specific to the tested machine,
-driver, window size, build, and display refresh rate.
+Both modes warm the GPU path, require an exact 250,000-triangle source, enforce
+the requested frame-rate and CPU-submit thresholds, and print the OpenGL backend
+plus measured timing. Imported mode additionally records the verified asset
+SHA-256, native engine version, imported mesh count, and imported triangle count.
+Results are specific to the tested machine, driver, window size, build, and
+display refresh rate.
 
 Atlas integration defaults to the production service origins but does not upload
 anything until **Sync project** is pressed. Candidate or local services can be

@@ -4,6 +4,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using PulseGen.Contracts;
+using PulseGen.Engine.Client;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
@@ -13,7 +14,8 @@ namespace PulseGen.Editor;
 internal sealed record ViewportBenchmarkOptions(
     double DurationSeconds,
     double MinimumFramesPerSecond,
-    string ReceiptPath)
+    string ReceiptPath,
+    bool ImportedMesh)
 {
     public static ViewportBenchmarkOptions? TryParse(IReadOnlyList<string> arguments)
     {
@@ -55,7 +57,11 @@ internal sealed record ViewportBenchmarkOptions(
         {
             throw new ArgumentOutOfRangeException("--minimum-fps", "Viewport benchmark FPS threshold must be between 1 and 240.");
         }
-        return new(duration, minimumFps, Path.GetFullPath(receipt));
+        return new(
+            duration,
+            minimumFps,
+            Path.GetFullPath(receipt),
+            arguments.Contains("--imported-mesh", StringComparer.Ordinal));
     }
 }
 
@@ -68,6 +74,7 @@ internal sealed class ViewportBenchmarkWindow : Window
     private readonly DispatcherTimer warmupTimer;
     private readonly DispatcherTimer measurementTimer;
     private readonly DispatcherTimer timeoutTimer;
+    private readonly string? importedAssetSha256;
     private readonly Stopwatch preparationStopwatch = Stopwatch.StartNew();
     private bool warmupStarted;
     private bool measuring;
@@ -80,22 +87,30 @@ internal sealed class ViewportBenchmarkWindow : Window
     {
         this.options = options;
         this.lifetime = lifetime;
-        Title = "PulseGen — 250K Triangle Viewport Acceptance";
+        Title = options.ImportedMesh
+            ? "PulseGen — Imported 250K Triangle Viewport Acceptance"
+            : "PulseGen — 250K Triangle Viewport Acceptance";
         Width = 1280;
         Height = 720;
         MinWidth = 960;
         MinHeight = 540;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
 
+        var fixture = options.ImportedMesh
+            ? ViewportImportedMeshFixture.Prepare(options.ReceiptPath)
+            : null;
+        importedAssetSha256 = fixture?.AssetSha256;
+        var benchmarkScene = fixture?.Scene ?? SampleScenes.CreateViewportStress();
         viewport = new GpuWorldViewport
         {
             ContinuousRendering = true,
-            Scene = SampleScenes.CreateViewportStress()
+            ProjectDirectory = fixture?.ProjectDirectory,
+            Scene = benchmarkScene
         };
         viewport.PerformanceUpdated += OnPerformanceUpdated;
         statusText = new TextBlock
         {
-            Text = "Preparing deterministic 250,000-triangle terrain…",
+            Text = PreparationText,
             Foreground = Brushes.White,
             FontSize = 13
         };
@@ -149,10 +164,15 @@ internal sealed class ViewportBenchmarkWindow : Window
             return;
         }
 
-        statusText.Text = status.TriangleCount == 250_000
-            ? $"{status.FramesPerSecond:0.0} FPS · {status.TriangleCount:N0} triangles · CPU submit {status.CpuSubmitMillisecondsAverage:0.000} ms"
-            : "Preparing deterministic 250,000-triangle terrain…";
-        if (!warmupStarted && status.Ready && status.TriangleCount == 250_000 && status.FrameCount > 1)
+        var expectedImportedMeshes = options.ImportedMesh ? 1 : 0;
+        statusText.Text = status.TriangleCount == 250_000 && status.ImportedMeshCount == expectedImportedMeshes
+            ? $"{status.FramesPerSecond:0.0} FPS · {status.TriangleCount:N0} triangles · {status.ImportedMeshCount:N0} imported · CPU submit {status.CpuSubmitMillisecondsAverage:0.000} ms"
+            : PreparationText;
+        if (!warmupStarted &&
+            status.Ready &&
+            status.TriangleCount == 250_000 &&
+            status.ImportedMeshCount == expectedImportedMeshes &&
+            status.FrameCount > 1)
         {
             preparationMilliseconds = preparationStopwatch.Elapsed.TotalMilliseconds;
             warmupStarted = true;
@@ -185,18 +205,33 @@ internal sealed class ViewportBenchmarkWindow : Window
         timeoutTimer.Stop();
         viewport.ContinuousRendering = false;
         var status = viewport.PerformanceStatus;
+        var expectedImportedMeshes = options.ImportedMesh ? 1 : 0;
+        var expectedImportedTriangles = options.ImportedMesh ? 250_000 : 0;
+        var expectedTerrainTriangles = options.ImportedMesh ? 0 : 250_000;
         var passed = measuring &&
             status.Ready &&
             status.Error is null &&
             status.TriangleCount == 250_000 &&
+            status.ImportedMeshCount == expectedImportedMeshes &&
+            status.ImportedTriangleCount == expectedImportedTriangles &&
+            status.TerrainTriangleCount == expectedTerrainTriangles &&
             status.FramesPerSecond >= options.MinimumFramesPerSecond &&
             status.CpuSubmitMillisecondsAverage < 4;
         var receipt = new
         {
             marker = passed ? "PULSEGEN_VIEWPORT_STRESS_OK" : "PULSEGEN_VIEWPORT_STRESS_FAILED",
-            scene = "Viewport 250K Triangle Stress",
+            scene = options.ImportedMesh
+                ? "Imported Mesh 250K Triangle Stress"
+                : "Viewport 250K Triangle Stress",
+            source = options.ImportedMesh ? "verified imported OBJ" : "procedural terrain",
+            importedAssetSha256,
+            engineVersion = NativeSceneRenderer.EngineVersion,
+            viewportRenderer = "retained-opengl-v2",
             status.Backend,
             status.TriangleCount,
+            status.TerrainTriangleCount,
+            status.ImportedTriangleCount,
+            status.ImportedMeshCount,
             status.FrameCount,
             status.ElapsedSeconds,
             status.FramesPerSecond,
@@ -220,6 +255,10 @@ internal sealed class ViewportBenchmarkWindow : Window
         }
         lifetime.Shutdown(exitCode);
     }
+
+    private string PreparationText => options.ImportedMesh
+        ? "Verifying and decoding deterministic 250,000-triangle OBJ…"
+        : "Preparing deterministic 250,000-triangle terrain…";
 
     private static void WriteReceipt(string destination, string json)
     {

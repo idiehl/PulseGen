@@ -24,11 +24,22 @@ public sealed class ViewportBenchmarkOptionsTests
         Assert.NotNull(options);
         Assert.Equal(4.5, options.DurationSeconds);
         Assert.Equal(59, options.MinimumFramesPerSecond);
+        Assert.False(options.ImportedMesh);
         Assert.True(Path.IsPathFullyQualified(options.ReceiptPath));
         Assert.EndsWith(
             Path.Combine("out", "viewport-test", "receipt.json"),
             options.ReceiptPath,
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ImportedMeshFlagSelectsTheVerifiedAssetBenchmark()
+    {
+        var options = ViewportBenchmarkOptions.TryParse(
+            ["--viewport-benchmark", "--imported-mesh"]);
+
+        Assert.NotNull(options);
+        Assert.True(options.ImportedMesh);
     }
 
     [Theory]

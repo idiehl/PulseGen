@@ -926,6 +926,47 @@ int main(int argument_count, char** arguments)
     REQUIRE(std::abs(mesh_receipt.bounds_min_metres.z - 1.0) < 1.0e-9);
     REQUIRE(std::abs(mesh_receipt.bounds_max_metres.z - 1.0) < 1.0e-9);
 
+    std::uint32_t copied_mesh_vertex_count = 0U;
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        mesh_index,
+        nullptr,
+        0U,
+        &copied_mesh_vertex_count) == PG_STATUS_OK);
+    REQUIRE(copied_mesh_vertex_count == 6U);
+    std::array<pg_vec3, 5> undersized_mesh_vertices{};
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        mesh_index,
+        undersized_mesh_vertices.data(),
+        static_cast<std::uint32_t>(undersized_mesh_vertices.size()),
+        &copied_mesh_vertex_count) == PG_STATUS_CAPACITY_EXCEEDED);
+    std::array<pg_vec3, 6> copied_mesh_vertices{};
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        mesh_index,
+        copied_mesh_vertices.data(),
+        static_cast<std::uint32_t>(copied_mesh_vertices.size()),
+        &copied_mesh_vertex_count) == PG_STATUS_OK);
+    REQUIRE(copied_mesh_vertex_count == copied_mesh_vertices.size());
+    for (const pg_vec3& vertex : copied_mesh_vertices) {
+        REQUIRE(std::abs(vertex.z - 1.0) < 1.0e-9);
+        REQUIRE(vertex.x >= -10.0 && vertex.x <= 10.0);
+        REQUIRE(vertex.y >= -5.0 && vertex.y <= 5.0);
+    }
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        99U,
+        nullptr,
+        0U,
+        &copied_mesh_vertex_count) == PG_STATUS_INVALID_ARGUMENT);
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        mesh_index,
+        nullptr,
+        0U,
+        nullptr) == PG_STATUS_INVALID_ARGUMENT);
+
     pg_mesh_geometry_desc gltf_descriptor = mesh_descriptor;
     gltf_descriptor.name_utf8 = "Embedded_glTF";
     gltf_descriptor.encoded_data = embedded_triangle_gltf.data();
@@ -936,10 +977,24 @@ int main(int argument_count, char** arguments)
     pg_mesh_import_receipt gltf_receipt{};
     gltf_receipt.size = sizeof(gltf_receipt);
     gltf_receipt.version = PG_ABI_VERSION;
-    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &gltf_descriptor, nullptr, &gltf_receipt) == PG_STATUS_OK);
+    std::uint32_t gltf_mesh_index = std::numeric_limits<std::uint32_t>::max();
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &gltf_descriptor, &gltf_mesh_index, &gltf_receipt) == PG_STATUS_OK);
     REQUIRE(gltf_receipt.source_mesh_count == 1U);
     REQUIRE(gltf_receipt.source_vertex_count == 3U);
     REQUIRE(gltf_receipt.triangle_count == 1U);
+    std::array<pg_vec3, 3> gltf_vertices{};
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        gltf_mesh_index,
+        gltf_vertices.data(),
+        static_cast<std::uint32_t>(gltf_vertices.size()),
+        &copied_mesh_vertex_count) == PG_STATUS_OK);
+    REQUIRE(copied_mesh_vertex_count == 3U);
+    for (const pg_vec3& vertex : gltf_vertices) {
+        REQUIRE(vertex.x >= 20.0 && vertex.x <= 21.0);
+        REQUIRE(vertex.y >= 0.0 && vertex.y <= 1.0);
+        REQUIRE(std::abs(vertex.z) < 1.0e-9);
+    }
 
     const std::vector<std::uint8_t> triangle_glb = make_triangle_glb();
     pg_mesh_geometry_desc glb_descriptor = gltf_descriptor;
@@ -951,10 +1006,24 @@ int main(int argument_count, char** arguments)
     pg_mesh_import_receipt glb_receipt{};
     glb_receipt.size = sizeof(glb_receipt);
     glb_receipt.version = PG_ABI_VERSION;
-    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &glb_descriptor, nullptr, &glb_receipt) == PG_STATUS_OK);
+    std::uint32_t glb_mesh_index = std::numeric_limits<std::uint32_t>::max();
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &glb_descriptor, &glb_mesh_index, &glb_receipt) == PG_STATUS_OK);
     REQUIRE(glb_receipt.source_mesh_count == 1U);
     REQUIRE(glb_receipt.source_vertex_count == 3U);
     REQUIRE(glb_receipt.triangle_count == 1U);
+    std::array<pg_vec3, 3> glb_vertices{};
+    REQUIRE(pg_engine_copy_mesh_triangles(
+        mesh_validation_engine,
+        glb_mesh_index,
+        glb_vertices.data(),
+        static_cast<std::uint32_t>(glb_vertices.size()),
+        &copied_mesh_vertex_count) == PG_STATUS_OK);
+    REQUIRE(copied_mesh_vertex_count == 3U);
+    for (const pg_vec3& vertex : glb_vertices) {
+        REQUIRE(vertex.x >= 30.0 && vertex.x <= 31.0);
+        REQUIRE(vertex.y >= 0.0 && vertex.y <= 1.0);
+        REQUIRE(std::abs(vertex.z) < 1.0e-9);
+    }
 
     pg_mesh_geometry_desc rejected_mesh = mesh_descriptor;
     rejected_mesh.format_hint_utf8 = "fbx";
