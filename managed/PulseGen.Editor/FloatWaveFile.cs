@@ -19,14 +19,14 @@ internal static class FloatWaveFile
         var file = new FileInfo(path);
         if (!file.Exists || file.Length < 44 || file.Length > MaximumBytes || file.Length > int.MaxValue)
         {
-            throw new InvalidDataException("Spectral audio must be a non-empty WAVE file no larger than 1 GiB.");
+            throw new InvalidDataException("Audio must be a non-empty WAVE file no larger than 1 GiB.");
         }
 
         var bytes = File.ReadAllBytes(file.FullName);
         var data = bytes.AsSpan();
         if (!data[..4].SequenceEqual("RIFF"u8) || !data.Slice(8, 4).SequenceEqual("WAVE"u8))
         {
-            throw new InvalidDataException("Spectral audio must use the RIFF WAVE container.");
+            throw new InvalidDataException("Audio must use the RIFF WAVE container.");
         }
 
         ushort? formatCode = null;
@@ -43,14 +43,14 @@ internal static class FloatWaveFile
             cursor += 8;
             if (chunkSize < 0 || cursor > data.Length - chunkSize)
             {
-                throw new InvalidDataException("Spectral WAVE contains a truncated chunk.");
+                throw new InvalidDataException("WAVE audio contains a truncated chunk.");
             }
             var chunk = data.Slice(cursor, chunkSize);
             if (chunkId.SequenceEqual("fmt "u8))
             {
                 if (chunk.Length < 16)
                 {
-                    throw new InvalidDataException("Spectral WAVE format information is incomplete.");
+                    throw new InvalidDataException("WAVE format information is incomplete.");
                 }
                 formatCode = BinaryPrimitives.ReadUInt16LittleEndian(chunk);
                 channels = BinaryPrimitives.ReadUInt16LittleEndian(chunk[2..]);
@@ -65,17 +65,44 @@ internal static class FloatWaveFile
             cursor = checked(cursor + chunkSize + (chunkSize & 1));
         }
 
-        if (formatCode != 3 || channels != 2 || bitsPerSample != 32 || blockAlign != 8 ||
-            sampleRate is < 8000 or > 192000 || audioBytes.IsEmpty || audioBytes.Length % 8 != 0)
+        var bytesPerSample = bitsPerSample.GetValueOrDefault() / 8;
+        var supportedEncoding = (formatCode == 3 && bitsPerSample == 32) ||
+            (formatCode == 1 && bitsPerSample is 16 or 24);
+        if (!supportedEncoding || channels is < 1 or > 2 ||
+            blockAlign != channels * bytesPerSample || sampleRate is < 8000 or > 192000 ||
+            audioBytes.IsEmpty || audioBytes.Length % blockAlign.GetValueOrDefault() != 0)
         {
-            throw new InvalidDataException("Spectral layers must be two-channel, 32-bit floating-point WAVE audio.");
+            throw new InvalidDataException("WAVE audio must be mono or stereo PCM16, PCM24, or 32-bit floating point.");
         }
 
-        var samples = new float[audioBytes.Length / sizeof(float)];
-        MemoryMarshal.Cast<byte, float>(audioBytes).CopyTo(samples);
+        var samples = new float[audioBytes.Length / bytesPerSample];
+        if (formatCode == 3)
+        {
+            MemoryMarshal.Cast<byte, float>(audioBytes).CopyTo(samples);
+        }
+        else if (bitsPerSample == 16)
+        {
+            for (var index = 0; index < samples.Length; index++)
+            {
+                samples[index] = BinaryPrimitives.ReadInt16LittleEndian(audioBytes.Slice(index * 2, 2)) / 32768f;
+            }
+        }
+        else
+        {
+            for (var index = 0; index < samples.Length; index++)
+            {
+                var offset = index * 3;
+                var value = audioBytes[offset] | (audioBytes[offset + 1] << 8) | (audioBytes[offset + 2] << 16);
+                if ((value & 0x800000) != 0)
+                {
+                    value |= unchecked((int)0xFF000000);
+                }
+                samples[index] = value / 8388608f;
+            }
+        }
         if (samples.Any(sample => !float.IsFinite(sample)))
         {
-            throw new InvalidDataException("Spectral WAVE contains a non-finite sample.");
+            throw new InvalidDataException("WAVE audio contains a non-finite sample.");
         }
         return new(sampleRate.GetValueOrDefault(), channels.GetValueOrDefault(), samples);
     }
@@ -83,11 +110,11 @@ internal static class FloatWaveFile
     public static void WriteAtomic(string path, FloatWaveBuffer buffer)
     {
         ArgumentNullException.ThrowIfNull(buffer);
-        if (buffer.SampleRate is < 8000 or > 192000 || buffer.Channels != 2 ||
-            buffer.InterleavedSamples.Length == 0 || buffer.InterleavedSamples.Length % 2 != 0 ||
+        if (buffer.SampleRate is < 8000 or > 192000 || buffer.Channels is < 1 or > 2 ||
+            buffer.InterleavedSamples.Length == 0 || buffer.InterleavedSamples.Length % buffer.Channels != 0 ||
             buffer.InterleavedSamples.Any(sample => !float.IsFinite(sample)))
         {
-            throw new ArgumentException("Float WAVE output requires finite interleaved stereo samples and a supported sample rate.", nameof(buffer));
+            throw new ArgumentException("Float WAVE output requires finite mono or stereo samples and a supported sample rate.", nameof(buffer));
         }
 
         var dataBytes = checked(buffer.InterleavedSamples.Length * sizeof(float));
@@ -106,10 +133,10 @@ internal static class FloatWaveFile
                 "fmt "u8.CopyTo(header[12..]);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[16..], 16);
                 BinaryPrimitives.WriteUInt16LittleEndian(header[20..], 3);
-                BinaryPrimitives.WriteUInt16LittleEndian(header[22..], 2);
+                BinaryPrimitives.WriteUInt16LittleEndian(header[22..], checked((ushort)buffer.Channels));
                 BinaryPrimitives.WriteUInt32LittleEndian(header[24..], checked((uint)buffer.SampleRate));
-                BinaryPrimitives.WriteUInt32LittleEndian(header[28..], checked((uint)(buffer.SampleRate * 8)));
-                BinaryPrimitives.WriteUInt16LittleEndian(header[32..], 8);
+                BinaryPrimitives.WriteUInt32LittleEndian(header[28..], checked((uint)(buffer.SampleRate * buffer.Channels * sizeof(float))));
+                BinaryPrimitives.WriteUInt16LittleEndian(header[32..], checked((ushort)(buffer.Channels * sizeof(float))));
                 BinaryPrimitives.WriteUInt16LittleEndian(header[34..], 32);
                 "data"u8.CopyTo(header[36..]);
                 BinaryPrimitives.WriteUInt32LittleEndian(header[40..], checked((uint)dataBytes));

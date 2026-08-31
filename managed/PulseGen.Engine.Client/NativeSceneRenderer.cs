@@ -126,17 +126,23 @@ public static unsafe class NativeSceneRenderer
         var output = Path.GetFullPath(outputDirectory);
         var prefix = SafePrefix(scene.Name);
         var takeFiles = scene.ReceiverRigs.Where(receiver => receiver.Enabled)
-            .Select(receiver => Path.Combine(output, $"{prefix}_{SafeNativeName(receiver.Name, "Receiver")}.wav"))
-            .Order(StringComparer.Ordinal)
-            .Select(path =>
+            .Select(receiver => new
             {
-                if (!File.Exists(path))
+                Receiver = receiver,
+                Path = Path.Combine(output, $"{prefix}_{NativeReceiverName(scene, receiver)}.wav")
+            })
+            .OrderBy(item => item.Path, StringComparer.Ordinal)
+            .Select(item =>
+            {
+                if (!File.Exists(item.Path))
                 {
-                    throw new FileNotFoundException("The native engine did not produce an expected isolated receiver take.", path);
+                    throw new FileNotFoundException("The native engine did not produce an expected isolated receiver take.", item.Path);
                 }
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
+                using var stream = new FileStream(item.Path, FileMode.Open, FileAccess.Read, FileShare.Read, 1024 * 1024, FileOptions.SequentialScan);
                 return new RenderedTakeIdentity(
-                    Path.GetFileName(path),
+                    item.Receiver.Id,
+                    item.Receiver.Name,
+                    Path.GetFileName(item.Path),
                     stream.Length,
                     Convert.ToHexStringLower(SHA256.HashData(stream)));
             })
@@ -146,7 +152,7 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            7,
+            8,
             EngineVersion,
             AbiVersion,
             AcousticModel,
@@ -214,7 +220,7 @@ public static unsafe class NativeSceneRenderer
     }
 
     private sealed record RenderDependency(string Name, string Version, string Role);
-    private sealed record RenderedTakeIdentity(string FileName, long SizeBytes, string Sha256);
+    private sealed record RenderedTakeIdentity(Guid ReceiverRigId, string ReceiverName, string FileName, long SizeBytes, string Sha256);
     private sealed record RenderReceiptDocument(
         int ReceiptVersion,
         string EngineVersion,
@@ -822,7 +828,7 @@ public static unsafe class NativeSceneRenderer
 
     private static void ConfigureReceiver(SceneDocument scene, nint engine, ReceiverRig receiver)
     {
-        var namePointer = Marshal.StringToCoTaskMemUTF8(receiver.Name);
+        var namePointer = Marshal.StringToCoTaskMemUTF8(NativeReceiverName(scene, receiver));
         try
         {
             var descriptor = new NativeReceiver
@@ -916,6 +922,23 @@ public static unsafe class NativeSceneRenderer
         var safe = new string((string.IsNullOrEmpty(value) ? fallback : value).Select(character =>
             char.IsAsciiLetterOrDigit(character) || character is '-' or '_' ? character : '_').ToArray());
         return safe.Length > 63 ? safe[..63] : safe;
+    }
+
+    private static string NativeReceiverName(SceneDocument scene, ReceiverRig receiver)
+    {
+        var safe = SafeNativeName(receiver.Name, "Receiver");
+        var collides = scene.ReceiverRigs
+            .Where(candidate => candidate.Enabled)
+            .Count(candidate => string.Equals(SafeNativeName(candidate.Name, "Receiver"), safe, StringComparison.Ordinal)) > 1;
+        if (!collides)
+        {
+            return safe;
+        }
+
+        const int guidCharacters = 32;
+        const int separatorCharacters = 1;
+        var prefixLength = 63 - guidCharacters - separatorCharacters;
+        return $"{safe[..Math.Min(safe.Length, prefixLength)]}_{receiver.Id:N}";
     }
 
     private static nint ResolveLibrary(string libraryName, Assembly assembly, DllImportSearchPath? searchPath)

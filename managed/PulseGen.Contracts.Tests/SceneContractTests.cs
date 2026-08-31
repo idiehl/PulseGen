@@ -111,6 +111,30 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public async Task ProjectPathsAcceptFolderPickerTrailingSeparators()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"pulsegen-picker-{Guid.NewGuid():N}.pulseproj");
+        var pickerPath = directory + Path.DirectorySeparatorChar;
+        try
+        {
+            var expected = SampleScenes.CreateFlyby();
+            await ProjectStore.SaveAsync(expected, pickerPath);
+
+            var loaded = await ProjectStore.LoadAsync(pickerPath);
+
+            Assert.Equal(expected.ProjectId, loaded.ProjectId);
+            Assert.Equal(Path.Combine(directory, "project.json"), ProjectStore.ResolveManifestPath(pickerPath));
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task CheckedInSurfaceEchoProjectMatchesItsFactoryScene()
     {
         var fixtureDirectory = Path.Combine(AppContext.BaseDirectory, "Fixtures", "SurfaceEcho.pulseproj");
@@ -444,5 +468,45 @@ public sealed class SceneContractTests
         Assert.Contains(issues, issue => issue.Path == "assets/0/sha256");
         Assert.Contains(issues, issue => issue.Path == "assets/0/sizeBytes");
         Assert.Contains(issues, issue => issue.Path == "assets/2/sha256" && issue.Message.Contains("unique", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void ReceiverTakeArrangementRequiresVerifiedChannelsAndBoundedEdits()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var hashes = new[] { new string('a', 64), new string('b', 64), new string('c', 64), new string('d', 64) };
+        scene.Assets.AddRange(
+        [
+            new AssetRef { Sha256 = hashes[0], Kind = AssetKind.Render, FileName = "source.wav", MediaType = "audio/wav", SizeBytes = 100, SampleRate = 48000, Channels = 2, DurationSeconds = 1 },
+            new AssetRef { Sha256 = hashes[1], Kind = AssetKind.Render, FileName = "left.wav", MediaType = "audio/wav", SizeBytes = 60, SampleRate = 48000, Channels = 1, DurationSeconds = 1 },
+            new AssetRef { Sha256 = hashes[2], Kind = AssetKind.Render, FileName = "right.wav", MediaType = "audio/wav", SizeBytes = 60, SampleRate = 48000, Channels = 1, DurationSeconds = 1 },
+            new AssetRef { Sha256 = hashes[3], Kind = AssetKind.Render, FileName = "receipt.json", MediaType = "application/vnd.pulsegen.render-receipt+json", SizeBytes = 80 }
+        ]);
+        scene.CaptureTakes.Add(new CaptureTake
+        {
+            Id = Guid.NewGuid(),
+            ReceiverRigId = scene.ReceiverRigs[0].Id,
+            Name = "Listener take",
+            SourceAssetHash = hashes[0],
+            LeftAssetHash = hashes[1],
+            RightAssetHash = hashes[2],
+            RenderReceiptHash = hashes[3],
+            TrimEndSeconds = 0.75
+        });
+
+        Assert.Empty(SceneValidator.Validate(scene));
+
+        scene.CaptureTakes[0] = scene.CaptureTakes[0] with
+        {
+            ReceiverRigId = Guid.NewGuid(),
+            LeftAssetHash = new string('e', 64),
+            LeftGainLinear = 5,
+            TrimEndSeconds = 1.5
+        };
+        var issues = SceneValidator.Validate(scene);
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/receiverRigId", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/leftAssetHash", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/gain", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/trim", StringComparison.Ordinal));
     }
 }

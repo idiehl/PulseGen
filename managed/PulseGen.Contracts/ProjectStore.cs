@@ -32,11 +32,7 @@ public static class ProjectStore
     public static async Task<string> SaveAsync(SceneDocument scene, string projectDirectory, CancellationToken cancellationToken = default)
     {
         SceneValidator.EnsureValid(scene);
-        var fullDirectory = Path.GetFullPath(projectDirectory);
-        if (!fullDirectory.EndsWith(".pulseproj", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Working project directories must end in .pulseproj.", nameof(projectDirectory));
-        }
+        var fullDirectory = NormalizeProjectDirectory(projectDirectory);
 
         Directory.CreateDirectory(fullDirectory);
         Directory.CreateDirectory(Path.Combine(fullDirectory, "assets", "sha256"));
@@ -88,10 +84,11 @@ public static class ProjectStore
         string? license = null,
         CancellationToken cancellationToken = default)
     {
-        _ = ResolveManifestPath(projectDirectory);
+        var projectRoot = NormalizeProjectDirectory(projectDirectory);
+        _ = ResolveManifestPath(projectRoot);
         var source = Path.GetFullPath(sourcePath);
         var hash = await ComputeSha256Async(source, cancellationToken);
-        var assetRoot = Path.Combine(Path.GetFullPath(projectDirectory), "assets", "sha256", hash[..2]);
+        var assetRoot = Path.Combine(projectRoot, "assets", "sha256", hash[..2]);
         Directory.CreateDirectory(assetRoot);
         var destination = Path.Combine(assetRoot, hash);
         if (File.Exists(destination))
@@ -149,8 +146,9 @@ public static class ProjectStore
         {
             throw new ArgumentException("Asset identity must be a 64-character SHA-256 value.", nameof(sha256));
         }
-        _ = ResolveManifestPath(projectDirectory);
-        return Path.Combine(Path.GetFullPath(projectDirectory), "assets", "sha256", sha256[..2].ToLowerInvariant(), sha256.ToLowerInvariant());
+        var projectRoot = NormalizeProjectDirectory(projectDirectory);
+        _ = ResolveManifestPath(projectRoot);
+        return Path.Combine(projectRoot, "assets", "sha256", sha256[..2].ToLowerInvariant(), sha256.ToLowerInvariant());
     }
 
     public static async Task<string> PackAsync(
@@ -209,14 +207,10 @@ public static class ProjectStore
         CancellationToken cancellationToken = default)
     {
         var fullArchivePath = Path.GetFullPath(archivePath);
-        var destination = Path.GetFullPath(projectDirectory);
+        var destination = NormalizeProjectDirectory(projectDirectory);
         if (!fullArchivePath.EndsWith(".pulsepack", StringComparison.OrdinalIgnoreCase))
         {
             throw new ArgumentException("Portable project archives must end in .pulsepack.", nameof(archivePath));
-        }
-        if (!destination.EndsWith(".pulseproj", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Working project directories must end in .pulseproj.", nameof(projectDirectory));
         }
         if (Directory.Exists(destination) || File.Exists(destination))
         {
@@ -280,11 +274,7 @@ public static class ProjectStore
 
     public static string ResolveManifestPath(string projectDirectory)
     {
-        var fullDirectory = Path.GetFullPath(projectDirectory);
-        if (!fullDirectory.EndsWith(".pulseproj", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException("Working project directories must end in .pulseproj.", nameof(projectDirectory));
-        }
+        var fullDirectory = NormalizeProjectDirectory(projectDirectory);
 
         var manifestPath = Path.Combine(fullDirectory, "project.json");
         if (!File.Exists(manifestPath))
@@ -293,5 +283,16 @@ public static class ProjectStore
         }
 
         return manifestPath;
+    }
+
+    private static string NormalizeProjectDirectory(string projectDirectory)
+    {
+        var fullDirectory = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectDirectory));
+        if (!fullDirectory.EndsWith(".pulseproj", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("Working project directories must end in .pulseproj.", nameof(projectDirectory));
+        }
+
+        return fullDirectory;
     }
 }

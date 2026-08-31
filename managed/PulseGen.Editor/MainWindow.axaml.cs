@@ -48,6 +48,7 @@ public sealed partial class MainWindow : Window
     private string? lastProjectDirectory;
     private CancellationTokenSource? analysisCancellation;
     private CancellationTokenSource? spectralCancellation;
+    private CancellationTokenSource? receiverTakeCancellation;
     private CancellationTokenSource? syncCancellation;
     private NativeSceneRenderer.PreviewSession? audioPreview;
     private SceneSelection currentSelection;
@@ -73,6 +74,11 @@ public sealed partial class MainWindow : Window
     private int spectralLoadVersion;
     private int spectralSelectionVersion;
     private bool spectralAuditionPlaying;
+    private IReadOnlyList<ReceiverTakeSession> receiverTakeSessions = [];
+    private ReceiverTakeSession? activeReceiverTake;
+    private int receiverTakeLoadVersion;
+    private bool refreshingReceiverTakeControls;
+    private bool receiverTakeAuditionPlaying;
 
     public MainWindow()
     {
@@ -89,6 +95,7 @@ public sealed partial class MainWindow : Window
         };
         Viewport.SceneEdited += (_, message) => MarkSceneEdited(message);
         SpectralTrackPlot.TrackSelected += SelectSpectralTrack;
+        ReceiverTakeTimeline.TakeSelected += SelectReceiverTake;
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
         previewTimer.Stop();
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
@@ -162,6 +169,7 @@ public sealed partial class MainWindow : Window
         RefreshReceiverSummary();
         RefreshAnalysisTakeChoices();
         RefreshSpectralWorkspace();
+        RefreshReceiverTakeWorkspace();
         var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
         for (var index = 0; index < tickLabels.Length; index++)
         {
@@ -1701,6 +1709,7 @@ public sealed partial class MainWindow : Window
             lastProjectDirectory = projectDirectory;
             sceneDirty = false;
             RefreshSpectralWorkspace();
+            RefreshReceiverTakeWorkspace();
             StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}";
         }
         catch (Exception exception)
@@ -2365,7 +2374,24 @@ public sealed partial class MainWindow : Window
             var receipt = await Task.Run(() => NativeSceneRenderer.Render(scene, output, profile, lastProjectDirectory));
             lastRenderDirectory = output;
             RefreshAnalysisTakeChoices();
-            StatusText.Text = $"Rendered {receipt.FilesWritten} stereo takes with {profile.Name} + provenance receipt · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000} · {output}";
+            if (lastProjectDirectory is not null && !sceneDirty)
+            {
+                try
+                {
+                    var imported = await CaptureTakeImporter.ImportAsync(scene, lastProjectDirectory, receipt.RenderReceiptPath);
+                    scene = imported.Scene;
+                    Viewport.Scene = scene;
+                    sceneDirty = false;
+                    RefreshReceiverTakeWorkspace(scene.CaptureTakes.LastOrDefault()?.Id);
+                    StatusText.Text = $"Rendered and recorded {imported.ImportedTakeCount} stereo takes · {imported.AddedAssetCount} immutable assets added · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000}";
+                }
+                catch (Exception exception)
+                {
+                    StatusText.Text = $"Render completed, but project take import was rejected without changing the manifest: {exception.Message}";
+                }
+                return;
+            }
+            StatusText.Text = $"Rendered {receipt.FilesWritten} external stereo files with {profile.Name} · save the scene before rendering to add them to Receiver Takes · {output}";
         }
         catch (Exception exception)
         {
@@ -2500,19 +2526,37 @@ public sealed partial class MainWindow : Window
     {
         SignalWorkspace.IsVisible = true;
         SpectrumWorkspace.IsVisible = false;
+        ReceiverTakesWorkspace.IsVisible = false;
         SignalWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#71DCCF"));
         SpectrumWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
+        ReceiverTakesWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
     }
 
     private void OnSpectrumWorkspaceClicked(object? sender, RoutedEventArgs e)
     {
         SignalWorkspace.IsVisible = false;
         SpectrumWorkspace.IsVisible = true;
+        ReceiverTakesWorkspace.IsVisible = false;
         SignalWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
         SpectrumWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#71DCCF"));
+        ReceiverTakesWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
         if (lastProjectDirectory is not null && spectralSessions.Count == 0)
         {
             RefreshSpectralWorkspace();
+        }
+    }
+
+    private void OnReceiverTakesWorkspaceClicked(object? sender, RoutedEventArgs e)
+    {
+        SignalWorkspace.IsVisible = false;
+        SpectrumWorkspace.IsVisible = false;
+        ReceiverTakesWorkspace.IsVisible = true;
+        SignalWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
+        SpectrumWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#8191A6"));
+        ReceiverTakesWorkspaceButton.Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#71DCCF"));
+        if (lastProjectDirectory is not null && receiverTakeSessions.Count == 0)
+        {
+            RefreshReceiverTakeWorkspace();
         }
     }
 
@@ -2927,6 +2971,448 @@ public sealed partial class MainWindow : Window
         SpectralRenderButton.IsEnabled = enabled;
     }
 
+    private async void RefreshReceiverTakeWorkspace(Guid? preferredTakeId = null)
+    {
+        var version = ++receiverTakeLoadVersion;
+        preferredTakeId ??= activeReceiverTake?.Take.Id;
+        if (lastProjectDirectory is null)
+        {
+            ClearReceiverTakeWorkspace("Save the project, then render to record editable receiver takes.");
+            return;
+        }
+        ClearReceiverTakeWorkspace("Verifying saved receiver takes…");
+        try
+        {
+            var snapshot = scene;
+            var projectDirectory = lastProjectDirectory;
+            var sessions = await Task.Run(() => ReceiverTakeCatalog.LoadAsync(snapshot, projectDirectory));
+            if (version != receiverTakeLoadVersion)
+            {
+                return;
+            }
+            receiverTakeSessions = sessions;
+            ReceiverTakeList.ItemsSource = sessions;
+            ReceiverTakeList.IsEnabled = sessions.Count > 0;
+            ReceiverTakeTimeline.Sessions = sessions;
+            var duration = Math.Max(scene.Timeline.DurationSeconds, sessions.Count == 0 ? 0 : sessions.Max(session => session.ArrangedEndSeconds));
+            ReceiverTakeTimeline.TimelineDurationSeconds = Math.Max(duration, 1);
+            ReceiverTimelineSummaryText.Text = $"{sessions.Count} take{(sessions.Count == 1 ? string.Empty : "s")} · {duration:0.000} s";
+            ReceiverTimelineEndText.Text = $"{duration:0.###} s";
+            ReceiverTakeCountText.Text = sessions.Count == 0
+                ? "No project takes yet"
+                : $"{sessions.Count} stereo take{(sessions.Count == 1 ? string.Empty : "s")} · {sessions.Count(session => session.Take.IncludedInMaster)} in master";
+            if (sessions.Count == 0)
+            {
+                ClearSelectedReceiverTake();
+                return;
+            }
+            var selected = sessions.FirstOrDefault(session => session.Take.Id == preferredTakeId) ?? sessions[0];
+            ReceiverTakeList.SelectedItem = selected;
+            SelectReceiverTake(selected);
+        }
+        catch (Exception exception)
+        {
+            if (version == receiverTakeLoadVersion)
+            {
+                ClearReceiverTakeWorkspace($"Receiver takes could not be verified: {exception.Message}");
+            }
+        }
+    }
+
+    private void ClearReceiverTakeWorkspace(string message)
+    {
+        receiverTakeSessions = [];
+        activeReceiverTake = null;
+        ReceiverTakeList.ItemsSource = Array.Empty<ReceiverTakeSession>();
+        ReceiverTakeList.IsEnabled = false;
+        ReceiverTakeTimeline.Sessions = [];
+        ReceiverTakeTimeline.SelectedTakeId = null;
+        ReceiverTakeTimeline.TimelineDurationSeconds = Math.Max(scene.Timeline.DurationSeconds, 1);
+        ReceiverTakeCountText.Text = message;
+        ReceiverTimelineSummaryText.Text = "0 project takes";
+        ReceiverTimelineEndText.Text = $"{scene.Timeline.DurationSeconds:0.###} s";
+        ClearSelectedReceiverTake();
+    }
+
+    private void ClearSelectedReceiverTake()
+    {
+        activeReceiverTake = null;
+        ReceiverTakeNameText.Text = "Choose a recorded take";
+        ReceiverTakeDetailsText.Text = "Channel and timing details appear here.";
+        SetReceiverTakeActionsEnabled(false);
+    }
+
+    private void OnReceiverTakeSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (ReceiverTakeList.SelectedItem is ReceiverTakeSession session)
+        {
+            SelectReceiverTake(session);
+        }
+    }
+
+    private void SelectReceiverTake(ReceiverTakeSession session)
+    {
+        activeReceiverTake = session;
+        ReceiverTakeTimeline.SelectedTakeId = session.Take.Id;
+        if (!ReferenceEquals(ReceiverTakeList.SelectedItem, session))
+        {
+            ReceiverTakeList.SelectedItem = session;
+        }
+        refreshingReceiverTakeControls = true;
+        try
+        {
+            ReceiverTakeNameText.Text = session.Take.Name;
+            ReceiverTakeDetailsText.Text = $"{session.Receiver.Name} · {session.SampleRate:N0} Hz · {session.DurationSeconds:0.000} s · immutable stereo source retained";
+            ReceiverTakeIncluded.IsChecked = session.Take.IncludedInMaster;
+            ReceiverTakeLinked.IsChecked = session.Take.ChannelsLinked;
+            ReceiverTakeLeftMuted.IsChecked = session.Take.LeftMuted;
+            ReceiverTakeRightMuted.IsChecked = session.Take.RightMuted;
+            ReceiverTakeLeftGain.Text = FormatNumber(session.Take.LeftGainLinear);
+            ReceiverTakeRightGain.Text = FormatNumber(session.Take.RightGainLinear);
+            ReceiverTakeOffset.Text = FormatNumber(session.Take.TimelineOffsetSeconds);
+            ReceiverTakeTrimStart.Text = FormatNumber(session.Take.TrimStartSeconds);
+            ReceiverTakeTrimEnd.Text = session.Take.TrimEndSeconds is { } trimEnd ? FormatNumber(trimEnd) : string.Empty;
+        }
+        finally
+        {
+            refreshingReceiverTakeControls = false;
+        }
+        SetReceiverTakeActionsEnabled(true);
+    }
+
+    private void OnReceiverTakeLinkedChanged(object? sender, RoutedEventArgs e)
+    {
+        if (refreshingReceiverTakeControls || activeReceiverTake is null)
+        {
+            return;
+        }
+        if (ReceiverTakeLinked.IsChecked == true)
+        {
+            ReceiverTakeRightMuted.IsChecked = ReceiverTakeLeftMuted.IsChecked;
+            ReceiverTakeRightGain.Text = ReceiverTakeLeftGain.Text;
+        }
+        SetReceiverTakeActionsEnabled(true);
+    }
+
+    private bool TryBuildReceiverTakeEdit(out CaptureTake replacement, out string error)
+    {
+        replacement = activeReceiverTake?.Take ?? new CaptureTake { Id = Guid.Empty, ReceiverRigId = Guid.Empty, Name = string.Empty };
+        if (activeReceiverTake is null || lastProjectDirectory is null)
+        {
+            error = "Select a take in a saved project first.";
+            return false;
+        }
+        if (!TryReadNumber(ReceiverTakeLeftGain, out var leftGain) || leftGain is < 0 or > 4 ||
+            !TryReadNumber(ReceiverTakeRightGain, out var rightGain) || rightGain is < 0 or > 4 ||
+            !TryReadNumber(ReceiverTakeOffset, out var offset) || offset is < 0 or > 3600 ||
+            !TryReadNumber(ReceiverTakeTrimStart, out var trimStart) || trimStart < 0)
+        {
+            error = "Channel gains must be 0–4, and start/in times must be finite non-negative seconds.";
+            return false;
+        }
+        double? trimEnd = null;
+        if (!string.IsNullOrWhiteSpace(ReceiverTakeTrimEnd.Text))
+        {
+            if (!TryReadNumber(ReceiverTakeTrimEnd, out var parsedTrimEnd))
+            {
+                error = "The out point must be a number in seconds or left blank for the full take.";
+                return false;
+            }
+            trimEnd = parsedTrimEnd;
+        }
+        var effectiveEnd = trimEnd ?? activeReceiverTake.DurationSeconds;
+        if (trimStart >= effectiveEnd || effectiveEnd > activeReceiverTake.DurationSeconds + 1e-9)
+        {
+            error = $"The in/out range must stay inside this {activeReceiverTake.DurationSeconds:0.000}-second take.";
+            return false;
+        }
+        var linked = ReceiverTakeLinked.IsChecked == true;
+        replacement = activeReceiverTake.Take with
+        {
+            IncludedInMaster = ReceiverTakeIncluded.IsChecked == true,
+            ChannelsLinked = linked,
+            LeftMuted = ReceiverTakeLeftMuted.IsChecked == true,
+            RightMuted = linked ? ReceiverTakeLeftMuted.IsChecked == true : ReceiverTakeRightMuted.IsChecked == true,
+            LeftGainLinear = leftGain,
+            RightGainLinear = linked ? leftGain : rightGain,
+            TimelineOffsetSeconds = offset,
+            TrimStartSeconds = trimStart,
+            TrimEndSeconds = trimEnd
+        };
+        error = string.Empty;
+        return true;
+    }
+
+    private async void OnApplyReceiverTakeClicked(object? sender, RoutedEventArgs e)
+    {
+        if (!TryBuildReceiverTakeEdit(out var replacement, out var error) || lastProjectDirectory is null)
+        {
+            StatusText.Text = $"Take edit was not applied · {error}";
+            return;
+        }
+        SetReceiverTakeBusy(true);
+        receiverTakeCancellation = new CancellationTokenSource();
+        try
+        {
+            StopPreviewTransport();
+            var takes = scene.CaptureTakes.ToList();
+            var index = takes.FindIndex(take => take.Id == replacement.Id);
+            if (index < 0)
+            {
+                throw new InvalidDataException("The selected take no longer exists in the project manifest.");
+            }
+            takes[index] = replacement;
+            var updated = scene with { CaptureTakes = takes, UpdatedAtUtc = DateTimeOffset.UtcNow };
+            SceneValidator.EnsureValid(updated);
+            await ProjectStore.SaveAsync(updated, lastProjectDirectory, receiverTakeCancellation.Token);
+            scene = updated;
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            StatusText.Text = $"Take arrangement saved · {replacement.Name} · source audio was not overwritten";
+            RefreshReceiverTakeWorkspace(replacement.Id);
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Take edit failed without replacing the saved arrangement: {exception.Message}";
+        }
+        finally
+        {
+            receiverTakeCancellation.Dispose();
+            receiverTakeCancellation = null;
+            SetReceiverTakeBusy(false);
+        }
+    }
+
+    private void OnRevertReceiverTakeClicked(object? sender, RoutedEventArgs e)
+    {
+        if (activeReceiverTake is not null)
+        {
+            SelectReceiverTake(activeReceiverTake);
+            StatusText.Text = "Take fields restored to the last saved arrangement";
+        }
+    }
+
+    private async void OnHearReceiverTakeClicked(object? sender, RoutedEventArgs e) =>
+        await AuditionReceiverTakeAsync(ReceiverAuditionMode.Stereo, "Stereo take", ReceiverTakeHearButton);
+
+    private async void OnHearReceiverTakeLeftClicked(object? sender, RoutedEventArgs e) =>
+        await AuditionReceiverTakeAsync(ReceiverAuditionMode.LeftCentered, "Isolated left channel", ReceiverTakeHearLeftButton);
+
+    private async void OnHearReceiverTakeRightClicked(object? sender, RoutedEventArgs e) =>
+        await AuditionReceiverTakeAsync(ReceiverAuditionMode.RightCentered, "Isolated right channel", ReceiverTakeHearRightButton);
+
+    private async Task AuditionReceiverTakeAsync(ReceiverAuditionMode mode, string label, Button activeButton)
+    {
+        if (receiverTakeAuditionPlaying)
+        {
+            StopPreviewTransport();
+            StatusText.Text = "Receiver take audition stopped · project was not changed";
+            return;
+        }
+        if (activeReceiverTake is null)
+        {
+            StatusText.Text = "Choose a receiver take to hear first";
+            return;
+        }
+        StopPreviewTransport();
+        SetReceiverTakeBusy(true);
+        receiverTakeCancellation = new CancellationTokenSource();
+        try
+        {
+            StatusText.Text = $"Preparing {label.ToLowerInvariant()} from verified channel assets…";
+            var rendered = await ReceiverTakeMixer.RenderTakeAsync(activeReceiverTake, mode, cancellationToken: receiverTakeCancellation.Token);
+            StartReceiverTakeAudition(rendered, label, activeButton);
+        }
+        catch (Exception exception)
+        {
+            StopPreviewTransport();
+            StatusText.Text = $"Receiver take audition failed: {exception.Message}";
+        }
+        finally
+        {
+            receiverTakeCancellation.Dispose();
+            receiverTakeCancellation = null;
+            SetReceiverTakeBusy(false);
+        }
+    }
+
+    private async void OnHearReceiverMasterClicked(object? sender, RoutedEventArgs e)
+    {
+        if (receiverTakeAuditionPlaying)
+        {
+            StopPreviewTransport();
+            StatusText.Text = "Receiver master audition stopped · project was not changed";
+            return;
+        }
+        StopPreviewTransport();
+        SetReceiverTakeBusy(true);
+        receiverTakeCancellation = new CancellationTokenSource();
+        try
+        {
+            StatusText.Text = "Building the arranged stereo master from verified take channels…";
+            var rendered = await ReceiverTakeMixer.BuildMasterAsync(receiverTakeSessions, receiverTakeCancellation.Token);
+            StartReceiverTakeAudition(rendered, "Arranged stereo master", ReceiverMasterHearButton);
+        }
+        catch (Exception exception)
+        {
+            StopPreviewTransport();
+            StatusText.Text = $"Receiver master audition failed: {exception.Message}";
+        }
+        finally
+        {
+            receiverTakeCancellation.Dispose();
+            receiverTakeCancellation = null;
+            SetReceiverTakeBusy(false);
+        }
+    }
+
+    private void StartReceiverTakeAudition(ReceiverMixResult rendered, string label, Button activeButton)
+    {
+        var profile = GetActiveRenderProfile();
+        audioPreview = NativeSceneRenderer.StartBufferPreview(
+            rendered.Buffer.InterleavedSamples,
+            (uint)rendered.Buffer.SampleRate,
+            (uint)profile.BufferFrames);
+        previewStarted = DateTimeOffset.UtcNow;
+        previewDurationSeconds = rendered.Buffer.DurationSeconds;
+        previewAdvancesScene = false;
+        previewCompletionStatus = $"{label} audition complete · project was not changed";
+        previewInterruptedStatus = $"{label} audition stopped · the WASAPI device was removed or rerouted";
+        receiverTakeAuditionPlaying = true;
+        previewTimer.Start();
+        PlayButton.Content = "▶  Auditioning";
+        activeButton.Content = "■ Playing";
+        var overload = rendered.Peak > 1 ? " · peak exceeds 0 dBFS; no normalization applied" : string.Empty;
+        StatusText.Text = $"{label} · peak {rendered.Peak:0.000} · {rendered.Buffer.DurationSeconds:0.000} s · in-process WASAPI{overload}";
+    }
+
+    private async void OnExportReceiverChannelsClicked(object? sender, RoutedEventArgs e)
+    {
+        if (activeReceiverTake is null)
+        {
+            StatusText.Text = "Choose a receiver take before exporting its channels";
+            return;
+        }
+        SetReceiverTakeBusy(true);
+        receiverTakeCancellation = new CancellationTokenSource();
+        try
+        {
+            var outputDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "PulseGen",
+                "ReceiverExports");
+            var stem = $"{SafeName(activeReceiverTake.Take.Name)}-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}";
+            var leftPath = Path.Combine(outputDirectory, $"{stem}-L.wav");
+            var rightPath = Path.Combine(outputDirectory, $"{stem}-R.wav");
+            var left = await ReceiverTakeMixer.RenderChannelAsync(activeReceiverTake, leftChannel: true, includeTimelineOffset: true, cancellationToken: receiverTakeCancellation.Token);
+            var right = await ReceiverTakeMixer.RenderChannelAsync(activeReceiverTake, leftChannel: false, includeTimelineOffset: true, cancellationToken: receiverTakeCancellation.Token);
+            await Task.Run(() => FloatWaveFile.WriteAtomic(leftPath, left), receiverTakeCancellation.Token);
+            await Task.Run(() => FloatWaveFile.WriteAtomic(rightPath, right), receiverTakeCancellation.Token);
+            StatusText.Text = $"Isolated mono L/R files exported with saved gain, trim, and timeline start · {outputDirectory}";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Channel export failed: {exception.Message}";
+        }
+        finally
+        {
+            receiverTakeCancellation.Dispose();
+            receiverTakeCancellation = null;
+            SetReceiverTakeBusy(false);
+        }
+    }
+
+    private async void OnRenderReceiverMasterClicked(object? sender, RoutedEventArgs e)
+    {
+        if (lastProjectDirectory is null)
+        {
+            StatusText.Text = "Save the project before building a recorded stereo master";
+            return;
+        }
+        StopPreviewTransport();
+        SetReceiverTakeBusy(true);
+        receiverTakeCancellation = new CancellationTokenSource();
+        try
+        {
+            var rendered = await ReceiverTakeMixer.BuildMasterAsync(receiverTakeSessions, receiverTakeCancellation.Token);
+            var outputDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "PulseGen",
+                "Masters");
+            var output = Path.Combine(outputDirectory, $"{SafeName(scene.Name)}-master-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.wav");
+            await Task.Run(() => FloatWaveFile.WriteAtomic(output, rendered.Buffer), receiverTakeCancellation.Token);
+            var imported = await ProjectStore.ImportAssetAsync(
+                lastProjectDirectory,
+                output,
+                AssetKind.Render,
+                "audio/wav",
+                $"PulseGen receiver master; takes={string.Join(',', rendered.TakeIds.Select(id => id.ToString("D")))}; normalization=none",
+                cancellationToken: receiverTakeCancellation.Token);
+            imported = imported with
+            {
+                SampleRate = rendered.Buffer.SampleRate,
+                Channels = 2,
+                DurationSeconds = rendered.Buffer.DurationSeconds
+            };
+            var assets = scene.Assets.ToList();
+            var existing = assets.FirstOrDefault(asset => string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+            {
+                assets.Add(imported);
+            }
+            else if (existing.Kind != imported.Kind || !string.Equals(existing.MediaType, imported.MediaType, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("The master collides with an existing asset that has incompatible metadata.");
+            }
+            scene = scene with { Assets = assets, UpdatedAtUtc = DateTimeOffset.UtcNow };
+            await ProjectStore.SaveAsync(scene, lastProjectDirectory, receiverTakeCancellation.Token);
+            Viewport.Scene = scene;
+            sceneDirty = false;
+            var overload = rendered.Peak > 1 ? " · peak exceeds 0 dBFS; float samples were preserved without normalization" : string.Empty;
+            StatusText.Text = $"Stereo master rendered from {rendered.TakeIds.Count} takes · peak {rendered.Peak:0.000}{overload} · {output}";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Receiver master render failed: {exception.Message}";
+        }
+        finally
+        {
+            receiverTakeCancellation.Dispose();
+            receiverTakeCancellation = null;
+            SetReceiverTakeBusy(false);
+        }
+    }
+
+    private void SetReceiverTakeBusy(bool busy)
+    {
+        SetReceiverTakeActionsEnabled(!busy && activeReceiverTake is not null);
+        ReceiverTakeList.IsEnabled = !busy && receiverTakeSessions.Count > 0;
+        ReceiverMasterHearButton.IsEnabled = !busy && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
+        ReceiverMasterRenderButton.IsEnabled = !busy && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
+    }
+
+    private void SetReceiverTakeActionsEnabled(bool enabled)
+    {
+        ReceiverTakeIncluded.IsEnabled = enabled;
+        ReceiverTakeLinked.IsEnabled = enabled;
+        ReceiverTakeLeftMuted.IsEnabled = enabled;
+        ReceiverTakeLeftGain.IsEnabled = enabled;
+        var rightEnabled = enabled && ReceiverTakeLinked.IsChecked != true;
+        ReceiverTakeRightMuted.IsEnabled = rightEnabled;
+        ReceiverTakeRightGain.IsEnabled = rightEnabled;
+        ReceiverTakeOffset.IsEnabled = enabled;
+        ReceiverTakeTrimStart.IsEnabled = enabled;
+        ReceiverTakeTrimEnd.IsEnabled = enabled;
+        ReceiverTakeApplyButton.IsEnabled = enabled;
+        ReceiverTakeRevertButton.IsEnabled = enabled;
+        ReceiverTakeHearButton.IsEnabled = enabled;
+        ReceiverTakeHearLeftButton.IsEnabled = enabled;
+        ReceiverTakeHearRightButton.IsEnabled = enabled;
+        ReceiverTakeExportChannelsButton.IsEnabled = enabled;
+        ReceiverMasterHearButton.IsEnabled = enabled && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
+        ReceiverMasterRenderButton.IsEnabled = enabled && receiverTakeSessions.Any(session => session.Take.IncludedInMaster);
+    }
+
     private void OnPreviewTick(object? sender, EventArgs e)
     {
         var elapsed = (DateTimeOffset.UtcNow - previewStarted).TotalSeconds;
@@ -2967,8 +3453,13 @@ public sealed partial class MainWindow : Window
         audioPreview?.Dispose();
         audioPreview = null;
         spectralAuditionPlaying = false;
+        receiverTakeAuditionPlaying = false;
         PlayButton.Content = "▶  Preview";
         SpectralAuditionButton.Content = "▶  Hear";
+        ReceiverTakeHearButton.Content = "▶ Stereo";
+        ReceiverTakeHearLeftButton.Content = "▶ Left";
+        ReceiverTakeHearRightButton.Content = "▶ Right";
+        ReceiverMasterHearButton.Content = "▶ Master";
     }
 
     protected override void OnClosed(EventArgs e)
@@ -2976,6 +3467,7 @@ public sealed partial class MainWindow : Window
         StopPreviewTransport();
         analysisCancellation?.Cancel();
         spectralCancellation?.Cancel();
+        receiverTakeCancellation?.Cancel();
         syncCancellation?.Cancel();
         atlasIdentity?.Dispose();
         atlasHttp.Dispose();

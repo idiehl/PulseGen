@@ -525,7 +525,7 @@
         <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Margin="12,0">
           <Button x:Name="SignalWorkspaceButton" Grid.Column="0" Content="SIGNAL GRAPH" Background="Transparent" Foreground="#71DCCF" Click="OnSignalWorkspaceClicked" />
           <Button x:Name="SpectrumWorkspaceButton" Grid.Column="1" Content="SPECTRUM" Background="Transparent" Foreground="#8191A6" Click="OnSpectrumWorkspaceClicked" />
-          <Button Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#566477" IsEnabled="False" ToolTip.Tip="The dedicated take arranger is a later milestone; isolated receiver files remain available after every render." />
+          <Button x:Name="ReceiverTakesWorkspaceButton" Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#8191A6" Click="OnReceiverTakesWorkspaceClicked" />
           <TextBlock Grid.Column="4" x:Name="StatusText" Text="Ready · native renderer awaiting command" Foreground="#7D8DA2" VerticalAlignment="Center" />
         </Grid>
         <Grid x:Name="SignalWorkspace" Grid.Row="1" ColumnDefinitions="340,*,330" Margin="10,0,10,10">
@@ -616,6 +616,79 @@
                 <Button x:Name="SpectralAuditionButton" Content="▶  Hear" Click="OnAuditionSpectralClicked" />
                 <Button x:Name="SpectralSaveEditButton" Grid.Column="1" Content="⌑  Save edit" Click="OnSaveSpectralEditClicked" />
                 <Button x:Name="SpectralRenderButton" Grid.Column="2" Content="⇥  WAV" Background="#353056" Foreground="#DED7FA" Click="OnRenderSpectralClicked" />
+              </Grid>
+            </StackPanel>
+          </Border>
+        </Grid>
+
+        <Grid x:Name="ReceiverTakesWorkspace" Grid.Row="1" ColumnDefinitions="250,*,320" Margin="10,0,10,10" IsVisible="False">
+          <Border Classes="panel" Padding="11">
+            <Grid RowDefinitions="Auto,*,Auto">
+              <TextBlock Classes="sectionTitle" Text="RECORDED LISTENING POINTS" />
+              <ListBox x:Name="ReceiverTakeList" Grid.Row="1" Margin="0,7" SelectionChanged="OnReceiverTakeSelectionChanged" />
+              <StackPanel Grid.Row="2" Spacing="4">
+                <TextBlock x:Name="ReceiverTakeCountText" Text="No project takes yet" Foreground="#83D8CD" FontSize="10" />
+                <Grid ColumnDefinitions="*,*" ColumnSpacing="5">
+                  <Button x:Name="ReceiverMasterHearButton" Content="▶ Master" IsEnabled="False" Click="OnHearReceiverMasterClicked" />
+                  <Button x:Name="ReceiverMasterRenderButton" Grid.Column="1" Content="⇥ Export WAV" IsEnabled="False" Background="#353056" Foreground="#DED7FA" Click="OnRenderReceiverMasterClicked" />
+                </Grid>
+                <TextBlock Text="Each saved render adds one take per receiver rig." TextWrapping="Wrap" Foreground="#67798E" FontSize="9" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border Grid.Column="1" Classes="panel" Margin="8,0" Padding="9">
+            <Grid RowDefinitions="Auto,*,Auto">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Text="STEREO TAKE ARRANGEMENT" Classes="sectionTitle" />
+                <TextBlock x:Name="ReceiverTimelineSummaryText" Grid.Column="1" Text="0.000 s" Foreground="#71839A" FontSize="9" />
+              </Grid>
+              <local:ReceiverTakeTimelineView x:Name="ReceiverTakeTimeline" Grid.Row="1" Margin="0,7" />
+              <Grid Grid.Row="2" ColumnDefinitions="*,Auto">
+                <TextBlock Text="0 s" Foreground="#617286" FontSize="9" />
+                <TextBlock x:Name="ReceiverTimelineEndText" Grid.Column="1" Text="0 s" Foreground="#617286" FontSize="9" />
+              </Grid>
+            </Grid>
+          </Border>
+
+          <Border Grid.Column="2" Classes="panel" Padding="10,7">
+            <StackPanel Spacing="3">
+              <TextBlock Classes="sectionTitle" Text="SELECTED TAKE" />
+              <TextBlock x:Name="ReceiverTakeNameText" Text="Choose a recorded take" Foreground="#E5EDF2" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+              <TextBlock x:Name="ReceiverTakeDetailsText" Text="Channel and timing details appear here." Foreground="#71839A" FontSize="9" TextWrapping="Wrap" />
+              <Grid ColumnDefinitions="*,Auto,*,Auto" ColumnSpacing="5">
+                <TextBlock Text="Use in master" Foreground="#8192A7" VerticalAlignment="Center" />
+                <CheckBox x:Name="ReceiverTakeIncluded" Grid.Column="1" IsEnabled="False" />
+                <TextBlock Grid.Column="2" Text="Link L/R" Foreground="#8192A7" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                <CheckBox x:Name="ReceiverTakeLinked" Grid.Column="3" IsEnabled="False" Checked="OnReceiverTakeLinkedChanged" Unchecked="OnReceiverTakeLinkedChanged" />
+              </Grid>
+              <Grid ColumnDefinitions="22,Auto,*,62" RowDefinitions="Auto,Auto" ColumnSpacing="5" RowSpacing="3">
+                <TextBlock Text="L" Foreground="#58D8CB" FontWeight="Bold" VerticalAlignment="Center" />
+                <CheckBox x:Name="ReceiverTakeLeftMuted" Grid.Column="1" Content="Mute" IsEnabled="False" />
+                <TextBlock Grid.Column="2" Text="Gain (0–4)" Foreground="#8192A7" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                <TextBox x:Name="ReceiverTakeLeftGain" Grid.Column="3" Text="1.0" IsEnabled="False" HorizontalContentAlignment="Right" />
+                <TextBlock Grid.Row="1" Text="R" Foreground="#9A8FD3" FontWeight="Bold" VerticalAlignment="Center" />
+                <CheckBox x:Name="ReceiverTakeRightMuted" Grid.Row="1" Grid.Column="1" Content="Mute" IsEnabled="False" />
+                <TextBlock Grid.Row="1" Grid.Column="2" Text="Gain (0–4)" Foreground="#8192A7" VerticalAlignment="Center" HorizontalAlignment="Right" />
+                <TextBox x:Name="ReceiverTakeRightGain" Grid.Row="1" Grid.Column="3" Text="1.0" IsEnabled="False" HorizontalContentAlignment="Right" />
+              </Grid>
+              <Grid ColumnDefinitions="*,70,*,70,*,70" ColumnSpacing="4">
+                <TextBlock Text="Start" Foreground="#8192A7" VerticalAlignment="Center" />
+                <TextBox x:Name="ReceiverTakeOffset" Grid.Column="1" Text="0" IsEnabled="False" HorizontalContentAlignment="Right" ToolTip.Tip="Places this take on the master timeline, in seconds." />
+                <TextBlock Grid.Column="2" Text="In" Foreground="#8192A7" VerticalAlignment="Center" />
+                <TextBox x:Name="ReceiverTakeTrimStart" Grid.Column="3" Text="0" IsEnabled="False" HorizontalContentAlignment="Right" ToolTip.Tip="Skips audio before this point in the recorded take." />
+                <TextBlock Grid.Column="4" Text="Out" Foreground="#8192A7" VerticalAlignment="Center" />
+                <TextBox x:Name="ReceiverTakeTrimEnd" Grid.Column="5" Text="" IsEnabled="False" Watermark="full" HorizontalContentAlignment="Right" ToolTip.Tip="Stops using audio at this point; leave blank for the full take." />
+              </Grid>
+              <Grid ColumnDefinitions="*,*,*" ColumnSpacing="5">
+                <Button x:Name="ReceiverTakeApplyButton" Content="Apply" IsEnabled="False" Background="#266A64" Foreground="White" Click="OnApplyReceiverTakeClicked" />
+                <Button x:Name="ReceiverTakeRevertButton" Grid.Column="1" Content="Revert" IsEnabled="False" Click="OnRevertReceiverTakeClicked" />
+                <Button x:Name="ReceiverTakeExportChannelsButton" Grid.Column="2" Content="Export L/R" IsEnabled="False" Click="OnExportReceiverChannelsClicked" />
+              </Grid>
+              <Grid ColumnDefinitions="*,*,*" ColumnSpacing="5">
+                <Button x:Name="ReceiverTakeHearButton" Content="▶ Stereo" IsEnabled="False" Click="OnHearReceiverTakeClicked" />
+                <Button x:Name="ReceiverTakeHearLeftButton" Grid.Column="1" Content="▶ Left" IsEnabled="False" Click="OnHearReceiverTakeLeftClicked" ToolTip.Tip="Centers the isolated left channel for inspection." />
+                <Button x:Name="ReceiverTakeHearRightButton" Grid.Column="2" Content="▶ Right" IsEnabled="False" Click="OnHearReceiverTakeRightClicked" ToolTip.Tip="Centers the isolated right channel for inspection." />
               </Grid>
             </StackPanel>
           </Border>

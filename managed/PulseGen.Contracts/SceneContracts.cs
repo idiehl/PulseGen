@@ -360,9 +360,18 @@ public sealed record CaptureTake
     public required Guid Id { get; init; }
     public required Guid ReceiverRigId { get; init; }
     public required string Name { get; init; }
+    public string? SourceAssetHash { get; init; }
     public string? LeftAssetHash { get; init; }
     public string? RightAssetHash { get; init; }
     public bool ChannelsLinked { get; init; } = true;
+    public bool IncludedInMaster { get; init; } = true;
+    public bool LeftMuted { get; init; }
+    public bool RightMuted { get; init; }
+    public double LeftGainLinear { get; init; } = 1;
+    public double RightGainLinear { get; init; } = 1;
+    public double TimelineOffsetSeconds { get; init; }
+    public double TrimStartSeconds { get; init; }
+    public double? TrimEndSeconds { get; init; }
     public DateTimeOffset? RenderedAtUtc { get; init; }
     public string? RenderReceiptHash { get; init; }
 }

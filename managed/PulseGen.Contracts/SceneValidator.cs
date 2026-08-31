@@ -198,6 +198,7 @@ public static class SceneValidator
         }
 
         var assetsByHash = ValidateAssets(scene.Assets, issues);
+        ValidateCaptureTakes(scene.CaptureTakes, scene.ReceiverRigs, scene.Assets, issues);
 
         if (scene.Geometry.Count(geometry => geometry.Kind is GeometryKind.Plane or GeometryKind.Box) > 256)
         {
@@ -465,6 +466,102 @@ public static class SceneValidator
             }
         }
         return result;
+    }
+
+    private static void ValidateCaptureTakes(
+        IReadOnlyList<CaptureTake> takes,
+        IReadOnlyList<ReceiverRig> receivers,
+        IReadOnlyList<AssetRef> assets,
+        List<ValidationIssue> issues)
+    {
+        if (takes.Count > 4096)
+        {
+            issues.Add(new("captureTakes", "A project may retain at most 4,096 receiver takes."));
+        }
+
+        var receiverIds = receivers.Select(receiver => receiver.Id).ToHashSet();
+        var assetsByHash = assets
+            .Where(asset => !string.IsNullOrWhiteSpace(asset.Sha256))
+            .GroupBy(asset => asset.Sha256, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < takes.Count; index++)
+        {
+            var take = takes[index];
+            var path = $"captureTakes/{index}";
+            if (string.IsNullOrWhiteSpace(take.Name))
+            {
+                issues.Add(new($"{path}/name", "Receiver take name is required."));
+            }
+            if (!receiverIds.Contains(take.ReceiverRigId))
+            {
+                issues.Add(new($"{path}/receiverRigId", "Receiver take must reference a receiver rig in this scene."));
+            }
+            if (!double.IsFinite(take.LeftGainLinear) || take.LeftGainLinear is < 0 or > 4 ||
+                !double.IsFinite(take.RightGainLinear) || take.RightGainLinear is < 0 or > 4)
+            {
+                issues.Add(new($"{path}/gain", "Receiver take channel gains must be finite values from 0 to 4."));
+            }
+            if (!double.IsFinite(take.TimelineOffsetSeconds) || take.TimelineOffsetSeconds is < 0 or > 3600)
+            {
+                issues.Add(new($"{path}/timelineOffsetSeconds", "Receiver take start time must be a finite value from 0 to 3,600 seconds."));
+            }
+            if (!double.IsFinite(take.TrimStartSeconds) || take.TrimStartSeconds is < 0 or > 3600 ||
+                (take.TrimEndSeconds is { } trimEnd && (!double.IsFinite(trimEnd) || trimEnd <= take.TrimStartSeconds || trimEnd > 3600)))
+            {
+                issues.Add(new($"{path}/trim", "Receiver take trim points must define a finite, increasing range within 0 to 3,600 seconds."));
+            }
+
+            var source = RequireTakeAsset(take.SourceAssetHash, "sourceAssetHash", path, assetsByHash, issues);
+            var left = RequireTakeAsset(take.LeftAssetHash, "leftAssetHash", path, assetsByHash, issues);
+            var right = RequireTakeAsset(take.RightAssetHash, "rightAssetHash", path, assetsByHash, issues);
+            var receipt = RequireTakeAsset(take.RenderReceiptHash, "renderReceiptHash", path, assetsByHash, issues);
+            if (source is not null && source.Channels != 2)
+            {
+                issues.Add(new($"{path}/sourceAssetHash", "The untouched receiver source must declare two audio channels."));
+            }
+            if (left is not null && left.Channels != 1)
+            {
+                issues.Add(new($"{path}/leftAssetHash", "The isolated left asset must declare one audio channel."));
+            }
+            if (right is not null && right.Channels != 1)
+            {
+                issues.Add(new($"{path}/rightAssetHash", "The isolated right asset must declare one audio channel."));
+            }
+            if (receipt is not null && !string.Equals(receipt.MediaType, "application/vnd.pulsegen.render-receipt+json", StringComparison.Ordinal))
+            {
+                issues.Add(new($"{path}/renderReceiptHash", "Receiver take receipt must use the PulseGen render-receipt media type."));
+            }
+            if (left?.SampleRate is { } leftRate && right?.SampleRate is { } rightRate && leftRate != rightRate)
+            {
+                issues.Add(new($"{path}/channelSampleRate", "Left and right receiver assets must use the same sample rate."));
+            }
+            if (left?.DurationSeconds is { } leftDuration && right?.DurationSeconds is { } rightDuration &&
+                Math.Abs(leftDuration - rightDuration) > 0.5 / Math.Max(left.SampleRate ?? 1, right.SampleRate ?? 1))
+            {
+                issues.Add(new($"{path}/channelDuration", "Left and right receiver assets must contain the same duration."));
+            }
+            var duration = Math.Min(left?.DurationSeconds ?? double.PositiveInfinity, right?.DurationSeconds ?? double.PositiveInfinity);
+            if (double.IsFinite(duration) &&
+                (take.TrimStartSeconds >= duration || take.TrimEndSeconds is { } boundedTrimEnd && boundedTrimEnd > duration + 1e-9))
+            {
+                issues.Add(new($"{path}/trim", "Receiver take trim points must remain inside the captured audio."));
+            }
+        }
+    }
+
+    private static AssetRef? RequireTakeAsset(
+        string? hash,
+        string field,
+        string takePath,
+        IReadOnlyDictionary<string, AssetRef> assetsByHash,
+        List<ValidationIssue> issues)
+    {
+        if (string.IsNullOrWhiteSpace(hash) || !assetsByHash.TryGetValue(hash, out var asset) || asset.Kind != AssetKind.Render)
+        {
+            issues.Add(new($"{takePath}/{field}", "Receiver take must reference a declared immutable Render asset."));
+            return null;
+        }
+        return asset;
     }
 
     private static void ValidateGeometry(

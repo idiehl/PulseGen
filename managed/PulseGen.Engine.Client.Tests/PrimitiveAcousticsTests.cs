@@ -36,7 +36,12 @@ public sealed class PrimitiveAcousticsTests
             Assert.StartsWith("0.1.0-alpha.10", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
-            Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.All(receipt.RootElement.GetProperty("takes").EnumerateArray(), take =>
+            {
+                Assert.NotEqual(Guid.Empty, take.GetProperty("receiverRigId").GetGuid());
+                Assert.False(string.IsNullOrWhiteSpace(take.GetProperty("receiverName").GetString()));
+            });
             Assert.Equal(4, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
             Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
@@ -85,7 +90,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal((ulong)161803, first.DeterministicSeed);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
-            Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+            Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
             Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
@@ -264,7 +269,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(first.DeterministicSeed, second.DeterministicSeed);
             using (var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath)))
             {
-                Assert.Equal(7, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
+                Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
                 Assert.Contains(
                     receipt.RootElement.GetProperty("dependencies").EnumerateArray(),
                     dependency => dependency.GetProperty("name").GetString() == "Assimp");
