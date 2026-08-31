@@ -113,6 +113,16 @@ commands and reads bounded telemetry.
   at the current timeline frame instead of restarting the sound. Reopen work is
   kept off the audio callback, stopped auditions fail clearly after the bounded
   retry window, and a live scene can continue as a visual-only preview.
+- Lock-free real-time callback diagnostics. Every rendered hardware block records
+  total and peak render time, peak budget use, observed block size, and an exact
+  count of callbacks that finished after their own audio deadline. The editor's
+  engine badge translates this into `CLEAN`, `TIGHT`, or an explicit missed-block
+  count; its tooltip shows the average, peak, and configured budget in
+  milliseconds. These are PulseGen render-deadline measurements, not a falsely
+  inferred operating-system underrun counter. Live preview uses one retarded-time
+  solver step, one path-averaged atmosphere sample, and receiver-centred early
+  reflection geometry; final and offline rendering retain the six-step,
+  segmented, per-ear calculation.
 - Protected editor autosave and crash recovery. After eight seconds without a
   new scene edit, the editor writes a validated manifest snapshot to the local
   SQLite index while leaving the `.pulseproj` untouched. The newest 50 snapshots
@@ -160,7 +170,7 @@ Run the editor after a successful build:
 dotnet run --project managed/PulseGen.Editor/PulseGen.Editor.csproj -c Release
 ```
 
-The repository includes two deterministic checked-in sample projects and two
+The repository includes two deterministic checked-in sample projects and three
 built-in focused scenarios:
 
 - `samples/PhysicsFlyby.pulseproj/project.json` exercises motion, Doppler,
@@ -172,14 +182,29 @@ built-in focused scenarios:
 - `--sample atmosphere-field` compares two microphones across warm/cold air
   layers and bounded following/opposing wind zones, including deterministic
   turbulence and final-quality segmented propagation.
+- `--sample realtime-stress` supplies the audio acceptance shape: eight moving
+  primitive emitters, one binaural head, two microphone pairs, a reflective
+  parametric room, and the interactive 48 kHz / 512-frame profile.
 
-The render CLI can also create or render either built-in scene:
+The render CLI can also create or render any built-in scene:
 
 ```powershell
 dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample surface-echo --output out/renders/surface-echo
 dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample moving-receiver --output out/renders/moving-receiver
 dotnet run --project managed/PulseGen.RenderCli/PulseGen.RenderCli.csproj -c Release -- --sample atmosphere-field --output out/renders/atmosphere-field
 ```
+
+Run the silent, hardware-backed real-time acceptance scenario for six seconds
+on each of its head and two microphone receiver rigs:
+
+```powershell
+./scripts/run-realtime-stress.ps1 -Seconds 6
+```
+
+The command fails when playback never starts or any callback exceeds its block
+deadline, and prints machine-readable average/peak callback timing and peak load.
+Pass `-ReceiverIndex 1` to exercise only one receiver when investigating a
+specific rig.
 
 Atlas integration defaults to the production service origins but does not upload
 anything until **Sync project** is pressed. Candidate or local services can be

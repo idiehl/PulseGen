@@ -501,4 +501,161 @@ public static class SampleScenes
             UpdatedAtUtc = new DateTimeOffset(2026, 8, 29, 0, 0, 0, TimeSpan.Zero)
         };
     }
+
+    public static SceneDocument CreateRealtimeStress()
+    {
+        var scene = CreateFlyby();
+        scene.MotionPaths.Clear();
+        scene.Emitters.Clear();
+        scene.ReceiverRigs.Clear();
+
+        WaveformKind[] waveforms =
+        [
+            WaveformKind.Sine,
+            WaveformKind.Triangle,
+            WaveformKind.Saw,
+            WaveformKind.Square,
+            WaveformKind.Pulse,
+            WaveformKind.WhiteNoise,
+            WaveformKind.PinkNoise,
+            WaveformKind.Turbulence
+        ];
+        for (var index = 0; index < waveforms.Length; index++)
+        {
+            var pathId = RealtimeStressId(100 + index);
+            var emitterId = RealtimeStressId(200 + index);
+            var sourceNodeId = RealtimeStressId(300 + (index * 2));
+            var outputNodeId = RealtimeStressId(301 + (index * 2));
+            var startingAngle = index * Math.PI * 2 / waveforms.Length;
+            var radius = 7.5 + ((index % 3) * 2.25);
+            Vector3d Position(double angle, double y) => new(
+                Math.Cos(angle) * radius,
+                y,
+                Math.Sin(angle) * radius);
+            var height = 1.1 + ((index % 4) * 0.55);
+            scene.MotionPaths.Add(new MotionPath
+            {
+                Id = pathId,
+                Name = $"Stress orbit {index + 1}",
+                Kind = MotionPathKind.CatmullRom,
+                Keyframes =
+                [
+                    new MotionKeyframe { TimeSeconds = 0, PositionMetres = Position(startingAngle, height) },
+                    new MotionKeyframe { TimeSeconds = 2, PositionMetres = Position(startingAngle + (Math.PI * 0.5), height + 0.35) },
+                    new MotionKeyframe { TimeSeconds = 4, PositionMetres = Position(startingAngle + Math.PI, height) },
+                    new MotionKeyframe { TimeSeconds = 6, PositionMetres = Position(startingAngle + (Math.PI * 1.5), height - 0.25) }
+                ]
+            });
+            scene.Emitters.Add(new Emitter
+            {
+                Id = emitterId,
+                Name = $"Moving {waveforms[index]} source {index + 1}",
+                MotionPathId = pathId,
+                GainLinear = 0.04,
+                MinDistanceMetres = 0.75,
+                SignalGraph = new SignalGraph
+                {
+                    Nodes =
+                    [
+                        new SignalNode
+                        {
+                            Id = sourceNodeId,
+                            Name = waveforms[index].ToString(),
+                            Kind = SignalNodeKind.Oscillator,
+                            Waveform = waveforms[index],
+                            NumericParameters = new Dictionary<string, double>
+                            {
+                                ["frequencyHz"] = 110 + (index * 73),
+                                ["amplitude"] = 1,
+                                ["pulseWidth"] = 0.28 + ((index % 4) * 0.12),
+                                ["seed"] = 4242 + index
+                            }
+                        },
+                        new SignalNode { Id = outputNodeId, Name = "Mono emitter output", Kind = SignalNodeKind.Output }
+                    ],
+                    Connections =
+                    [
+                        new SignalConnection { FromNodeId = sourceNodeId, FromPort = "out", ToNodeId = outputNodeId, ToPort = "in" }
+                    ]
+                }
+            });
+        }
+
+        scene.ReceiverRigs.AddRange(
+        [
+            new ReceiverRig
+            {
+                Id = RealtimeStressId(400),
+                Name = "Stress listener",
+                Kind = ReceiverRigKind.BinauralHead,
+                Transform = new Transform { PositionMetres = new(0, 1.7, 0) },
+                SpacingMetres = 0.18,
+                HeadRadiusMetres = 0.09,
+                HrtfMode = HrtfMode.Parametric
+            },
+            new ReceiverRig
+            {
+                Id = RealtimeStressId(401),
+                Name = "Wide cardioid pair",
+                Kind = ReceiverRigKind.StereoMicrophone,
+                Transform = new Transform { PositionMetres = new(0, 1.8, -2) },
+                SpacingMetres = 0.3,
+                AngleDegrees = 90,
+                PolarPattern = PolarPattern.Cardioid,
+                SensitivityDb = -12
+            },
+            new ReceiverRig
+            {
+                Id = RealtimeStressId(402),
+                Name = "Close omni pair",
+                Kind = ReceiverRigKind.StereoMicrophone,
+                Transform = new Transform { PositionMetres = new(2, 1.2, 1) },
+                SpacingMetres = 0.1,
+                PolarPattern = PolarPattern.Omni,
+                SensitivityDb = -12
+            }
+        ]);
+        scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+        {
+            Id = RealtimeStressId(500),
+            Name = "Real-time stress 48k / 512",
+            Quality = RenderQuality.Interactive,
+            SampleRate = 48000,
+            BufferFrames = 512,
+            ReflectionOrder = 1,
+            RayCount = 1024,
+            ImpulseResponseSeconds = 2,
+            Seed = 424242
+        };
+        return scene with
+        {
+            ProjectId = RealtimeStressId(0),
+            Name = "Real-Time Physics Stress",
+            Timeline = new EventTimeline
+            {
+                DurationSeconds = 6,
+                Events =
+                [
+                    .. scene.Emitters.Select((emitter, index) => new TimelineEvent
+                    {
+                        Id = RealtimeStressId(600 + index),
+                        Kind = TimelineEventKind.StartEmitter,
+                        TimeSeconds = 0,
+                        TargetId = emitter.Id
+                    }),
+                    new TimelineEvent
+                    {
+                        Id = RealtimeStressId(699),
+                        Kind = TimelineEventKind.EndCapture,
+                        TimeSeconds = 6,
+                        Label = "End real-time stress run"
+                    }
+                ]
+            },
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero)
+        };
+    }
+
+    private static Guid RealtimeStressId(int value) =>
+        Guid.Parse($"f0f0f0f0-0000-4000-8000-{value:X12}");
 }

@@ -28,7 +28,25 @@ public readonly record struct PreviewDeviceStatus(
     ulong FramesProcessed,
     ulong CallbackCount,
     uint InterruptionCount,
-    uint RecoveryCount);
+    uint RecoveryCount,
+    ulong CallbackDurationNanosecondsTotal,
+    ulong CallbackDurationNanosecondsMaximum,
+    ulong CallbackDeadlineMissCount,
+    uint CallbackLoadPartsPerMillionMaximum,
+    uint CallbackFramesMaximum)
+{
+    public double CallbackBudgetMilliseconds =>
+        SampleRate == 0 ? 0 : 1000.0 * PeriodFrames / SampleRate;
+
+    public double CallbackDurationMillisecondsAverage =>
+        CallbackCount == 0 ? 0 : CallbackDurationNanosecondsTotal / (CallbackCount * 1_000_000.0);
+
+    public double CallbackDurationMillisecondsMaximum =>
+        CallbackDurationNanosecondsMaximum / 1_000_000.0;
+
+    public double CallbackLoadPercentMaximum =>
+        CallbackLoadPartsPerMillionMaximum / 10_000.0;
+}
 
 public static unsafe class NativeSceneRenderer
 {
@@ -477,7 +495,12 @@ public static unsafe class NativeSceneRenderer
                 status.FramesProcessed,
                 status.CallbackCount,
                 status.InterruptionCount,
-                status.RecoveryCount);
+                status.RecoveryCount,
+                status.CallbackDurationNanosecondsTotal,
+                status.CallbackDurationNanosecondsMaximum,
+                status.CallbackDeadlineMissCount,
+                status.CallbackLoadPartsPerMillionMaximum,
+                status.CallbackFramesMaximum);
         }
     }
 
@@ -1110,7 +1133,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeRenderReceipt { public uint Size, Version; public ulong FramesRendered; public uint FilesWritten, SampleRate; public double PeakLeft, PeakRight, RmsLeft, RmsRight, SpeedOfSoundMetresPerSecond; public ulong DeterministicSeed; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceConfig { public uint Size, Version, ReceiverIndex, SampleRate, PeriodFrames, ReflectionOrder, ExclusiveMode, Reserved; public ulong StartFrame; public uint RayCount, Seed; public double ImpulseResponseSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeBufferDeviceConfig { public uint Size, Version; public float* InterleavedStereo; public ulong FrameCount; public uint SampleRate, PeriodFrames, ExclusiveMode, Loop; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; public uint Recoverable, InterruptionCount, RecoveryCount, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; public uint Recoverable, InterruptionCount, RecoveryCount, Reserved; public ulong CallbackDurationNanosecondsTotal, CallbackDurationNanosecondsMaximum, CallbackDeadlineMissCount; public uint CallbackLoadPartsPerMillionMaximum, CallbackFramesMaximum; }
 
     private static class Native
     {

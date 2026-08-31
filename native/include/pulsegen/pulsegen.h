@@ -394,6 +394,11 @@ typedef struct pg_device_status {
     uint32_t interruption_count;
     uint32_t recovery_count;
     uint32_t reserved;
+    uint64_t callback_duration_nanoseconds_total;
+    uint64_t callback_duration_nanoseconds_maximum;
+    uint64_t callback_deadline_miss_count;
+    uint32_t callback_load_parts_per_million_maximum;
+    uint32_t callback_frames_maximum;
 } pg_device_status;
 
 PG_API uint32_t PG_CALL pg_get_abi_version(void);

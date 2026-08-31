@@ -43,6 +43,7 @@ public sealed partial class MainWindow : Window
     private readonly DispatcherTimer previewTimer;
     private readonly DispatcherTimer autosaveTimer;
     private readonly AudioDeviceRecoveryController audioDeviceRecovery = new();
+    private DateTimeOffset nextAudioPerformanceRefreshAtUtc;
     private DateTimeOffset previewStarted;
     private double previewDurationSeconds;
     private bool previewAdvancesScene = true;
@@ -3612,6 +3613,7 @@ public sealed partial class MainWindow : Window
             var currentStatus = audioPreview.Status;
             if (currentStatus.Running)
             {
+                UpdateAudioPerformanceBadge(currentStatus, now);
                 if (audioDeviceRecovery.IsActive)
                 {
                     audioDeviceRecovery.Cancel();
@@ -3627,6 +3629,8 @@ public sealed partial class MainWindow : Window
 
         if (audioDeviceRecovery.Begin(now))
         {
+            SetEngineState("AUDIO RECONNECTING", Avalonia.Media.Brushes.Goldenrod,
+                "Windows stopped or rerouted the output device. PulseGen retained the preview and is reopening the current default endpoint.");
             StatusText.Text = $"Audio output changed · reconnecting to the current Windows device (attempt 1/{audioDeviceRecovery.MaximumAttempts})…";
         }
         if (!audioDeviceRecovery.IsAttemptDue(now))
@@ -3643,6 +3647,7 @@ public sealed partial class MainWindow : Window
                 throw new InvalidOperationException("Windows reopened the endpoint, but playback did not enter the running state.");
             }
             var result = audioDeviceRecovery.CompleteAttempt(recovered: true, DateTimeOffset.UtcNow);
+            UpdateAudioPerformanceBadge(recovered, DateTimeOffset.UtcNow, force: true);
             StatusText.Text =
                 $"Audio restored · reconnected on attempt {result.AttemptsCompleted}/{result.MaximumAttempts} · resumed at {timelineSeconds:0.000} s · {recovered.SampleRate:N0} Hz";
             return true;
@@ -3654,6 +3659,8 @@ public sealed partial class MainWindow : Window
             if (result.Outcome == AudioDeviceRecoveryOutcome.Waiting)
             {
                 var delay = result.NextAttemptAtUtc!.Value - completedAt;
+                SetEngineState("AUDIO RETRYING", Avalonia.Media.Brushes.Goldenrod,
+                    $"Reconnect attempt {attempt} failed. The retained preview remains local while PulseGen waits {delay.TotalSeconds:0.##} seconds before trying again.");
                 StatusText.Text =
                     $"Audio device unavailable · reconnect attempt {attempt}/{result.MaximumAttempts} failed · next try in {delay.TotalSeconds:0.##} s: {exception.Message}";
                 return true;
@@ -3667,9 +3674,13 @@ public sealed partial class MainWindow : Window
             if (!previewAdvancesScene)
             {
                 StopPreviewTransport();
+                SetEngineState("AUDIO OFFLINE", Avalonia.Media.Brushes.IndianRed,
+                    $"The current preview could not reopen a Windows output device after {attempts} attempts.");
                 StatusText.Text = $"{interruptionStatus} · automatic reconnect failed after {attempts} attempts: {exception.Message}";
                 return false;
             }
+            SetEngineState("AUDIO OFFLINE", Avalonia.Media.Brushes.IndianRed,
+                $"The current preview could not reopen a Windows output device after {attempts} attempts.");
             StatusText.Text =
                 $"Visual-only preview · audio could not reconnect after {attempts} attempts: {exception.Message}";
             return true;
@@ -3680,6 +3691,7 @@ public sealed partial class MainWindow : Window
     {
         previewTimer.Stop();
         audioDeviceRecovery.Cancel();
+        nextAudioPerformanceRefreshAtUtc = default;
         audioPreview?.Dispose();
         audioPreview = null;
         spectralAuditionPlaying = false;
@@ -3690,6 +3702,36 @@ public sealed partial class MainWindow : Window
         ReceiverTakeHearLeftButton.Content = "▶ Left";
         ReceiverTakeHearRightButton.Content = "▶ Right";
         ReceiverMasterHearButton.Content = "▶ Master";
+        SetEngineState("ENGINE READY", Avalonia.Media.Brushes.LightSeaGreen,
+            "During preview this shows how much of each hardware audio block PulseGen needs to finish its physics rendering.");
+    }
+
+    private void UpdateAudioPerformanceBadge(
+        PreviewDeviceStatus status,
+        DateTimeOffset now,
+        bool force = false)
+    {
+        if (!force && now < nextAudioPerformanceRefreshAtUtc)
+        {
+            return;
+        }
+        nextAudioPerformanceRefreshAtUtc = now + TimeSpan.FromMilliseconds(250);
+        var summary = AudioPerformanceDiagnostics.Summarize(status);
+        var brush = summary.Severity switch
+        {
+            AudioPerformanceSeverity.Healthy => Avalonia.Media.Brushes.LightSeaGreen,
+            AudioPerformanceSeverity.Warning => Avalonia.Media.Brushes.Goldenrod,
+            AudioPerformanceSeverity.Critical => Avalonia.Media.Brushes.IndianRed,
+            _ => Avalonia.Media.Brushes.LightSteelBlue
+        };
+        SetEngineState(summary.BadgeText, brush, summary.Detail);
+    }
+
+    private void SetEngineState(string text, Avalonia.Media.IBrush foreground, string detail)
+    {
+        EngineStateText.Text = text;
+        EngineStateText.Foreground = foreground;
+        ToolTip.SetTip(EngineStateText, detail);
     }
 
     private async void OnEditorOpened(object? sender, EventArgs e)

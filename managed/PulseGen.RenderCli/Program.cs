@@ -17,7 +17,8 @@ var scene = arguments.TryGetValue("project", out var projectDirectory)
         "surface-echo" => SampleScenes.CreateSurfaceEcho(),
         "moving-receiver" => SampleScenes.CreateMovingReceiver(),
         "atmosphere-field" => SampleScenes.CreateAtmosphereField(),
-        _ => throw new ArgumentException($"Unknown sample '{selectedSample}'. Expected flyby, surface-echo, moving-receiver, or atmosphere-field.")
+        "realtime-stress" => SampleScenes.CreateRealtimeStress(),
+        _ => throw new ArgumentException($"Unknown sample '{selectedSample}'. Expected flyby, surface-echo, moving-receiver, atmosphere-field, or realtime-stress.")
     };
 
 if (arguments.TryGetValue("duration", out var durationText))
@@ -56,6 +57,70 @@ if (arguments.TryGetValue("write-project", out var destination))
 {
     var hash = await ProjectStore.SaveAsync(scene, destination);
     Console.WriteLine($"PULSEGEN_PROJECT_OK {Path.GetFullPath(destination)} sha256={hash}");
+}
+
+if (arguments.TryGetValue("preview-seconds", out var previewSecondsText))
+{
+    var previewSeconds = double.Parse(previewSecondsText, System.Globalization.CultureInfo.InvariantCulture);
+    if (!double.IsFinite(previewSeconds) || previewSeconds is <= 0 or > 30 || previewSeconds > scene.Timeline.DurationSeconds)
+    {
+        throw new ArgumentOutOfRangeException("preview-seconds", "Preview diagnostics must run for (0, 30] seconds without exceeding the scene timeline.");
+    }
+    var receiverIndex = arguments.TryGetValue("receiver-index", out var receiverIndexText)
+        ? uint.Parse(receiverIndexText, System.Globalization.CultureInfo.InvariantCulture)
+        : 0U;
+    var enabledReceiverCount = scene.ReceiverRigs.Count(receiver => receiver.Enabled);
+    if (receiverIndex >= scene.ReceiverRigs.Count || !scene.ReceiverRigs[(int)receiverIndex].Enabled)
+    {
+        throw new ArgumentOutOfRangeException(
+            "receiver-index",
+            $"Receiver index {receiverIndex} does not identify an enabled rig; the scene has {enabledReceiverCount} enabled receiver rigs.");
+    }
+
+    var profile = scene.RenderProfiles[0];
+    var silentScene = scene with
+    {
+        Emitters = scene.Emitters.Select(emitter => emitter with { GainLinear = 0 }).ToList()
+    };
+    using var preview = NativeSceneRenderer.StartPreview(
+        silentScene,
+        receiverIndex,
+        (uint)profile.SampleRate,
+        (uint)profile.BufferFrames,
+        (uint)profile.ReflectionOrder,
+        (uint)profile.RayCount,
+        profile.ImpulseResponseSeconds,
+        (uint)profile.Seed,
+        projectDirectory: arguments.ContainsKey("project") ? projectDirectory : null);
+    await Task.Delay(TimeSpan.FromSeconds(previewSeconds));
+    var status = preview.Status;
+    var clean = status.Running && status.CallbackCount > 0 && status.CallbackDeadlineMissCount == 0;
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        marker = clean ? "PULSEGEN_PREVIEW_DIAGNOSTICS_OK" : "PULSEGEN_PREVIEW_DIAGNOSTICS_FAILED",
+        engine = NativeSceneRenderer.EngineVersion,
+        scene = scene.Name,
+        muted = true,
+        previewSeconds,
+        receiverIndex,
+        emitterCount = scene.Emitters.Count,
+        receiverCount = enabledReceiverCount,
+        status.Running,
+        status.SampleRate,
+        status.PeriodFrames,
+        status.FramesProcessed,
+        status.CallbackCount,
+        status.CallbackDurationMillisecondsAverage,
+        status.CallbackDurationMillisecondsMaximum,
+        status.CallbackLoadPercentMaximum,
+        status.CallbackDeadlineMissCount,
+        status.CallbackFramesMaximum
+    }));
+    if (arguments.ContainsKey("require-clean-audio") && !clean)
+    {
+        throw new InvalidOperationException(
+            $"The preview ended with running={status.Running}, callbacks={status.CallbackCount}, and {status.CallbackDeadlineMissCount} audio render deadline misses.");
+    }
 }
 
 if (!arguments.ContainsKey("no-render"))

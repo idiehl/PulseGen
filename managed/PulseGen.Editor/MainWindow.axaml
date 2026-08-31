@@ -34,7 +34,7 @@
         <StackPanel Grid.Column="4" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
           <TextBlock x:Name="ActiveSampleRateText" Text="48 kHz · INTERACTIVE" Foreground="#B8C4D3" VerticalAlignment="Center" />
           <Border Background="#152E28" CornerRadius="9" Padding="8,3">
-            <TextBlock Text="ENGINE READY" Foreground="#73E6C2" FontSize="10" FontWeight="SemiBold" />
+            <TextBlock x:Name="EngineStateText" Text="ENGINE READY" Foreground="#73E6C2" FontSize="10" FontWeight="SemiBold" ToolTip.Tip="During preview this shows how much of each hardware audio block PulseGen needs to finish its physics rendering." />
           </Border>
         </StackPanel>
         <TextBlock Grid.Column="6" Text="0.1.0-alpha" Foreground="#64758B" VerticalAlignment="Center" />

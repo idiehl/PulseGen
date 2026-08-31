@@ -12,6 +12,7 @@
 #include <atomic>
 #include <bit>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -30,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.11";
+constexpr std::string_view engine_version = "0.1.0-alpha.12";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -374,8 +375,13 @@ struct pg_engine {
     std::atomic_uint64_t device_frame_cursor{};
     std::atomic_uint64_t device_frames_processed{};
     std::atomic_uint64_t device_callback_count{};
+    std::atomic_uint64_t device_callback_duration_nanoseconds_total{};
+    std::atomic_uint64_t device_callback_duration_nanoseconds_maximum{};
+    std::atomic_uint64_t device_callback_deadline_miss_count{};
     std::atomic_uint32_t device_interruption_count{};
     std::atomic_uint32_t device_recovery_count{};
+    std::atomic_uint32_t device_callback_load_parts_per_million_maximum{};
+    std::atomic_uint32_t device_callback_frames_maximum{};
     std::uint32_t device_sample_rate{};
     std::uint32_t device_period_frames{};
     std::uint32_t device_receiver_index{};
@@ -391,6 +397,60 @@ struct pg_engine {
 };
 
 namespace {
+
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free, "PulseGen requires lock-free 64-bit audio telemetry atomics.");
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "PulseGen requires lock-free 32-bit audio telemetry atomics.");
+
+using device_callback_clock = std::chrono::steady_clock;
+
+template <typename T>
+void store_atomic_maximum(std::atomic<T>& destination, T value) noexcept
+{
+    T observed = destination.load(std::memory_order_relaxed);
+    while (observed < value &&
+        !destination.compare_exchange_weak(observed, value, std::memory_order_relaxed, std::memory_order_relaxed)) {
+    }
+}
+
+void record_device_callback_timing(
+    pg_engine* engine,
+    device_callback_clock::time_point started,
+    std::uint32_t frame_count) noexcept
+{
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(device_callback_clock::now() - started).count();
+    const std::uint64_t elapsed_nanoseconds = elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0U;
+    engine->device_callback_duration_nanoseconds_total.fetch_add(elapsed_nanoseconds, std::memory_order_relaxed);
+    store_atomic_maximum(engine->device_callback_duration_nanoseconds_maximum, elapsed_nanoseconds);
+    store_atomic_maximum(engine->device_callback_frames_maximum, frame_count);
+
+    const std::uint32_t sample_rate = engine->device_sample_rate;
+    if (frame_count > 0U && sample_rate > 0U) {
+        const std::uint64_t deadline_nanoseconds =
+            (static_cast<std::uint64_t>(frame_count) * 1000000000ULL) / sample_rate;
+        if (elapsed_nanoseconds > deadline_nanoseconds) {
+            engine->device_callback_deadline_miss_count.fetch_add(1U, std::memory_order_relaxed);
+        }
+        const std::uint64_t load_parts_per_million = std::min<std::uint64_t>(
+            (elapsed_nanoseconds * sample_rate) / (static_cast<std::uint64_t>(frame_count) * 1000ULL),
+            std::numeric_limits<std::uint32_t>::max());
+        store_atomic_maximum(
+            engine->device_callback_load_parts_per_million_maximum,
+            static_cast<std::uint32_t>(load_parts_per_million));
+    }
+    // Publish the completed callback count last so readers never count work
+    // whose timing fields have not yet been recorded.
+    engine->device_callback_count.fetch_add(1U, std::memory_order_release);
+}
+
+void reset_device_callback_timing(pg_engine* engine) noexcept
+{
+    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+    engine->device_callback_duration_nanoseconds_total.store(0U, std::memory_order_relaxed);
+    engine->device_callback_duration_nanoseconds_maximum.store(0U, std::memory_order_relaxed);
+    engine->device_callback_deadline_miss_count.store(0U, std::memory_order_relaxed);
+    engine->device_callback_load_parts_per_million_maximum.store(0U, std::memory_order_relaxed);
+    engine->device_callback_frames_maximum.store(0U, std::memory_order_relaxed);
+}
 
 bool device_running(const pg_engine* engine) noexcept
 {
@@ -607,6 +667,57 @@ propagation_integral integrate_propagation_path(
         result.travel_time_seconds += segment.travel_time_seconds;
         result.absorption_exponent += segment.absorption_exponent;
         result.distance_metres += segment.distance_metres;
+    }
+    return result;
+}
+
+template <std::size_t PointCount>
+propagation_integral integrate_propagation_path_preview(
+    const atmosphere_state& atmosphere,
+    const std::array<vec3, PointCount>& points,
+    double frequency_hz,
+    double receive_time,
+    const atmosphere_sample* shared_atmosphere = nullptr) noexcept
+{
+    static_assert(PointCount >= 2U);
+    std::array<double, PointCount - 1U> distances{};
+    vec3 weighted_midpoint{};
+    double total_distance = 0.0;
+    for (std::size_t index = 0U; index + 1U < PointCount; ++index) {
+        const vec3 delta = points[index + 1U] - points[index];
+        const double distance = length(delta);
+        distances[index] = distance;
+        total_distance += distance;
+        weighted_midpoint = weighted_midpoint + ((points[index] + (delta * 0.5)) * distance);
+    }
+    if (total_distance <= 1.0e-12) {
+        return {};
+    }
+
+    const atmosphere_sample local = shared_atmosphere != nullptr
+        ? *shared_atmosphere
+        : sample_atmosphere(
+            atmosphere,
+            weighted_midpoint * (1.0 / total_distance),
+            receive_time);
+    const double local_speed = speed_of_sound(local.temperature_celsius, local.relative_humidity_percent);
+    propagation_integral result{};
+    result.distance_metres = total_distance;
+    result.absorption_exponent = air_absorption_per_metre(
+        local.relative_humidity_percent,
+        local.pressure_kilopascals,
+        frequency_hz) * total_distance;
+    for (std::size_t index = 0U; index + 1U < PointCount; ++index) {
+        const double distance = distances[index];
+        if (distance <= 1.0e-12) {
+            continue;
+        }
+        const vec3 direction = (points[index + 1U] - points[index]) * (1.0 / distance);
+        const double effective_speed = std::clamp(
+            local_speed + dot(local.wind, direction),
+            minimum_effective_sound_speed,
+            local_speed * 1.8);
+        result.travel_time_seconds += distance / effective_speed;
     }
     return result;
 }
@@ -1292,28 +1403,43 @@ bool surface_reflection_point(
 delayed_path_sample sample_delayed_path(
     const pg_engine& engine,
     const emitter_state& emitter,
+    vec3 initial_source_position,
     vec3 receiver_position,
     double receive_time,
     std::uint32_t sample_rate,
     std::uint32_t reflection_bounces,
     int reflection_axis,
     bool reflection_high_side,
-    double room_pressure_reflection = 1.0) noexcept
+    double room_pressure_reflection = 1.0,
+    std::uint32_t solver_iterations = 6U,
+    const atmosphere_sample* preview_atmosphere = nullptr) noexcept
 {
     double emission_time = receive_time;
-    vec3 source_position = sample_motion(emitter, emission_time);
+    vec3 source_position = initial_source_position;
     vec3 image_source = source_position;
     vec3 first_reflection_point = source_position;
     vec3 second_reflection_point = source_position;
     propagation_integral propagation{};
+    const std::uint32_t bounded_solver_iterations = std::clamp(solver_iterations, 1U, 6U);
+
+    const auto integrate_path = [&](const auto& points) noexcept {
+        return bounded_solver_iterations == 1U
+            ? integrate_propagation_path_preview(
+                engine.atmosphere,
+                points,
+                emitter.frequency_hz,
+                receive_time,
+                preview_atmosphere)
+            : integrate_propagation_path(
+                engine.atmosphere,
+                points,
+                emitter.frequency_hz,
+                receive_time);
+    };
 
     const auto update_propagation = [&]() noexcept {
         if (reflection_bounces == 0U) {
-            propagation = integrate_propagation_path(
-                engine.atmosphere,
-                std::array{ source_position, receiver_position },
-                emitter.frequency_hz,
-                receive_time);
+            propagation = integrate_path(std::array{ source_position, receiver_position });
             return true;
         }
         if (!engine.room.enabled) {
@@ -1330,11 +1456,7 @@ delayed_path_sample sample_delayed_path(
                     first_reflection_point)) {
                 return false;
             }
-            propagation = integrate_propagation_path(
-                engine.atmosphere,
-                std::array{ source_position, first_reflection_point, receiver_position },
-                emitter.frequency_hz,
-                receive_time);
+            propagation = integrate_path(std::array{ source_position, first_reflection_point, receiver_position });
             return true;
         }
         if (reflection_bounces == 2U) {
@@ -1349,18 +1471,17 @@ delayed_path_sample sample_delayed_path(
                     second_reflection_point)) {
                 return false;
             }
-            propagation = integrate_propagation_path(
-                engine.atmosphere,
-                std::array{ source_position, first_reflection_point, second_reflection_point, receiver_position },
-                emitter.frequency_hz,
-                receive_time);
+            propagation = integrate_path(
+                std::array{ source_position, first_reflection_point, second_reflection_point, receiver_position });
             return true;
         }
         return false;
     };
 
-    for (int iteration = 0; iteration < 6; ++iteration) {
-        source_position = sample_motion(emitter, emission_time);
+    for (std::uint32_t iteration = 0U; iteration < bounded_solver_iterations; ++iteration) {
+        if (iteration > 0U) {
+            source_position = sample_motion(emitter, emission_time);
+        }
         if (!update_propagation()) {
             return {};
         }
@@ -1368,7 +1489,7 @@ delayed_path_sample sample_delayed_path(
     }
 
     source_position = sample_motion(emitter, emission_time);
-    if (!update_propagation()) {
+    if (bounded_solver_iterations > 1U && !update_propagation()) {
         return {};
     }
 
@@ -1381,7 +1502,7 @@ delayed_path_sample sample_delayed_path(
     const double incident_sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
         absorption * transmission / attenuation_distance;
     if (reflection_bounces == 0U) {
-        return { incident_sample, distance, source_position, source_position - receiver_position };
+        return { incident_sample, distance, source_position, normalized(source_position - receiver_position) };
     }
 
     const double reflection_per_bounce = std::clamp(room_pressure_reflection, 0.0, 1.0);
@@ -1399,7 +1520,7 @@ delayed_path_sample sample_delayed_path(
         incident_sample * specular_gain,
         distance,
         source_position,
-        arrival_point - receiver_position,
+        normalized(arrival_point - receiver_position),
         incident_sample * diffuse_gain
     };
 }
@@ -1407,11 +1528,13 @@ delayed_path_sample sample_delayed_path(
 delayed_path_sample sample_geometry_reflection(
     const pg_engine& engine,
     const emitter_state& emitter,
+    vec3 initial_source_position,
     vec3 receiver_position,
     double receive_time,
     std::uint32_t sample_rate,
     std::size_t geometry_index,
-    const reflection_surface& surface) noexcept
+    const reflection_surface& surface,
+    std::uint32_t solver_iterations = 6U) noexcept
 {
     if (geometry_index >= engine.geometries.size()) {
         return {};
@@ -1422,26 +1545,34 @@ delayed_path_sample sample_geometry_reflection(
     }
 
     double emission_time = receive_time;
-    vec3 source_position = sample_motion(emitter, emission_time);
+    vec3 source_position = initial_source_position;
     vec3 image_source = source_position;
     vec3 reflection_point = source_position;
     propagation_integral propagation{};
-    for (int iteration = 0; iteration < 6; ++iteration) {
-        source_position = sample_motion(emitter, emission_time);
-        const double source_plane_distance = dot(source_position - surface.point, surface.normal);
-        image_source = source_position - (surface.normal * (2.0 * source_plane_distance));
-        const bool has_reflection_point = surface_reflection_point(image_source, receiver_position, surface, reflection_point);
-        propagation = has_reflection_point
-            ? integrate_propagation_path(
+    const std::uint32_t bounded_solver_iterations = std::clamp(solver_iterations, 1U, 6U);
+    const auto integrate_path = [&](const auto& points) noexcept {
+        return bounded_solver_iterations == 1U
+            ? integrate_propagation_path_preview(
                 engine.atmosphere,
-                std::array{ source_position, reflection_point, receiver_position },
+                points,
                 emitter.frequency_hz,
                 receive_time)
             : integrate_propagation_path(
                 engine.atmosphere,
-                std::array{ image_source, receiver_position },
+                points,
                 emitter.frequency_hz,
                 receive_time);
+    };
+    for (std::uint32_t iteration = 0U; iteration < bounded_solver_iterations; ++iteration) {
+        if (iteration > 0U) {
+            source_position = sample_motion(emitter, emission_time);
+        }
+        const double source_plane_distance = dot(source_position - surface.point, surface.normal);
+        image_source = source_position - (surface.normal * (2.0 * source_plane_distance));
+        const bool has_reflection_point = surface_reflection_point(image_source, receiver_position, surface, reflection_point);
+        propagation = has_reflection_point
+            ? integrate_path(std::array{ source_position, reflection_point, receiver_position })
+            : integrate_path(std::array{ image_source, receiver_position });
         emission_time = receive_time - propagation.travel_time_seconds;
     }
 
@@ -1466,11 +1597,13 @@ delayed_path_sample sample_geometry_reflection(
         return {};
     }
 
-    propagation = integrate_propagation_path(
-        engine.atmosphere,
-        std::array{ source_position, reflection_point, receiver_position },
-        emitter.frequency_hz,
-        receive_time);
+    if (bounded_solver_iterations > 1U) {
+        propagation = integrate_propagation_path(
+            engine.atmosphere,
+            std::array{ source_position, reflection_point, receiver_position },
+            emitter.frequency_hz,
+            receive_time);
+    }
     const double distance = propagation.distance_metres;
     const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
     const double absorption = std::exp(-propagation.absorption_exponent);
@@ -1501,14 +1634,14 @@ delayed_path_sample sample_geometry_reflection(
         incident_sample * specular_gain,
         distance,
         source_position,
-        reflection_point - receiver_position,
+        normalized(reflection_point - receiver_position),
         incident_sample * diffuse_gain
     };
 }
 
 double microphone_pattern_gain(pg_polar_pattern pattern, vec3 capsule_forward, vec3 source_direction) noexcept
 {
-    const double cosine = std::clamp(dot(normalized(capsule_forward), normalized(source_direction)), -1.0, 1.0);
+    const double cosine = std::clamp(dot(capsule_forward, source_direction), -1.0, 1.0);
     switch (pattern) {
     case PG_POLAR_CARDIOID:
         return 0.5 * (1.0 + cosine);
@@ -1761,7 +1894,8 @@ std::pair<float, float> render_frame(
     std::uint32_t reflection_order,
     std::uint32_t ray_count,
     double impulse_response_seconds,
-    std::uint32_t seed) noexcept
+    std::uint32_t seed,
+    bool realtime_approximation = false) noexcept
 {
     const receiver_state& receiver = engine.receivers[receiver_index];
     const vec3 receiver_centre = sample_motion(receiver, receive_time);
@@ -1803,8 +1937,46 @@ std::pair<float, float> render_frame(
             continue;
         }
 
-        const auto left_direct = sample_delayed_path(engine, emitter, left_position, receive_time, sample_rate, 0U, 0, false);
-        const auto right_direct = sample_delayed_path(engine, emitter, right_position, receive_time, sample_rate, 0U, 0, false);
+        const std::uint32_t solver_iterations = realtime_approximation ? 1U : 6U;
+        const vec3 initial_source_position = sample_motion(emitter, receive_time);
+        atmosphere_sample preview_direct_atmosphere{};
+        const atmosphere_sample* preview_direct_atmosphere_pointer = nullptr;
+        if (realtime_approximation) {
+            // The two direct routes differ only by the receiver spacing. Preview
+            // shares their centre-path field sample while retaining each route's
+            // own distance and wind projection for stereo timing.
+            preview_direct_atmosphere = sample_atmosphere(
+                engine.atmosphere,
+                initial_source_position + ((receiver_centre - initial_source_position) * 0.5),
+                receive_time);
+            preview_direct_atmosphere_pointer = &preview_direct_atmosphere;
+        }
+        const auto left_direct = sample_delayed_path(
+            engine,
+            emitter,
+            initial_source_position,
+            left_position,
+            receive_time,
+            sample_rate,
+            0U,
+            0,
+            false,
+            1.0,
+            solver_iterations,
+            preview_direct_atmosphere_pointer);
+        const auto right_direct = sample_delayed_path(
+            engine,
+            emitter,
+            initial_source_position,
+            right_position,
+            receive_time,
+            sample_rate,
+            0U,
+            0,
+            false,
+            1.0,
+            solver_iterations,
+            preview_direct_atmosphere_pointer);
         double left_sample = receiver_path_sample(left_direct, left_forward, left_pattern);
         double right_sample = receiver_path_sample(right_direct, right_forward, right_pattern);
         source_lateral += dot(normalized(left_direct.source_position - receiver_centre), right);
@@ -1815,30 +1987,51 @@ std::pair<float, float> render_frame(
         if (engine.room.enabled && reflection_order > 0U) {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int side = 0; side < 2; ++side) {
-                    const auto left_reflection = sample_delayed_path(
-                        engine,
-                        emitter,
-                        left_position,
-                        receive_time,
-                        sample_rate,
-                        1U,
-                        axis,
-                        side != 0,
-                        room_pressure_reflection);
-                    const auto right_reflection = sample_delayed_path(
-                        engine,
-                        emitter,
-                        right_position,
-                        receive_time,
-                        sample_rate,
-                        1U,
-                        axis,
-                        side != 0,
-                        room_pressure_reflection);
-                    left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
-                    right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
-                    diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
-                    diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                    if (realtime_approximation) {
+                        const auto reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            receiver_centre,
+                            receive_time,
+                            sample_rate,
+                            1U,
+                            axis,
+                            side != 0,
+                            room_pressure_reflection,
+                            solver_iterations);
+                        left_sample += receiver_path_sample(reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(reflection, right_forward, right_pattern);
+                    } else {
+                        const auto left_reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            left_position,
+                            receive_time,
+                            sample_rate,
+                            1U,
+                            axis,
+                            side != 0,
+                            room_pressure_reflection);
+                        const auto right_reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            right_position,
+                            receive_time,
+                            sample_rate,
+                            1U,
+                            axis,
+                            side != 0,
+                            room_pressure_reflection);
+                        left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                    }
                 }
             }
         }
@@ -1846,30 +2039,51 @@ std::pair<float, float> render_frame(
         if (engine.room.enabled && reflection_order > 1U) {
             for (int axis = 0; axis < 3; ++axis) {
                 for (int first_side = 0; first_side < 2; ++first_side) {
-                    const auto left_reflection = sample_delayed_path(
-                        engine,
-                        emitter,
-                        left_position,
-                        receive_time,
-                        sample_rate,
-                        2U,
-                        axis,
-                        first_side != 0,
-                        room_pressure_reflection);
-                    const auto right_reflection = sample_delayed_path(
-                        engine,
-                        emitter,
-                        right_position,
-                        receive_time,
-                        sample_rate,
-                        2U,
-                        axis,
-                        first_side != 0,
-                        room_pressure_reflection);
-                    left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
-                    right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
-                    diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
-                    diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                    if (realtime_approximation) {
+                        const auto reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            receiver_centre,
+                            receive_time,
+                            sample_rate,
+                            2U,
+                            axis,
+                            first_side != 0,
+                            room_pressure_reflection,
+                            solver_iterations);
+                        left_sample += receiver_path_sample(reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(reflection, right_forward, right_pattern);
+                    } else {
+                        const auto left_reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            left_position,
+                            receive_time,
+                            sample_rate,
+                            2U,
+                            axis,
+                            first_side != 0,
+                            room_pressure_reflection);
+                        const auto right_reflection = sample_delayed_path(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            right_position,
+                            receive_time,
+                            sample_rate,
+                            2U,
+                            axis,
+                            first_side != 0,
+                            room_pressure_reflection);
+                        left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                    }
                 }
             }
         }
@@ -1883,9 +2097,27 @@ std::pair<float, float> render_frame(
                 const std::size_t surface_count = reflection_surface_count(geometry);
                 for (std::size_t surface_index = 0U; surface_index < surface_count; ++surface_index) {
                     const reflection_surface surface = geometry_reflection_surface(geometry, surface_index);
+                    if (realtime_approximation) {
+                        const auto reflection = sample_geometry_reflection(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            receiver_centre,
+                            receive_time,
+                            sample_rate,
+                            geometry_index,
+                            surface,
+                            solver_iterations);
+                        left_sample += receiver_path_sample(reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(reflection, right_forward, right_pattern);
+                        continue;
+                    }
                     const auto left_reflection = sample_geometry_reflection(
                         engine,
                         emitter,
+                        initial_source_position,
                         left_position,
                         receive_time,
                         sample_rate,
@@ -1894,6 +2126,7 @@ std::pair<float, float> render_frame(
                     const auto right_reflection = sample_geometry_reflection(
                         engine,
                         emitter,
+                        initial_source_position,
                         right_position,
                         receive_time,
                         sample_rate,
@@ -1979,6 +2212,7 @@ void device_data_callback(ma_device* device, void* output, const void* input, ma
         }
         return;
     }
+    const device_callback_clock::time_point callback_started = device_callback_clock::now();
 
     const std::uint64_t start_frame = engine->device_frame_cursor.fetch_add(frame_count, std::memory_order_relaxed);
     engine->device_frames_processed.fetch_add(frame_count, std::memory_order_relaxed);
@@ -1999,7 +2233,7 @@ void device_data_callback(ma_device* device, void* output, const void* input, ma
                 samples[output_index + 1U] = 0.0F;
             }
         }
-        engine->device_callback_count.fetch_add(1U, std::memory_order_relaxed);
+        record_device_callback_timing(engine, callback_started, frame_count);
         return;
     }
     const std::uint32_t receiver_index = engine->device_receiver_index;
@@ -2015,11 +2249,12 @@ void device_data_callback(ma_device* device, void* output, const void* input, ma
             reflection_order,
             engine->device_ray_count,
             engine->device_impulse_response_seconds,
-            engine->device_seed);
+            engine->device_seed,
+            true);
         samples[static_cast<std::size_t>(frame) * 2U] = left;
         samples[(static_cast<std::size_t>(frame) * 2U) + 1U] = right;
     }
-    engine->device_callback_count.fetch_add(1U, std::memory_order_relaxed);
+    record_device_callback_timing(engine, callback_started, frame_count);
 }
 
 void device_notification_callback(const ma_device_notification* notification) noexcept
@@ -3051,7 +3286,7 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
     engine->device_buffer.clear();
     engine->device_frame_cursor.store(config->start_frame, std::memory_order_relaxed);
     engine->device_frames_processed.store(0U, std::memory_order_relaxed);
-    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+    reset_device_callback_timing(engine);
     engine->device_interruption_count.store(0U, std::memory_order_relaxed);
     engine->device_recovery_count.store(0U, std::memory_order_relaxed);
     engine->device_recovery_available.store(true, std::memory_order_release);
@@ -3104,7 +3339,7 @@ pg_status PG_CALL pg_engine_start_buffer_device(pg_engine* engine, const pg_buff
     engine->device_exclusive_mode = config->exclusive_mode != 0U;
     engine->device_frame_cursor.store(0U, std::memory_order_relaxed);
     engine->device_frames_processed.store(0U, std::memory_order_relaxed);
-    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+    reset_device_callback_timing(engine);
     engine->device_interruption_count.store(0U, std::memory_order_relaxed);
     engine->device_recovery_count.store(0U, std::memory_order_relaxed);
     engine->device_recovery_available.store(true, std::memory_order_release);
@@ -3138,7 +3373,7 @@ pg_status PG_CALL pg_engine_recover_device(pg_engine* engine, uint64_t resume_fr
     }
     engine->device_frame_cursor.store(resume_frame, std::memory_order_relaxed);
     engine->device_frames_processed.store(0U, std::memory_order_relaxed);
-    engine->device_callback_count.store(0U, std::memory_order_relaxed);
+    reset_device_callback_timing(engine);
 
     const pg_status recovery_status = initialize_playback_device(engine);
     if (recovery_status == PG_STATUS_OK) {
@@ -3187,12 +3422,20 @@ pg_status PG_CALL pg_engine_get_device_status(const pg_engine* engine, pg_device
     status->period_frames = engine->device_period_frames;
     status->receiver_index = engine->device_receiver_index;
     status->frames_processed = engine->device_frames_processed.load(std::memory_order_relaxed);
-    status->callback_count = engine->device_callback_count.load(std::memory_order_relaxed);
-    if (status->size >= sizeof(pg_device_status)) {
+    status->callback_count = engine->device_callback_count.load(std::memory_order_acquire);
+    constexpr std::size_t recovery_status_size = offsetof(pg_device_status, callback_duration_nanoseconds_total);
+    if (status->size >= recovery_status_size) {
         status->recoverable = engine->device_recovery_available.load(std::memory_order_acquire) ? 1U : 0U;
         status->interruption_count = engine->device_interruption_count.load(std::memory_order_relaxed);
         status->recovery_count = engine->device_recovery_count.load(std::memory_order_relaxed);
         status->reserved = 0U;
+    }
+    if (status->size >= sizeof(pg_device_status)) {
+        status->callback_duration_nanoseconds_total = engine->device_callback_duration_nanoseconds_total.load(std::memory_order_relaxed);
+        status->callback_duration_nanoseconds_maximum = engine->device_callback_duration_nanoseconds_maximum.load(std::memory_order_relaxed);
+        status->callback_deadline_miss_count = engine->device_callback_deadline_miss_count.load(std::memory_order_relaxed);
+        status->callback_load_parts_per_million_maximum = engine->device_callback_load_parts_per_million_maximum.load(std::memory_order_relaxed);
+        status->callback_frames_maximum = engine->device_callback_frames_maximum.load(std::memory_order_relaxed);
     }
     return PG_STATUS_OK;
 }

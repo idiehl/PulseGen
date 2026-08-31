@@ -1124,6 +1124,31 @@ int main(int argument_count, char** arguments)
     REQUIRE(initial_device_status.running == 0U);
     REQUIRE(initial_device_status.recoverable == 0U);
     REQUIRE(initial_device_status.frames_processed == 0U);
+    REQUIRE(initial_device_status.callback_duration_nanoseconds_total == 0U);
+    REQUIRE(initial_device_status.callback_duration_nanoseconds_maximum == 0U);
+    REQUIRE(initial_device_status.callback_deadline_miss_count == 0U);
+    REQUIRE(initial_device_status.callback_load_parts_per_million_maximum == 0U);
+    REQUIRE(initial_device_status.callback_frames_maximum == 0U);
+
+    struct legacy_device_status {
+        std::uint32_t size;
+        std::uint32_t version;
+        std::uint32_t running;
+        std::uint32_t sample_rate;
+        std::uint32_t period_frames;
+        std::uint32_t receiver_index;
+        std::uint64_t frames_processed;
+        std::uint64_t callback_count;
+        std::uint32_t recoverable;
+        std::uint32_t interruption_count;
+        std::uint32_t recovery_count;
+        std::uint32_t reserved;
+    };
+    static_assert(sizeof(legacy_device_status) == offsetof(pg_device_status, callback_duration_nanoseconds_total));
+    legacy_device_status legacy_status{ sizeof(legacy_device_status), PG_ABI_VERSION };
+    REQUIRE(pg_engine_get_device_status(engine, reinterpret_cast<pg_device_status*>(&legacy_status)) == PG_STATUS_OK);
+    REQUIRE(legacy_status.running == 0U);
+    REQUIRE(legacy_status.recoverable == 0U);
     REQUIRE(pg_engine_recover_device(engine, 0U) == PG_STATUS_INVALID_ARGUMENT);
 
     pg_device_config invalid_device{};
@@ -1211,6 +1236,11 @@ int main(int argument_count, char** arguments)
         REQUIRE(status.recoverable == 1U);
         REQUIRE(status.frames_processed > 0U);
         REQUIRE(status.callback_count > 0U);
+        REQUIRE(status.callback_duration_nanoseconds_total > 0U);
+        REQUIRE(status.callback_duration_nanoseconds_maximum > 0U);
+        REQUIRE(status.callback_deadline_miss_count == 0U);
+        REQUIRE(status.callback_load_parts_per_million_maximum > 0U);
+        REQUIRE(status.callback_frames_maximum > 0U);
         REQUIRE(status.interruption_count == 0U);
         REQUIRE(status.recovery_count == 0U);
         REQUIRE(pg_engine_recover_device(audio_engine, 48000U) == PG_STATUS_OK);
@@ -1220,6 +1250,9 @@ int main(int argument_count, char** arguments)
         REQUIRE(status.recoverable == 1U);
         REQUIRE(status.frames_processed > 0U);
         REQUIRE(status.callback_count > 0U);
+        REQUIRE(status.callback_duration_nanoseconds_total > 0U);
+        REQUIRE(status.callback_duration_nanoseconds_maximum > 0U);
+        REQUIRE(status.callback_deadline_miss_count == 0U);
         REQUIRE(status.interruption_count == 0U);
         REQUIRE(status.recovery_count == 1U);
         REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
@@ -1243,6 +1276,9 @@ int main(int argument_count, char** arguments)
         REQUIRE(status.receiver_index == std::numeric_limits<std::uint32_t>::max());
         REQUIRE(status.frames_processed > 0U);
         REQUIRE(status.recoverable == 1U);
+        REQUIRE(status.callback_duration_nanoseconds_total > 0U);
+        REQUIRE(status.callback_duration_nanoseconds_maximum > 0U);
+        REQUIRE(status.callback_deadline_miss_count == 0U);
         REQUIRE(pg_engine_recover_device(audio_engine, buffer_config.frame_count + 1U) == PG_STATUS_INVALID_ARGUMENT);
         REQUIRE(pg_engine_recover_device(audio_engine, buffer_config.frame_count / 2U) == PG_STATUS_OK);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1250,6 +1286,8 @@ int main(int argument_count, char** arguments)
         REQUIRE(status.running == 1U);
         REQUIRE(status.frames_processed > 0U);
         REQUIRE(status.recovery_count == 1U);
+        REQUIRE(status.callback_duration_nanoseconds_total > 0U);
+        REQUIRE(status.callback_deadline_miss_count == 0U);
         REQUIRE(pg_engine_stop_device(audio_engine) == PG_STATUS_OK);
         pg_engine_destroy(audio_engine);
         std::cout << "PULSEGEN_WASAPI_DEVICE_OK frames=" << status.frames_processed

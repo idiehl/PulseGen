@@ -45,6 +45,23 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void RealtimeStressSceneMatchesTheHardwareAcceptanceShape()
+    {
+        var scene = SampleScenes.CreateRealtimeStress();
+
+        Assert.Empty(SceneValidator.Validate(scene));
+        Assert.Equal(8, scene.Emitters.Count);
+        Assert.Equal(8, scene.MotionPaths.Count);
+        Assert.Single(scene.ReceiverRigs, receiver => receiver.Kind == ReceiverRigKind.BinauralHead);
+        Assert.Equal(2, scene.ReceiverRigs.Count(receiver => receiver.Kind == ReceiverRigKind.StereoMicrophone));
+        Assert.All(scene.Emitters, emitter => Assert.NotNull(emitter.MotionPathId));
+        Assert.Equal(48000, scene.RenderProfiles[0].SampleRate);
+        Assert.Equal(512, scene.RenderProfiles[0].BufferFrames);
+        Assert.Equal(RenderQuality.Interactive, scene.RenderProfiles[0].Quality);
+        Assert.Equal(1, scene.RenderProfiles[0].ReflectionOrder);
+    }
+
+    [Fact]
     public void AtmosphereFieldsRejectNonFiniteBoundsSeedsAndOverlaps()
     {
         var scene = SampleScenes.CreateAtmosphereField();

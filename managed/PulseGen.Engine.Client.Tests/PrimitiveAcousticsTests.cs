@@ -17,6 +17,31 @@ public sealed class PrimitiveAcousticsTests
     }
 
     [Fact]
+    public void PreviewTelemetryReportsBudgetAveragePeakAndNativeLoad()
+    {
+        var status = new PreviewDeviceStatus(
+            Running: true,
+            Recoverable: true,
+            SampleRate: 48000,
+            PeriodFrames: 512,
+            ReceiverIndex: 0,
+            FramesProcessed: 2048,
+            CallbackCount: 4,
+            InterruptionCount: 0,
+            RecoveryCount: 0,
+            CallbackDurationNanosecondsTotal: 8_000_000,
+            CallbackDurationNanosecondsMaximum: 4_500_000,
+            CallbackDeadlineMissCount: 0,
+            CallbackLoadPartsPerMillionMaximum: 425_000,
+            CallbackFramesMaximum: 512);
+
+        Assert.InRange(status.CallbackBudgetMilliseconds, 10.666, 10.667);
+        Assert.Equal(2, status.CallbackDurationMillisecondsAverage);
+        Assert.Equal(4.5, status.CallbackDurationMillisecondsMaximum);
+        Assert.Equal(42.5, status.CallbackLoadPercentMaximum);
+    }
+
+    [Fact]
     public void ManagedSceneActivatesMaterialTransmissionAndRecordsTheAcousticModel()
     {
         var root = Path.Combine(Path.GetTempPath(), $"pulsegen-primitive-acoustics-{Guid.NewGuid():N}");
@@ -33,7 +58,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.11", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.12", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
