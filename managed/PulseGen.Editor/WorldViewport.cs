@@ -8,7 +8,6 @@ namespace PulseGen.Editor;
 
 public sealed class WorldViewport : Control
 {
-    private static readonly IBrush BackgroundBrush = new SolidColorBrush(Color.Parse("#090D12"));
     private static readonly Pen GridPen = new(new SolidColorBrush(Color.Parse("#1A2633")), 1);
     private static readonly Pen AxisPen = new(new SolidColorBrush(Color.Parse("#2C4D54")), 1.2);
     private static readonly Pen PathPen = new(new SolidColorBrush(Color.Parse("#56D6C8")), 2.5);
@@ -102,7 +101,6 @@ public sealed class WorldViewport : Control
     public override void Render(DrawingContext context)
     {
         base.Render(context);
-        context.FillRectangle(BackgroundBrush, Bounds);
         if (Bounds.Width < 10 || Bounds.Height < 10)
         {
             return;

@@ -112,6 +112,7 @@ public sealed partial class MainWindow : Window
             PopulateInspector(currentSelection);
         };
         Viewport.SceneEdited += (_, message) => MarkSceneEdited(message);
+        GpuViewport.PerformanceUpdated += UpdateViewportPerformance;
         SpectralTrackPlot.TrackSelected += SelectSpectralTrack;
         ReceiverTakeTimeline.TakeSelected += SelectReceiverTake;
         previewTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(16), DispatcherPriority.Render, OnPreviewTick);
@@ -164,6 +165,7 @@ public sealed partial class MainWindow : Window
         atlasBaseETag = null;
         sceneDirty = false;
         Viewport.Scene = scene;
+        GpuViewport.Scene = scene;
         Viewport.TimeSeconds = 0;
         activeRenderProfileId = scene.RenderProfiles.First().Id;
         currentSelection = SceneSelection.Emitter(scene.Emitters[0].Id);
@@ -901,6 +903,7 @@ public sealed partial class MainWindow : Window
         }
         RefreshAtmosphereSummary();
         Viewport.Scene = scene;
+        GpuViewport.Scene = scene;
         Viewport.Selection = currentSelection;
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
         StatusText.Text = message;
@@ -939,6 +942,7 @@ public sealed partial class MainWindow : Window
     private void RejectSceneEdit(string description, ValidationIssue? error)
     {
         Viewport.Scene = scene;
+        GpuViewport.Scene = scene;
         Viewport.Selection = currentSelection;
         StatusText.Text = $"{description} rejected · {error?.Message ?? "the scene object is no longer available"}";
     }
@@ -1749,6 +1753,7 @@ public sealed partial class MainWindow : Window
         {
             scene = scene with { UpdatedAtUtc = DateTimeOffset.UtcNow };
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             hash = await ProjectStore.SaveAsync(scene, projectDirectory);
         }
         catch (Exception exception)
@@ -2439,6 +2444,7 @@ public sealed partial class MainWindow : Window
                     var imported = await CaptureTakeImporter.ImportAsync(scene, lastProjectDirectory, receipt.RenderReceiptPath);
                     scene = imported.Scene;
                     Viewport.Scene = scene;
+                    GpuViewport.Scene = scene;
                     sceneDirty = false;
                     RefreshReceiverTakeWorkspace(scene.CaptureTakes.LastOrDefault()?.Id);
                     StatusText.Text = $"Rendered and recorded {imported.ImportedTakeCount} stereo takes · {imported.AddedAssetCount} immutable assets added · peak {Math.Max(receipt.PeakLeft, receipt.PeakRight):0.000}";
@@ -2528,6 +2534,7 @@ public sealed partial class MainWindow : Window
                 analysisCancellation.Token);
             scene = imported.Scene;
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             RefreshSpectralWorkspace(imported.AnalysisReceiptSha256);
             var artifactCount = imported.DeclaredAssetCount + imported.ReusedAssetCount;
@@ -2906,6 +2913,7 @@ public sealed partial class MainWindow : Window
                 spectralCancellation.Token);
             scene = saved.Scene;
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             activeSpectralEditState = saved.State;
             SpectralEditStateText.Text = $"Saved immutable edit {saved.Asset.Sha256[..12]}… · parent retained";
@@ -2947,6 +2955,7 @@ public sealed partial class MainWindow : Window
             scene = saved.Scene;
             activeSpectralEditState = saved.State;
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             var rendered = await SpectralResynthesisService.RenderAsync(activeSpectralSession, saved.State.Document, spectralCancellation.Token);
             var outputDirectory = Path.Combine(
@@ -2983,6 +2992,7 @@ public sealed partial class MainWindow : Window
             scene = scene with { Assets = assets, UpdatedAtUtc = DateTimeOffset.UtcNow };
             await ProjectStore.SaveAsync(scene, lastProjectDirectory, spectralCancellation.Token);
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             SpectralEditStateText.Text = $"Edit {saved.Asset.Sha256[..12]}… · stereo mix {imported.Sha256[..12]}…";
             StatusText.Text = $"Spectral stereo WAV rendered · peak {rendered.Peak:0.000} · {output}";
@@ -3225,6 +3235,7 @@ public sealed partial class MainWindow : Window
             await ProjectStore.SaveAsync(updated, lastProjectDirectory, receiverTakeCancellation.Token);
             scene = updated;
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             StatusText.Text = $"Take arrangement saved · {replacement.Name} · source audio was not overwritten";
             RefreshReceiverTakeWorkspace(replacement.Id);
@@ -3498,6 +3509,7 @@ public sealed partial class MainWindow : Window
                 receiverTakeCancellation.Token);
             scene = imported.Scene;
             Viewport.Scene = scene;
+            GpuViewport.Scene = scene;
             sceneDirty = false;
             ReceiverMasterMetricsText.Text = StudioMetricsSummary(exported.Metrics);
             var overload = exported.Metrics.TruePeakDbTp is > 0
@@ -3577,6 +3589,7 @@ public sealed partial class MainWindow : Window
 
     private void OnPreviewTick(object? sender, EventArgs e)
     {
+        GpuViewport.ContinuousRendering = true;
         var elapsed = (DateTimeOffset.UtcNow - previewStarted).TotalSeconds;
         if (elapsed >= previewDurationSeconds)
         {
@@ -3690,6 +3703,7 @@ public sealed partial class MainWindow : Window
     private void StopPreviewTransport()
     {
         previewTimer.Stop();
+        GpuViewport.ContinuousRendering = false;
         audioDeviceRecovery.Cancel();
         nextAudioPerformanceRefreshAtUtc = default;
         audioPreview?.Dispose();
@@ -3732,6 +3746,46 @@ public sealed partial class MainWindow : Window
         EngineStateText.Text = text;
         EngineStateText.Foreground = foreground;
         ToolTip.SetTip(EngineStateText, detail);
+    }
+
+    private void UpdateViewportPerformance(ViewportPerformanceStatus status)
+    {
+        if (!Dispatcher.UIThread.CheckAccess())
+        {
+            Dispatcher.UIThread.Post(() => UpdateViewportPerformance(status));
+            return;
+        }
+
+        if (!status.Ready)
+        {
+            ViewportPerformanceText.Text = status.Error is null ? "GPU STARTING" : "GPU OFFLINE";
+            ViewportPerformanceText.Foreground = status.Error is null
+                ? Avalonia.Media.Brushes.LightSteelBlue
+                : Avalonia.Media.Brushes.IndianRed;
+        }
+        else if (status.TriangleCount == 0 || status.FrameCount < 2)
+        {
+            ViewportPerformanceText.Text = status.TriangleCount == 0
+                ? "GPU READY"
+                : $"GPU WARMING · {status.TriangleCount / 1000.0:0}K TRI";
+            ViewportPerformanceText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
+        }
+        else
+        {
+            ViewportPerformanceText.Text = $"{status.FramesPerSecond:0} FPS · {status.TriangleCount / 1000.0:0}K TRI";
+            ViewportPerformanceText.Foreground = status.FramesPerSecond >= 57
+                ? Avalonia.Media.Brushes.LightSeaGreen
+                : status.FramesPerSecond >= 50
+                    ? Avalonia.Media.Brushes.Goldenrod
+                    : Avalonia.Media.Brushes.IndianRed;
+        }
+
+        ToolTip.SetTip(
+            ViewportPerformanceText,
+            status.Error ??
+            $"{status.Backend}\nGPU scene: {status.TriangleCount:N0} triangles. " +
+            $"CPU submission averages {status.CpuSubmitMillisecondsAverage:0.000} ms and peaks at {status.CpuSubmitMillisecondsMaximum:0.000} ms. " +
+            $"Longest observed frame interval: {status.FrameIntervalMillisecondsMaximum:0.000} ms.");
     }
 
     private async void OnEditorOpened(object? sender, EventArgs e)

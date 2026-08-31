@@ -62,6 +62,19 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void ViewportStressSceneUsesAVisualOnlyFiftyByTwentyFiveMetreTerrain()
+    {
+        var scene = SampleScenes.CreateViewportStress();
+
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
+        var terrain = Assert.Single(scene.Geometry);
+        Assert.Equal(GeometryKind.Terrain, terrain.Kind);
+        Assert.Equal(new Vector3d(50, 6, 25), terrain.DimensionsMetres);
+        Assert.False(terrain.Occludes);
+        Assert.False(terrain.Reflects);
+    }
+
+    [Fact]
     public void AtmosphereFieldsRejectNonFiniteBoundsSeedsAndOverlaps()
     {
         var scene = SampleScenes.CreateAtmosphereField();

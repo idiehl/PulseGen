@@ -54,6 +54,12 @@ commands and reads bounded telemetry.
   isolated-take rendering; and analysis import. Imported measured SOFA selections
   are content-addressed and deliberately render-gated until their Steam Audio
   adapter is active, so the analytic head model is never mislabeled as measured.
+- Retained OpenGL/ANGLE terrain rendering beneath the editable world overlay.
+  A terrain grid is prepared away from the UI thread, uploaded once to retained
+  vertex/index buffers, and submitted in one indexed draw. A live viewport badge
+  reports measured frame rate and triangle count. The dedicated acceptance scene
+  contains exactly 250,000 triangles and produces an atomic JSON performance
+  receipt instead of treating a successful build as a responsiveness result.
 - First-class acoustic-material authoring with eight-band soak/scatter/pass
   controls, roughness, plain-language incoming-energy summaries, six adjustable
   starting points, independent duplication for comparisons, live surface usage
@@ -142,7 +148,7 @@ commands and reads bounded telemetry.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
 Steam Audio, KISS FFT, GPU model execution, full mesh authoring, and
-triangle-level imported-mesh viewport rendering remain explicit
+triangle-level rendering of imported OBJ/glTF/GLB meshes remain explicit
 adapters; their dependency records prevent an unfinished integration from being
 presented as active.
 
@@ -170,7 +176,7 @@ Run the editor after a successful build:
 dotnet run --project managed/PulseGen.Editor/PulseGen.Editor.csproj -c Release
 ```
 
-The repository includes two deterministic checked-in sample projects and three
+The repository includes two deterministic checked-in sample projects and four
 built-in focused scenarios:
 
 - `samples/PhysicsFlyby.pulseproj/project.json` exercises motion, Doppler,
@@ -185,6 +191,8 @@ built-in focused scenarios:
 - `--sample realtime-stress` supplies the audio acceptance shape: eight moving
   primitive emitters, one binaural head, two microphone pairs, a reflective
   parametric room, and the interactive 48 kHz / 512-frame profile.
+- The editor-only viewport stress scene supplies one visual-only 50 m by 25 m
+  terrain tessellated to exactly 250,000 triangles for retained-GPU acceptance.
 
 The render CLI can also create or render any built-in scene:
 
@@ -205,6 +213,17 @@ The command fails when playback never starts or any callback exceeds its block
 deadline, and prints machine-readable average/peak callback timing and peak load.
 Pass `-ReceiverIndex 1` to exercise only one receiver when investigating a
 specific rig.
+
+Run the hardware-backed viewport acceptance scenario for six measured seconds:
+
+```powershell
+./scripts/run-viewport-stress.ps1 -Seconds 6
+```
+
+The command warms the GPU path, requires the exact 250,000-triangle scene,
+enforces the requested frame-rate and CPU-submit thresholds, and prints the
+OpenGL backend plus measured timing. Results are specific to the tested machine,
+driver, window size, build, and display refresh rate.
 
 Atlas integration defaults to the production service origins but does not upload
 anything until **Sync project** is pressed. Candidate or local services can be

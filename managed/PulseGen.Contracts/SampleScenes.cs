@@ -656,6 +656,32 @@ public static class SampleScenes
         };
     }
 
+    public static SceneDocument CreateViewportStress()
+    {
+        var scene = CreateFlyby();
+        scene.Geometry.Clear();
+        scene.Geometry.Add(new AcousticGeometry
+        {
+            Id = ViewportStressId(1),
+            Name = "250K triangle terrain",
+            Kind = GeometryKind.Terrain,
+            MaterialId = scene.Materials[0].Id,
+            DimensionsMetres = new(50, 6, 25),
+            Transform = new Transform { PositionMetres = new(0, -1.5, 0) },
+            Occludes = false,
+            Reflects = false
+        });
+        return scene with
+        {
+            ProjectId = ViewportStressId(0),
+            Name = "Viewport 250K Triangle Stress",
+            UpdatedAtUtc = new DateTimeOffset(2026, 8, 30, 0, 0, 0, TimeSpan.Zero)
+        };
+    }
+
     private static Guid RealtimeStressId(int value) =>
         Guid.Parse($"f0f0f0f0-0000-4000-8000-{value:X12}");
+
+    private static Guid ViewportStressId(int value) =>
+        Guid.Parse($"f1f1f1f1-0000-4000-8000-{value:X12}");
 }

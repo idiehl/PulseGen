@@ -83,12 +83,14 @@
     </Border>
 
     <Grid Grid.Row="1" Grid.Column="1" Background="#090D12">
+      <local:GpuWorldViewport x:Name="GpuViewport" IsHitTestVisible="False" />
       <local:WorldViewport x:Name="Viewport" />
       <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#C60E141D" BorderBrush="#314052" BorderThickness="1" CornerRadius="6" Padding="10,7">
         <StackPanel Orientation="Horizontal" Spacing="12">
           <TextBlock Text="PERSPECTIVE" Foreground="#AFC0D2" FontSize="10" />
           <TextBlock Text="Y ↑" Foreground="#66DCCF" FontSize="10" />
           <TextBlock Text="GRID 1 m" Foreground="#718198" FontSize="10" />
+          <TextBlock x:Name="ViewportPerformanceText" Text="GPU STARTING" Foreground="#718198" FontSize="10" ToolTip.Tip="Live GPU frame rate and retained triangle count." />
         </StackPanel>
       </Border>
       <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="14" Background="#D00D131B" CornerRadius="6" Padding="11,8">

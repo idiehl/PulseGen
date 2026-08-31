@@ -12,7 +12,10 @@ public sealed class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow = new MainWindow();
+            var benchmark = ViewportBenchmarkOptions.TryParse(desktop.Args ?? []);
+            desktop.MainWindow = benchmark is null
+                ? new MainWindow()
+                : new ViewportBenchmarkWindow(benchmark, desktop);
         }
 
         base.OnFrameworkInitializationCompleted();
