@@ -58,7 +58,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.13", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.14", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
@@ -68,7 +68,7 @@ public sealed class PrimitiveAcousticsTests
                 Assert.False(string.IsNullOrWhiteSpace(take.GetProperty("receiverName").GetString()));
             });
             Assert.Equal(4, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal("eyring-three-band-v1", receipt.RootElement.GetProperty("roomResponseModel").GetString());
             Assert.Contains(
@@ -116,7 +116,7 @@ public sealed class PrimitiveAcousticsTests
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
             Assert.Equal(2, receipt.RootElement.GetProperty("windZoneCount").GetInt32());
@@ -243,7 +243,7 @@ public sealed class PrimitiveAcousticsTests
     }
 
     [Fact]
-    public async Task ContentAddressedObjMeshOccludesDeterministicallyAndRejectsTamperingOrReflectionFallback()
+    public async Task ContentAddressedObjMeshOccludesAndReflectsDeterministicallyAndRejectsTampering()
     {
         var root = Path.Combine(Path.GetTempPath(), $"pulsegen-imported-mesh-{Guid.NewGuid():N}");
         var project = Path.Combine(root, "MeshWorld.pulseproj");
@@ -313,9 +313,54 @@ public sealed class PrimitiveAcousticsTests
             }
 
             Assert.Throws<InvalidOperationException>(() => NativeSceneRenderer.Render(scene, Path.Combine(root, "missing-project")));
-            var reflectionScene = scene with { Geometry = [scene.Geometry[0] with { Reflects = true }] };
-            Assert.Throws<NotSupportedException>(() =>
-                NativeSceneRenderer.Render(reflectionScene, Path.Combine(root, "reflection"), projectDirectory: project));
+
+            var reflectionBaseline = CreateScene(withSurface: false);
+            var reflectionNodes = reflectionBaseline.Emitters[0].SignalGraph.Nodes.ToList();
+            var reflectionOscillatorIndex = reflectionNodes.FindIndex(node => node.Kind == SignalNodeKind.Oscillator);
+            reflectionNodes[reflectionOscillatorIndex] = reflectionNodes[reflectionOscillatorIndex] with
+            {
+                Waveform = WaveformKind.Impulse,
+                NumericParameters = new Dictionary<string, double> { ["frequencyHz"] = 1, ["amplitude"] = 1 }
+            };
+            reflectionBaseline.Emitters[0] = reflectionBaseline.Emitters[0] with
+            {
+                SignalGraph = reflectionBaseline.Emitters[0].SignalGraph with { Nodes = reflectionNodes }
+            };
+            reflectionBaseline.RenderProfiles[0] = reflectionBaseline.RenderProfiles[0] with
+            {
+                ReflectionOrder = 1,
+                RayCount = 1024,
+                ImpulseResponseSeconds = 0
+            };
+            reflectionBaseline = reflectionBaseline with { Timeline = new EventTimeline { DurationSeconds = 0.1 } };
+            NativeSceneRenderer.Render(reflectionBaseline, Path.Combine(root, "reflection-baseline"));
+            reflectionBaseline.Assets.Add(asset);
+            reflectionBaseline.Geometry.Add(scene.Geometry[0] with
+            {
+                Name = "Imported echo wall",
+                Transform = new Transform { PositionMetres = new(0, 0, 3) },
+                Occludes = false,
+                Reflects = true
+            });
+            Assert.DoesNotContain(
+                SceneValidator.Validate(reflectionBaseline),
+                issue => issue.Path.EndsWith("/reflects", StringComparison.Ordinal));
+            NativeSceneRenderer.Render(
+                reflectionBaseline,
+                Path.Combine(root, "reflection-first"),
+                projectDirectory: project);
+            NativeSceneRenderer.Render(
+                reflectionBaseline,
+                Path.Combine(root, "reflection-second"),
+                projectDirectory: project);
+            var reflectionDirect = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "reflection-baseline"), "*.wav").Single());
+            var reflectionFirst = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "reflection-first"), "*.wav").Single());
+            var reflectionSecond = ReadFloatSamples(Directory.GetFiles(Path.Combine(root, "reflection-second"), "*.wav").Single());
+            var reflectionArrival = FirstDifferenceFrame(reflectionDirect, reflectionFirst);
+            var expectedReflectionArrival = (int)Math.Round(Math.Sqrt((4 * 4) + (0.005 * 0.005)) / 344.04 * 48000);
+            Assert.InRange(reflectionArrival, expectedReflectionArrival - 2, expectedReflectionArrival + 2);
+            Assert.True(PeakDifferenceAfterFrame(reflectionDirect, reflectionFirst, reflectionArrival) > 1.0e-4);
+            Assert.Equal(reflectionFirst, reflectionSecond);
 
             var storedAssetPath = ProjectStore.ResolveAssetPath(project, asset.Sha256);
             var tampered = await File.ReadAllBytesAsync(storedAssetPath);
@@ -402,7 +447,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.True(PeakDifferenceAfterFrame(firstSamples, secondSamples, secondBounceArrival) > 1.0e-4);
             using var receipt = JsonDocument.Parse(File.ReadAllText(secondReceipt.RenderReceiptPath));
             Assert.Equal(2, receipt.RootElement.GetProperty("reflectionOrder").GetInt32());
-            Assert.Equal("bounded-propagation-v6", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
         }
         finally
         {

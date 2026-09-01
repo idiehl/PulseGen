@@ -31,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.13";
+constexpr std::string_view engine_version = "0.1.0-alpha.14";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -42,6 +42,9 @@ constexpr std::size_t maximum_imported_mesh_geometries = 64U;
 constexpr std::size_t maximum_imported_mesh_triangles_total = 1000000U;
 constexpr std::uint64_t maximum_mesh_asset_bytes = 512ULL * 1024ULL * 1024ULL;
 constexpr std::uint32_t mesh_bvh_leaf_triangles = 8U;
+constexpr std::size_t maximum_mesh_reflection_patches = 256U;
+constexpr std::size_t maximum_cached_mesh_reflection_paths = 8U;
+constexpr std::uint32_t mesh_reflection_cache_interval_frames = 256U;
 constexpr std::array<double, 4> late_delay_seconds{ 0.0297, 0.0371, 0.0411, 0.0437 };
 constexpr std::array<double, 8> diffuse_delay_seconds{ 0.0113, 0.0179, 0.0231, 0.0317, 0.0433, 0.0599, 0.0731, 0.0897 };
 
@@ -246,6 +249,14 @@ struct mesh_triangle {
     vec3 c{};
     axis_aligned_bounds bounds{};
     vec3 centroid{};
+    std::uint32_t reflection_patch_index{ std::numeric_limits<std::uint32_t>::max() };
+};
+
+struct mesh_reflection_patch {
+    vec3 point{};
+    vec3 normal{ 0.0, 0.0, 1.0 };
+    axis_aligned_bounds bounds{};
+    double area_square_metres{};
 };
 
 struct mesh_bvh_node {
@@ -260,11 +271,18 @@ struct mesh_geometry_state {
     std::string name;
     std::uint32_t material_index{};
     bool occludes{ true };
+    bool reflects{ true };
     bool enabled{ true };
     std::vector<mesh_triangle> triangles;
     std::vector<std::uint32_t> triangle_indices;
     std::vector<mesh_bvh_node> bvh;
+    std::vector<mesh_reflection_patch> reflection_patches;
     axis_aligned_bounds bounds{};
+};
+
+struct mesh_reflection_cache {
+    std::array<std::uint32_t, maximum_cached_mesh_reflection_paths> patch_indices{};
+    std::uint32_t count{};
 };
 
 struct keyframe_state {
@@ -368,6 +386,7 @@ struct pg_engine {
     std::vector<std::uint64_t> receiver_next_frames;
     std::vector<room_response_state> receiver_room_responses;
     std::vector<diffuse_response_state> receiver_diffuse_responses;
+    std::vector<mesh_reflection_cache> mesh_reflection_caches;
     ma_device device{};
     bool device_initialized{};
     std::atomic_bool device_running{};
@@ -775,6 +794,164 @@ axis_aligned_bounds triangle_bounds(vec3 a, vec3 b, vec3 c) noexcept
     return bounds;
 }
 
+using mesh_plane_key = std::array<std::int64_t, 4>;
+
+struct triangle_plane_record {
+    mesh_plane_key key{};
+    std::uint32_t triangle_index{};
+    double area_square_metres{};
+};
+
+struct mesh_plane_group {
+    mesh_plane_key key{};
+    std::size_t first{};
+    std::size_t count{};
+    vec3 normal{ 0.0, 0.0, 1.0 };
+    double plane_offset{};
+    axis_aligned_bounds bounds{};
+    double area_square_metres{};
+};
+
+std::int64_t quantized_plane_component(double value, double scale) noexcept
+{
+    const double scaled = value * scale;
+    constexpr auto integer_limit = std::numeric_limits<std::int64_t>::max() / 2;
+    const double bounded = std::clamp(
+        scaled,
+        -static_cast<double>(integer_limit),
+        static_cast<double>(integer_limit));
+    return static_cast<std::int64_t>(std::llround(bounded));
+}
+
+mesh_plane_key triangle_plane_key(
+    const mesh_triangle& triangle,
+    vec3& canonical_normal,
+    double& plane_offset,
+    double& area_square_metres) noexcept
+{
+    const vec3 area_normal = cross(triangle.b - triangle.a, triangle.c - triangle.a);
+    const double twice_area = length(area_normal);
+    canonical_normal = normalized(area_normal);
+    constexpr double orientation_tolerance = 1.0e-12;
+    const bool reverse = canonical_normal.x < -orientation_tolerance ||
+        (std::abs(canonical_normal.x) <= orientation_tolerance && canonical_normal.y < -orientation_tolerance) ||
+        (std::abs(canonical_normal.x) <= orientation_tolerance &&
+            std::abs(canonical_normal.y) <= orientation_tolerance && canonical_normal.z < 0.0);
+    if (reverse) {
+        canonical_normal = canonical_normal * -1.0;
+    }
+    plane_offset = dot(canonical_normal, triangle.a);
+    area_square_metres = twice_area * 0.5;
+    return {
+        quantized_plane_component(canonical_normal.x, 1000000.0),
+        quantized_plane_component(canonical_normal.y, 1000000.0),
+        quantized_plane_component(canonical_normal.z, 1000000.0),
+        quantized_plane_component(plane_offset, 10000.0)
+    };
+}
+
+void build_mesh_reflection_patches(mesh_geometry_state& mesh)
+{
+    std::vector<triangle_plane_record> records;
+    records.reserve(mesh.triangles.size());
+    for (std::size_t index = 0U; index < mesh.triangles.size(); ++index) {
+        vec3 normal{};
+        double plane_offset = 0.0;
+        double area_square_metres = 0.0;
+        records.push_back({
+            triangle_plane_key(mesh.triangles[index], normal, plane_offset, area_square_metres),
+            static_cast<std::uint32_t>(index),
+            area_square_metres
+        });
+    }
+    std::stable_sort(records.begin(), records.end(), [](const auto& left, const auto& right) {
+        if (left.key != right.key) {
+            return left.key < right.key;
+        }
+        return left.triangle_index < right.triangle_index;
+    });
+
+    std::vector<mesh_plane_group> groups;
+    groups.reserve(std::min(records.size(), maximum_mesh_reflection_patches));
+    for (std::size_t first = 0U; first < records.size();) {
+        std::size_t end = first + 1U;
+        while (end < records.size() && records[end].key == records[first].key) {
+            ++end;
+        }
+        const mesh_triangle& first_triangle = mesh.triangles[records[first].triangle_index];
+        vec3 normal{};
+        double plane_offset = 0.0;
+        double ignored_area = 0.0;
+        (void)triangle_plane_key(first_triangle, normal, plane_offset, ignored_area);
+        mesh_plane_group group{};
+        group.key = records[first].key;
+        group.first = first;
+        group.count = end - first;
+        group.normal = normal;
+        group.plane_offset = plane_offset;
+        for (std::size_t record_index = first; record_index < end; ++record_index) {
+            const triangle_plane_record& record = records[record_index];
+            group.area_square_metres += record.area_square_metres;
+            expand(group.bounds, mesh.triangles[record.triangle_index].bounds);
+        }
+        groups.push_back(group);
+        first = end;
+    }
+
+    std::vector<std::size_t> ranked_groups(groups.size());
+    std::iota(ranked_groups.begin(), ranked_groups.end(), 0U);
+    std::stable_sort(ranked_groups.begin(), ranked_groups.end(), [&groups](std::size_t left, std::size_t right) {
+        if (groups[left].area_square_metres != groups[right].area_square_metres) {
+            return groups[left].area_square_metres > groups[right].area_square_metres;
+        }
+        return groups[left].key < groups[right].key;
+    });
+
+    std::vector<std::size_t> selected_groups;
+    if (groups.size() <= maximum_mesh_reflection_patches) {
+        selected_groups = std::move(ranked_groups);
+    } else {
+        constexpr std::size_t largest_surface_quota = maximum_mesh_reflection_patches / 2U;
+        std::vector<bool> selected(groups.size());
+        selected_groups.reserve(maximum_mesh_reflection_patches);
+        for (std::size_t index = 0U; index < largest_surface_quota; ++index) {
+            selected[ranked_groups[index]] = true;
+            selected_groups.push_back(ranked_groups[index]);
+        }
+
+        std::vector<std::size_t> remaining_groups;
+        remaining_groups.reserve(groups.size() - largest_surface_quota);
+        for (std::size_t index = 0U; index < groups.size(); ++index) {
+            if (!selected[index]) {
+                remaining_groups.push_back(index);
+            }
+        }
+        const std::size_t coverage_quota = maximum_mesh_reflection_patches - selected_groups.size();
+        for (std::size_t slot = 0U; slot < coverage_quota; ++slot) {
+            const std::size_t sample_index = std::min(
+                ((2U * slot + 1U) * remaining_groups.size()) / (2U * coverage_quota),
+                remaining_groups.size() - 1U);
+            selected_groups.push_back(remaining_groups[sample_index]);
+        }
+    }
+    std::sort(selected_groups.begin(), selected_groups.end());
+
+    mesh.reflection_patches.reserve(selected_groups.size());
+    for (std::size_t selected_index = 0U; selected_index < selected_groups.size(); ++selected_index) {
+        const mesh_plane_group& group = groups[selected_groups[selected_index]];
+        mesh.reflection_patches.push_back({
+            group.normal * group.plane_offset,
+            group.normal,
+            group.bounds,
+            group.area_square_metres
+        });
+        for (std::size_t record_index = group.first; record_index < group.first + group.count; ++record_index) {
+            mesh.triangles[records[record_index].triangle_index].reflection_patch_index =
+                static_cast<std::uint32_t>(selected_index);
+        }
+    }
+}
+
 std::string normalized_format_hint(const char* value)
 {
     std::string result = value == nullptr ? std::string{} : std::string(value);
@@ -911,6 +1088,74 @@ bool segment_intersects_mesh(const mesh_geometry_state& mesh, vec3 start, vec3 e
             // below this fixed audio-thread stack. Treat unexpected overflow
             // conservatively as occluded instead of allocating or recursing.
             return true;
+        }
+        stack[stack_size++] = node.left;
+        stack[stack_size++] = node.right;
+    }
+    return false;
+}
+
+bool bounds_contain_point(const axis_aligned_bounds& bounds, vec3 point, double tolerance = 2.0e-4) noexcept
+{
+    return point.x >= bounds.minimum.x - tolerance && point.x <= bounds.maximum.x + tolerance &&
+        point.y >= bounds.minimum.y - tolerance && point.y <= bounds.maximum.y + tolerance &&
+        point.z >= bounds.minimum.z - tolerance && point.z <= bounds.maximum.z + tolerance;
+}
+
+bool point_within_triangle(const mesh_triangle& triangle, vec3 point) noexcept
+{
+    const vec3 edge_zero = triangle.b - triangle.a;
+    const vec3 edge_one = triangle.c - triangle.a;
+    const vec3 offset = point - triangle.a;
+    const vec3 plane_normal = normalized(cross(edge_zero, edge_one));
+    if (std::abs(dot(offset, plane_normal)) > 2.0e-4) {
+        return false;
+    }
+    const double dot_zero_zero = dot(edge_zero, edge_zero);
+    const double dot_zero_one = dot(edge_zero, edge_one);
+    const double dot_one_one = dot(edge_one, edge_one);
+    const double dot_offset_zero = dot(offset, edge_zero);
+    const double dot_offset_one = dot(offset, edge_one);
+    const double denominator = (dot_zero_zero * dot_one_one) - (dot_zero_one * dot_zero_one);
+    if (std::abs(denominator) <= 1.0e-18) {
+        return false;
+    }
+    const double u = ((dot_one_one * dot_offset_zero) - (dot_zero_one * dot_offset_one)) / denominator;
+    const double v = ((dot_zero_zero * dot_offset_one) - (dot_zero_one * dot_offset_zero)) / denominator;
+    constexpr double edge_tolerance = 1.0e-8;
+    return u >= -edge_tolerance && v >= -edge_tolerance && u + v <= 1.0 + edge_tolerance;
+}
+
+bool point_on_mesh_reflection_patch(
+    const mesh_geometry_state& mesh,
+    std::uint32_t patch_index,
+    vec3 point) noexcept
+{
+    if (patch_index >= mesh.reflection_patches.size() || mesh.bvh.empty() ||
+        !bounds_contain_point(mesh.reflection_patches[patch_index].bounds, point)) {
+        return false;
+    }
+
+    std::array<std::uint32_t, 128> stack{};
+    std::size_t stack_size = 1U;
+    stack[0] = 0U;
+    while (stack_size > 0U) {
+        const mesh_bvh_node& node = mesh.bvh[stack[--stack_size]];
+        if (!bounds_contain_point(node.bounds, point)) {
+            continue;
+        }
+        if (node.count > 0U) {
+            for (std::uint32_t offset = 0U; offset < node.count; ++offset) {
+                const mesh_triangle& triangle = mesh.triangles[mesh.triangle_indices[node.first + offset]];
+                if (triangle.reflection_patch_index == patch_index &&
+                    bounds_contain_point(triangle.bounds, point) && point_within_triangle(triangle, point)) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (stack_size + 2U > stack.size()) {
+            return false;
         }
         stack[stack_size++] = node.left;
         stack[stack_size++] = node.right;
@@ -1400,6 +1645,148 @@ bool surface_reflection_point(
     return true;
 }
 
+bool mesh_patch_reflection_point(
+    const mesh_geometry_state& mesh,
+    std::uint32_t patch_index,
+    vec3 source,
+    vec3 receiver,
+    vec3& image_source,
+    vec3& reflection_point,
+    bool require_triangle_membership) noexcept
+{
+    if (patch_index >= mesh.reflection_patches.size()) {
+        return false;
+    }
+    const mesh_reflection_patch& patch = mesh.reflection_patches[patch_index];
+    const double source_side = dot(source - patch.point, patch.normal);
+    const double receiver_side = dot(receiver - patch.point, patch.normal);
+    if (source_side * receiver_side <= 1.0e-10) {
+        return false;
+    }
+    image_source = source - (patch.normal * (2.0 * source_side));
+    const reflection_surface unbounded_surface{ patch.point, patch.normal };
+    if (!surface_reflection_point(image_source, receiver, unbounded_surface, reflection_point)) {
+        return false;
+    }
+    return !require_triangle_membership || point_on_mesh_reflection_patch(mesh, patch_index, reflection_point);
+}
+
+pg_status prepare_mesh_reflection_caches(pg_engine* engine)
+{
+    const std::size_t mesh_count = engine->mesh_geometries.size();
+    if (mesh_count > 0U && engine->emitters.size() > engine->mesh_reflection_caches.max_size() / mesh_count) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Imported-mesh reflection cache exceeds addressable memory.");
+    }
+    const std::size_t required = engine->emitters.size() * mesh_count;
+    try {
+        engine->mesh_reflection_caches.assign(required, {});
+        return PG_STATUS_OK;
+    } catch (const std::bad_alloc&) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Unable to allocate the bounded imported-mesh reflection cache.");
+    } catch (...) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, "Unable to prepare imported-mesh reflection paths.");
+    }
+}
+
+void update_mesh_reflection_caches(
+    pg_engine& engine,
+    vec3 receiver_position,
+    double receive_time,
+    std::uint32_t requested_path_limit) noexcept
+{
+    const std::size_t mesh_count = engine.mesh_geometries.size();
+    if (mesh_count == 0U || engine.mesh_reflection_caches.size() != engine.emitters.size() * mesh_count) {
+        return;
+    }
+    const std::uint32_t path_limit = std::clamp<std::uint32_t>(
+        requested_path_limit,
+        1U,
+        static_cast<std::uint32_t>(maximum_cached_mesh_reflection_paths));
+    const double base_sound_speed = std::max(speed_of_sound(engine.atmosphere), minimum_effective_sound_speed);
+    for (std::size_t emitter_index = 0U; emitter_index < engine.emitters.size(); ++emitter_index) {
+        const emitter_state& emitter = engine.emitters[emitter_index];
+        const vec3 receive_time_source_position = sample_motion(emitter, receive_time);
+        for (std::size_t mesh_index = 0U; mesh_index < mesh_count; ++mesh_index) {
+            const mesh_geometry_state& mesh = engine.mesh_geometries[mesh_index];
+            mesh_reflection_cache& cache = engine.mesh_reflection_caches[(emitter_index * mesh_count) + mesh_index];
+            cache.count = 0U;
+            if (!emitter.enabled || !mesh.enabled || !mesh.reflects ||
+                mesh.material_index >= engine.acoustic_materials.size()) {
+                continue;
+            }
+            std::array<double, maximum_cached_mesh_reflection_paths> distances{};
+            distances.fill(std::numeric_limits<double>::infinity());
+            for (std::uint32_t patch_index = 0U;
+                patch_index < static_cast<std::uint32_t>(mesh.reflection_patches.size());
+                ++patch_index) {
+                vec3 image_source{};
+                vec3 reflection_point{};
+                if (!mesh_patch_reflection_point(
+                        mesh,
+                        patch_index,
+                        receive_time_source_position,
+                        receiver_position,
+                        image_source,
+                        reflection_point,
+                        true)) {
+                    continue;
+                }
+                const double initial_distance = length(receive_time_source_position - reflection_point) +
+                    length(reflection_point - receiver_position);
+                const vec3 retarded_source_position = sample_motion(
+                    emitter,
+                    receive_time - (initial_distance / base_sound_speed));
+                if (!mesh_patch_reflection_point(
+                        mesh,
+                        patch_index,
+                        retarded_source_position,
+                        receiver_position,
+                        image_source,
+                        reflection_point,
+                        true)) {
+                    continue;
+                }
+                const double distance = length(retarded_source_position - reflection_point) +
+                    length(reflection_point - receiver_position);
+                std::uint32_t insert_at = cache.count;
+                if (cache.count < path_limit) {
+                    ++cache.count;
+                } else {
+                    insert_at = path_limit - 1U;
+                    const double last_distance = distances[insert_at];
+                    const std::uint32_t last_patch = cache.patch_indices[insert_at];
+                    if (distance > last_distance || (distance == last_distance && patch_index >= last_patch)) {
+                        continue;
+                    }
+                }
+                while (insert_at > 0U) {
+                    const double previous_distance = distances[insert_at - 1U];
+                    const std::uint32_t previous_patch = cache.patch_indices[insert_at - 1U];
+                    if (distance > previous_distance || (distance == previous_distance && patch_index >= previous_patch)) {
+                        break;
+                    }
+                    distances[insert_at] = previous_distance;
+                    cache.patch_indices[insert_at] = previous_patch;
+                    --insert_at;
+                }
+                distances[insert_at] = distance;
+                cache.patch_indices[insert_at] = patch_index;
+            }
+        }
+    }
+}
+
+std::uint32_t mesh_reflection_path_limit(std::uint32_t ray_count, bool realtime_approximation) noexcept
+{
+    if (realtime_approximation) {
+        return 2U;
+    }
+    return std::clamp<std::uint32_t>(
+        std::max(1U, (ray_count + 1023U) / 1024U),
+        1U,
+        static_cast<std::uint32_t>(maximum_cached_mesh_reflection_paths));
+}
+
 delayed_path_sample sample_delayed_path(
     const pg_engine& engine,
     const emitter_state& emitter,
@@ -1630,6 +2017,118 @@ delayed_path_sample sample_geometry_reflection(
             geometry_index);
     const double incident_sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
         absorption * visibility / attenuation_distance;
+    return {
+        incident_sample * specular_gain,
+        distance,
+        source_position,
+        normalized(reflection_point - receiver_position),
+        incident_sample * diffuse_gain
+    };
+}
+
+delayed_path_sample sample_mesh_geometry_reflection(
+    const pg_engine& engine,
+    const emitter_state& emitter,
+    vec3 initial_source_position,
+    vec3 receiver_position,
+    double receive_time,
+    std::uint32_t sample_rate,
+    std::size_t mesh_index,
+    std::uint32_t patch_index,
+    std::uint32_t solver_iterations = 6U) noexcept
+{
+    if (mesh_index >= engine.mesh_geometries.size()) {
+        return {};
+    }
+    const mesh_geometry_state& mesh = engine.mesh_geometries[mesh_index];
+    if (!mesh.enabled || !mesh.reflects || mesh.material_index >= engine.acoustic_materials.size() ||
+        patch_index >= mesh.reflection_patches.size()) {
+        return {};
+    }
+
+    double emission_time = receive_time;
+    vec3 source_position = initial_source_position;
+    vec3 image_source = source_position;
+    vec3 reflection_point = source_position;
+    propagation_integral propagation{};
+    const std::uint32_t bounded_solver_iterations = std::clamp(solver_iterations, 1U, 6U);
+    const auto integrate_path = [&](const auto& points) noexcept {
+        return bounded_solver_iterations == 1U
+            ? integrate_propagation_path_preview(
+                engine.atmosphere,
+                points,
+                emitter.frequency_hz,
+                receive_time)
+            : integrate_propagation_path(
+                engine.atmosphere,
+                points,
+                emitter.frequency_hz,
+                receive_time);
+    };
+    for (std::uint32_t iteration = 0U; iteration < bounded_solver_iterations; ++iteration) {
+        if (iteration > 0U) {
+            source_position = sample_motion(emitter, emission_time);
+        }
+        if (!mesh_patch_reflection_point(
+                mesh,
+                patch_index,
+                source_position,
+                receiver_position,
+                image_source,
+                reflection_point,
+                false)) {
+            return {};
+        }
+        propagation = integrate_path(std::array{ source_position, reflection_point, receiver_position });
+        emission_time = receive_time - propagation.travel_time_seconds;
+    }
+
+    source_position = sample_motion(emitter, emission_time);
+    if (!mesh_patch_reflection_point(
+            mesh,
+            patch_index,
+            source_position,
+            receiver_position,
+            image_source,
+            reflection_point,
+            true)) {
+        return {};
+    }
+    if (bounded_solver_iterations > 1U) {
+        propagation = integrate_propagation_path(
+            engine.atmosphere,
+            std::array{ source_position, reflection_point, receiver_position },
+            emitter.frequency_hz,
+            receive_time);
+    }
+
+    const double distance = propagation.distance_metres;
+    const double attenuation_distance = std::max(distance, emitter.min_distance_metres);
+    const double air_absorption = std::exp(-propagation.absorption_exponent);
+    const acoustic_material_state& material = engine.acoustic_materials[mesh.material_index];
+    const double material_absorption = material_band_value(material, material.absorption, emitter.frequency_hz);
+    const double material_transmission = material_band_value(material, material.transmission, emitter.frequency_hz);
+    const double material_scattering = material_band_value(material, material.scattering, emitter.frequency_hz);
+    const double reflection_energy = std::max(0.0, 1.0 - material_absorption - material_transmission);
+    const double high_frequency_amount = std::clamp(
+        std::log2(std::max(emitter.frequency_hz, 125.0) / 125.0) / 7.0,
+        0.0,
+        1.0);
+    const double specular_gain = std::sqrt(reflection_energy * (1.0 - material_scattering)) *
+        (1.0 - (0.5 * material.roughness * high_frequency_amount));
+    const double diffuse_gain = std::sqrt(reflection_energy * material_scattering) *
+        (1.0 - (0.65 * material.roughness * high_frequency_amount));
+    const double visibility = occlusion_transmission_gain(
+        engine,
+        source_position,
+        reflection_point,
+        emitter.frequency_hz) * occlusion_transmission_gain(
+            engine,
+            reflection_point,
+            receiver_position,
+            emitter.frequency_hz);
+    const double incident_sample = primitive_sample(emitter, emission_time, sample_rate) * emitter.gain_linear *
+        air_absorption * visibility / attenuation_distance;
     return {
         incident_sample * specular_gain,
         distance,
@@ -1932,7 +2431,8 @@ std::pair<float, float> render_frame(
     double diffuse_input_left = 0.0;
     double diffuse_input_right = 0.0;
     double source_lateral = 0.0;
-    for (const emitter_state& emitter : engine.emitters) {
+    for (std::size_t emitter_index = 0U; emitter_index < engine.emitters.size(); ++emitter_index) {
+        const emitter_state& emitter = engine.emitters[emitter_index];
         if (!emitter.enabled) {
             continue;
         }
@@ -2138,6 +2638,56 @@ std::pair<float, float> render_frame(
                     diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
                 }
             }
+
+            const std::size_t mesh_count = engine.mesh_geometries.size();
+            if (engine.mesh_reflection_caches.size() == engine.emitters.size() * mesh_count) {
+                for (std::size_t mesh_index = 0U; mesh_index < mesh_count; ++mesh_index) {
+                    const mesh_reflection_cache& cache =
+                        engine.mesh_reflection_caches[(emitter_index * mesh_count) + mesh_index];
+                    for (std::uint32_t path_index = 0U; path_index < cache.count; ++path_index) {
+                        const std::uint32_t patch_index = cache.patch_indices[path_index];
+                        if (realtime_approximation) {
+                            const auto reflection = sample_mesh_geometry_reflection(
+                                engine,
+                                emitter,
+                                initial_source_position,
+                                receiver_centre,
+                                receive_time,
+                                sample_rate,
+                                mesh_index,
+                                patch_index,
+                                solver_iterations);
+                            left_sample += receiver_path_sample(reflection, left_forward, left_pattern);
+                            right_sample += receiver_path_sample(reflection, right_forward, right_pattern);
+                            diffuse_input_left += receiver_diffuse_sample(reflection, left_forward, left_pattern);
+                            diffuse_input_right += receiver_diffuse_sample(reflection, right_forward, right_pattern);
+                            continue;
+                        }
+                        const auto left_reflection = sample_mesh_geometry_reflection(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            left_position,
+                            receive_time,
+                            sample_rate,
+                            mesh_index,
+                            patch_index);
+                        const auto right_reflection = sample_mesh_geometry_reflection(
+                            engine,
+                            emitter,
+                            initial_source_position,
+                            right_position,
+                            receive_time,
+                            sample_rate,
+                            mesh_index,
+                            patch_index);
+                        left_sample += receiver_path_sample(left_reflection, left_forward, left_pattern);
+                        right_sample += receiver_path_sample(right_reflection, right_forward, right_pattern);
+                        diffuse_input_left += receiver_diffuse_sample(left_reflection, left_forward, left_pattern);
+                        diffuse_input_right += receiver_diffuse_sample(right_reflection, right_forward, right_pattern);
+                    }
+                }
+            }
         }
 
         left_total += left_sample;
@@ -2239,6 +2789,14 @@ void device_data_callback(ma_device* device, void* output, const void* input, ma
     const std::uint32_t receiver_index = engine->device_receiver_index;
     const std::uint32_t sample_rate = engine->device_sample_rate;
     const std::uint32_t reflection_order = engine->device_reflection_order;
+    if (reflection_order > 0U && !engine->mesh_geometries.empty()) {
+        const double receive_time = static_cast<double>(start_frame) / static_cast<double>(sample_rate);
+        update_mesh_reflection_caches(
+            *engine,
+            sample_motion(engine->receivers[receiver_index], receive_time),
+            receive_time,
+            mesh_reflection_path_limit(engine->device_ray_count, true));
+    }
     for (ma_uint32 frame = 0; frame < frame_count; ++frame) {
         const double receive_time = static_cast<double>(start_frame + frame) / static_cast<double>(sample_rate);
         const auto [left, right] = render_frame(
@@ -2402,6 +2960,7 @@ pg_status PG_CALL pg_engine_clear_scene(pg_engine* engine)
     engine->receiver_next_frames.clear();
     engine->receiver_room_responses.clear();
     engine->receiver_diffuse_responses.clear();
+    engine->mesh_reflection_caches.clear();
     engine->last_error.clear();
     return PG_STATUS_OK;
 }
@@ -2678,10 +3237,6 @@ pg_status PG_CALL pg_engine_add_mesh_geometry(
     if (geometry->material_index >= engine->acoustic_materials.size()) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Imported acoustic mesh references an unknown material index.");
     }
-    if (geometry->reflects != 0U) {
-        return fail(engine, PG_STATUS_INVALID_ARGUMENT,
-            "Imported-mesh reflections require the geometric reflection backend; disable Reflects until that backend is active.");
-    }
     if (geometry->encoded_data == nullptr || geometry->encoded_size_bytes == 0U ||
         geometry->encoded_size_bytes > maximum_mesh_asset_bytes ||
         geometry->encoded_size_bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
@@ -2762,6 +3317,7 @@ pg_status PG_CALL pg_engine_add_mesh_geometry(
         state.name = safe_name(geometry->name_utf8, "ImportedMesh");
         state.material_index = geometry->material_index;
         state.occludes = geometry->occludes != 0U;
+        state.reflects = geometry->reflects != 0U;
         state.enabled = geometry->enabled != 0U;
         state.triangles.reserve(static_cast<std::size_t>(candidate_triangle_count));
 
@@ -2792,16 +3348,32 @@ pg_status PG_CALL pg_engine_add_mesh_geometry(
                 if (!finite(a) || !finite(b) || !finite(c)) {
                     return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh contains a non-finite transformed vertex.");
                 }
-                if (length(cross(b - a, c - a)) <= 1.0e-12) {
+                const vec3 area_normal = cross(b - a, c - a);
+                const double twice_area = length(area_normal);
+                if (!finite(area_normal) || !std::isfinite(twice_area)) {
+                    return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh produces non-finite transformed triangle area.");
+                }
+                if (twice_area <= 1.0e-12) {
                     continue;
                 }
                 const axis_aligned_bounds bounds = triangle_bounds(a, b, c);
-                state.triangles.push_back({ a, b, c, bounds, (a + b + c) * (1.0 / 3.0) });
+                state.triangles.push_back({
+                    a,
+                    b,
+                    c,
+                    bounds,
+                    (a + b + c) * (1.0 / 3.0),
+                    std::numeric_limits<std::uint32_t>::max()
+                });
                 expand(state.bounds, bounds);
             }
         }
         if (state.triangles.empty()) {
             return fail(engine, PG_STATUS_INVALID_SCENE, "Imported mesh contains no non-degenerate triangles.");
+        }
+
+        if (state.reflects) {
+            build_mesh_reflection_patches(state);
         }
 
         state.triangle_indices.resize(state.triangles.size());
@@ -3140,6 +3712,10 @@ pg_status PG_CALL pg_engine_render_receiver_block(
     if (validate_scene(engine) != PG_STATUS_OK) {
         return PG_STATUS_INVALID_SCENE;
     }
+    const pg_status cache_status = prepare_mesh_reflection_caches(engine);
+    if (cache_status != PG_STATUS_OK) {
+        return cache_status;
+    }
 
     if (start_frame == 0U || engine->receiver_next_frames[receiver_index] != start_frame) {
         engine->receiver_filters[receiver_index] = {};
@@ -3148,6 +3724,13 @@ pg_status PG_CALL pg_engine_render_receiver_block(
     }
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
         const double receive_time = static_cast<double>(start_frame + frame) / static_cast<double>(sample_rate);
+        if (!engine->mesh_geometries.empty() && frame % mesh_reflection_cache_interval_frames == 0U) {
+            update_mesh_reflection_caches(
+                *engine,
+                sample_motion(engine->receivers[receiver_index], receive_time),
+                receive_time,
+                mesh_reflection_path_limit(1024U, false));
+        }
         const auto [left, right] = render_frame(*engine, receiver_index, receive_time, sample_rate, 1U, 1024U, 2.0, 1U);
         interleaved_stereo[static_cast<std::size_t>(frame) * 2U] = left;
         interleaved_stereo[(static_cast<std::size_t>(frame) * 2U) + 1U] = right;
@@ -3176,6 +3759,10 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
         request->ray_count > 1000000U || !std::isfinite(request->impulse_response_seconds) ||
         request->impulse_response_seconds < 0.0 || request->impulse_response_seconds > 30.0) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Render directory, duration, sample rate, or echo-quality settings are invalid.");
+    }
+    const pg_status cache_status = prepare_mesh_reflection_caches(engine);
+    if (cache_status != PG_STATUS_OK) {
+        return cache_status;
     }
 
     try {
@@ -3217,6 +3804,14 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
                     return fail(engine, PG_STATUS_CANCELLED, "Render cancelled before output commit.");
                 }
                 const double receive_time = static_cast<double>(frame) / static_cast<double>(request->sample_rate);
+                if (request->reflection_order > 0U && !engine->mesh_geometries.empty() &&
+                    frame % mesh_reflection_cache_interval_frames == 0U) {
+                    update_mesh_reflection_caches(
+                        *engine,
+                        sample_motion(engine->receivers[receiver_index], receive_time),
+                        receive_time,
+                        mesh_reflection_path_limit(request->ray_count, false));
+                }
                 const auto [left, right] = render_frame(
                     *engine,
                     receiver_index,
@@ -3313,6 +3908,10 @@ pg_status PG_CALL pg_engine_start_device(pg_engine* engine, const pg_device_conf
         config->ray_count > 1000000U || !std::isfinite(config->impulse_response_seconds) ||
         config->impulse_response_seconds < 0.0 || config->impulse_response_seconds > 30.0) {
         return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Preview sample rate, period, or echo-quality settings are outside supported bounds.");
+    }
+    const pg_status cache_status = prepare_mesh_reflection_caches(engine);
+    if (cache_status != PG_STATUS_OK) {
+        return cache_status;
     }
 
     engine->device_sample_rate = config->sample_rate;

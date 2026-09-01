@@ -38,11 +38,15 @@ commands and reads bounded telemetry.
 - Checksum-pinned Assimp 6.0.5 import for static OBJ and self-contained
   glTF/GLB acoustic meshes. Project assets are size/SHA-256 verified before a
   memory-only native import, capped at 250,000 triangles per mesh, and compiled
-  into immutable BVHs for direct occlusion and transmission. A read-only native
+  into immutable BVHs for direct occlusion, transmission, and exact reflection-point
+  membership. Coplanar triangles become deterministic acoustic patches, with a
+  bounded strongest-path cache supplying material-shaped first echoes in preview
+  and final stereo renders without allocating on the audio thread. A read-only native
   copy operation gives the editor the exact transformed, non-degenerate triangle
   set accepted by that acoustic importer; the dashed authored bounds remain only
-  as an editable selection handle. Imported-mesh reflections fail clearly until
-  the geometric reflection backend is active.
+  as an editable selection handle. Highly faceted meshes retain a bounded mix
+  of their largest and deterministically distributed coplanar surface groups,
+  up to 256 reflection candidates per imported asset.
 - WAV render output as 16/24-bit PCM with explicit TPDF dither or unclipped
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
@@ -220,9 +224,10 @@ on each of its head and two microphone receiver rigs:
 ```
 
 The command fails when playback never starts or any callback exceeds its block
-deadline, and prints machine-readable average/peak callback timing and peak load.
-Pass `-ReceiverIndex 1` to exercise only one receiver when investigating a
-specific rig.
+deadline, prints machine-readable average/peak callback timing and peak load,
+and atomically writes `out/realtime-stress/realtime-stress-receipt.json` for the
+tested hardware run. Pass `-ReceiverIndex 1` to exercise only one receiver when
+investigating a specific rig.
 
 Run the hardware-backed viewport acceptance scenario for six measured seconds:
 

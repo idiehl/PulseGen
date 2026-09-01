@@ -432,7 +432,7 @@ public sealed class SceneContractTests
     }
 
     [Fact]
-    public void ImportedMeshRequiresDeclaredMeshAssetAndLabelsReflectionBoundary()
+    public void ImportedMeshRequiresDeclaredMeshAssetAndAcceptsReflections()
     {
         var scene = SampleScenes.CreateFlyby();
         var geometryId = Guid.NewGuid();
@@ -464,10 +464,8 @@ public sealed class SceneContractTests
         scene.Assets[0] = scene.Assets[0] with { Kind = AssetKind.Mesh };
         Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
         scene.Geometry[^1] = scene.Geometry[^1] with { Reflects = true };
-        Assert.Contains(SceneValidator.Validate(scene), issue =>
-            issue.Path == $"geometry/{geometryId}/reflects" &&
-            issue.Severity == ValidationSeverity.Warning &&
-            issue.Message.Contains("reflection backend", StringComparison.Ordinal));
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue =>
+            issue.Path == $"geometry/{geometryId}/reflects");
     }
 
     [Fact]

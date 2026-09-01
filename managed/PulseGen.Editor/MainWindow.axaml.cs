@@ -384,7 +384,7 @@ public sealed partial class MainWindow : Window
                         GeometryRotationX.IsEnabled = !room;
                         GeometryRotationY.IsEnabled = !room;
                         GeometryRotationZ.IsEnabled = !room;
-                        GeometryReflectsBox.IsEnabled = geometry.Kind != GeometryKind.ImportedMesh;
+                        GeometryReflectsBox.IsEnabled = true;
                         RoomDecayPanel.IsVisible = room;
                         if (room)
                         {
@@ -406,7 +406,7 @@ public sealed partial class MainWindow : Window
                         GeometryConstraintText.Text = room
                             ? "The current modal-room solver keeps rooms axis-aligned. Position and size remain fully editable."
                             : geometry.Kind == GeometryKind.ImportedMesh
-                                ? "Dimensions control the editable selection handle; the shaded surface uses verified imported triangles. Scale and rotation transform both the acoustic and visible mesh. Imported-mesh echoes remain disabled."
+                                ? "Dimensions control the editable selection handle; the shaded surface and echoes use verified imported triangles. Scale and rotation transform both the acoustic and visible mesh."
                                 : "Drag the selected centre handle in the world for X/Z movement; use these fields for exact position, size, and rotation.";
                         GeometryInspectorPanel.IsVisible = true;
                         break;
@@ -1325,7 +1325,7 @@ public sealed partial class MainWindow : Window
             DimensionsMetres = dimensions,
             MaterialId = materialId,
             Occludes = GeometryOccludesBox.IsChecked == true,
-            Reflects = original.Kind == GeometryKind.ImportedMesh ? false : GeometryReflectsBox.IsChecked == true
+            Reflects = GeometryReflectsBox.IsChecked == true
         };
         if (!SceneAuthoringOperations.TryReplaceGeometry(scene, original.Id, replacement, out var error))
         {
@@ -1972,7 +1972,7 @@ public sealed partial class MainWindow : Window
                 MeshAssetHash = imported.Sha256,
                 DimensionsMetres = new(2, 2, 2),
                 Occludes = true,
-                Reflects = false
+                Reflects = true
             };
             if (!SceneAuthoringOperations.TryAddGeometry(scene, geometry, out var error))
             {
@@ -1990,7 +1990,7 @@ public sealed partial class MainWindow : Window
             CommitSceneEdit($"Imported {imported.FileName}");
             RefreshSceneTree();
             PopulateInspector(currentSelection);
-            StatusText.Text = $"Imported {imported.FileName} · verified triangles loading in the viewport · direct occlusion active · save to commit the manifest";
+            StatusText.Text = $"Imported {imported.FileName} · verified triangles loading in the viewport · direct occlusion and first echoes active · save to commit the manifest";
         }
         catch (Exception exception)
         {

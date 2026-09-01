@@ -64,7 +64,7 @@ public static unsafe class NativeSceneRenderer
 {
     private const uint AbiVersion = 4;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "bounded-propagation-v6";
+    private const string AcousticModel = "bounded-propagation-v7";
     private const string AtmosphereModel = "layered-bounded-wind-v1";
     private const string RoomResponseModel = "eyring-three-band-v1";
     private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
@@ -768,11 +768,6 @@ public static unsafe class NativeSceneRenderer
         out uint meshIndex)
     {
         meshIndex = uint.MaxValue;
-        if (geometry.Reflects)
-        {
-            throw new NotSupportedException(
-                $"Imported-mesh reflections for '{geometry.Name}' require the geometric reflection backend; disable Reflects until that backend is active.");
-        }
         if (projectDirectory is null)
         {
             throw new InvalidOperationException($"Imported mesh '{geometry.Name}' requires its owning .pulseproj directory for content-addressed asset verification.");
@@ -833,7 +828,7 @@ public static unsafe class NativeSceneRenderer
                     RotationDegrees = ToNative(geometry.Transform.RotationDegrees),
                     MaterialIndex = materialIndex,
                     Occludes = geometry.Occludes ? 1U : 0U,
-                    Reflects = 0U,
+                    Reflects = geometry.Reflects ? 1U : 0U,
                     Enabled = 1U,
                     MaxTriangles = MaximumImportedMeshTriangles
                 };

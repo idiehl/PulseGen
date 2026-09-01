@@ -603,11 +603,7 @@ public static class SceneValidator
         {
             issues.Add(new($"geometry/{geometry.Id}/isDynamic", "Dynamic acoustic geometry is retained in the project but requires a future motion adapter.", ValidationSeverity.Warning));
         }
-        if (geometry.Kind == GeometryKind.ImportedMesh && geometry.Reflects)
-        {
-            issues.Add(new($"geometry/{geometry.Id}/reflects", "Imported-mesh reflections require the geometric reflection backend; direct occlusion and transmission are active.", ValidationSeverity.Warning));
-        }
-        else if (geometry.Kind is not (GeometryKind.Plane or GeometryKind.Box or GeometryKind.ParametricRoom or GeometryKind.ImportedMesh) && (geometry.Occludes || geometry.Reflects))
+        if (geometry.Kind is not (GeometryKind.Plane or GeometryKind.Box or GeometryKind.ParametricRoom or GeometryKind.ImportedMesh) && (geometry.Occludes || geometry.Reflects))
         {
             issues.Add(new($"geometry/{geometry.Id}/kind", $"{geometry.Kind} acoustic behavior requires an adapter that is not active yet.", ValidationSeverity.Warning));
         }

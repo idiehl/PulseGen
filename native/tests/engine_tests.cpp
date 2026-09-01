@@ -1028,9 +1028,10 @@ int main(int argument_count, char** arguments)
     pg_mesh_geometry_desc rejected_mesh = mesh_descriptor;
     rejected_mesh.format_hint_utf8 = "fbx";
     REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_INVALID_ARGUMENT);
-    rejected_mesh = mesh_descriptor;
-    rejected_mesh.reflects = 1U;
-    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    pg_mesh_geometry_desc reflective_mesh = mesh_descriptor;
+    reflective_mesh.reflects = 1U;
+    reflective_mesh.centre_metres = { 40.0, 0.0, 0.0 };
+    REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &reflective_mesh, nullptr, nullptr) == PG_STATUS_OK);
     constexpr std::string_view malformed_obj = "this is not an OBJ mesh";
     rejected_mesh = mesh_descriptor;
     rejected_mesh.encoded_data = malformed_obj.data();
@@ -1119,6 +1120,37 @@ int main(int argument_count, char** arguments)
     const auto expected_reflection_arrival = static_cast<std::size_t>(std::llround(reflected_distance / 343.42 * 48000.0));
     REQUIRE(reflection_arrival <= expected_reflection_arrival + 2U && expected_reflection_arrival <= reflection_arrival + 2U);
     REQUIRE(channel_rms(reflection_residual, 0U) > 1.0e-5);
+
+    auto imported_reflection_options = reflection_surface_options;
+    imported_reflection_options.use_imported_mesh = true;
+    const auto imported_reflected_impulse = render_surface_source(imported_reflection_options);
+    std::vector<float> imported_reflection_residual(imported_reflected_impulse.size());
+    std::transform(
+        imported_reflected_impulse.begin(),
+        imported_reflected_impulse.end(),
+        direct_impulse.begin(),
+        imported_reflection_residual.begin(),
+        [](float reflected, float direct) { return reflected - direct; });
+    const std::size_t imported_reflection_arrival = first_active_frame(imported_reflection_residual, 1.0e-8F);
+    REQUIRE(imported_reflection_arrival <= expected_reflection_arrival + 2U &&
+        expected_reflection_arrival <= imported_reflection_arrival + 2U);
+    REQUIRE(channel_rms(imported_reflection_residual, 0U) > 1.0e-5);
+    REQUIRE(imported_reflected_impulse == render_surface_source(imported_reflection_options));
+    for (std::size_t index = 0U; index < reflected_impulse.size(); ++index) {
+        REQUIRE(std::abs(imported_reflected_impulse[index] - reflected_impulse[index]) < 1.0e-7F);
+    }
+
+    auto absorbed_imported_reflection_options = imported_reflection_options;
+    absorbed_imported_reflection_options.absorption.fill(0.75);
+    const auto absorbed_imported_impulse = render_surface_source(absorbed_imported_reflection_options);
+    const double absorbed_echo_ratio =
+        std::abs(absorbed_imported_impulse[reflection_arrival * 2U] - direct_impulse[reflection_arrival * 2U]) /
+        std::abs(imported_reflected_impulse[reflection_arrival * 2U] - direct_impulse[reflection_arrival * 2U]);
+    REQUIRE(std::abs(absorbed_echo_ratio - 0.5) < 0.002);
+
+    auto missed_imported_reflection_options = imported_reflection_options;
+    missed_imported_reflection_options.geometry_centre = { 20.0, 0.0, 3.0 };
+    REQUIRE(render_surface_source(missed_imported_reflection_options) == direct_impulse);
 
     auto scattered_reflection_options = reflection_surface_options;
     scattered_reflection_options.scattering.fill(0.75);
