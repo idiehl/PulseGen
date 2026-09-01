@@ -55,16 +55,36 @@ public sealed record ImportedMeshTriangleData(
     uint SourceMeshCount,
     uint SourceVertexCount,
     Vector3d BoundsMinimum,
-    Vector3d BoundsMaximum)
+    Vector3d BoundsMaximum,
+    IReadOnlyList<ImportedMeshMaterialRegionData> MaterialRegions)
 {
     public int TriangleCount => TriangleVertices.Length / 3;
 }
 
+public sealed record ImportedMeshMaterialRegionData(
+    uint SourceMeshIndex,
+    uint SourceMaterialIndex,
+    string SourceMeshName,
+    string SourceMaterialName,
+    Guid MaterialId,
+    uint TriangleCount);
+
+public sealed record ImportedMeshReflectionPathData(
+    Guid EmitterId,
+    Guid ReceiverId,
+    int ReflectionOrder,
+    IReadOnlyList<Vector3d> Points,
+    double DistanceMetres,
+    double TravelTimeSeconds,
+    double PressureGain,
+    Guid FirstMaterialId,
+    Guid? SecondMaterialId);
+
 public static unsafe class NativeSceneRenderer
 {
-    private const uint AbiVersion = 4;
+    private const uint AbiVersion = 5;
     private const string LibraryName = "PulseGen.Engine";
-    private const string AcousticModel = "bounded-propagation-v7";
+    private const string AcousticModel = "bounded-propagation-v8";
     private const string AtmosphereModel = "layered-bounded-wind-v1";
     private const string RoomResponseModel = "eyring-three-band-v1";
     private const long MaximumMeshAssetBytes = 512L * 1024 * 1024;
@@ -127,7 +147,7 @@ public static unsafe class NativeSceneRenderer
                 {
                     throw new InvalidOperationException($"Imported mesh '{geometry.Name}' references a missing material.");
                 }
-                var receipt = ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory, out var meshIndex);
+                var receipt = ConfigureImportedMesh(scene, engine, geometry, materialIndex, materialIndexes, projectDirectory, out var meshIndex);
                 Check(
                     Native.pg_engine_copy_mesh_triangles(engine, meshIndex, null, 0, out var vertexCount),
                     engine,
@@ -153,6 +173,43 @@ public static unsafe class NativeSceneRenderer
                 {
                     vertices[index] = new(nativeVertices[index].X, nativeVertices[index].Y, nativeVertices[index].Z);
                 }
+                Check(
+                    Native.pg_engine_copy_mesh_material_regions(engine, meshIndex, null, 0, out var regionCount),
+                    engine,
+                    "measure imported mesh material regions");
+                if (regionCount != receipt.MaterialRegionCount)
+                {
+                    throw new InvalidDataException($"Imported mesh '{geometry.Name}' returned an inconsistent material-region count.");
+                }
+                var nativeRegions = new NativeMeshMaterialRegion[checked((int)regionCount)];
+                fixed (NativeMeshMaterialRegion* nativeRegionPointer = nativeRegions)
+                {
+                    Check(
+                        Native.pg_engine_copy_mesh_material_regions(engine, meshIndex, nativeRegionPointer, regionCount, out var copiedRegionCount),
+                        engine,
+                        "copy imported mesh material regions");
+                    if (copiedRegionCount != regionCount)
+                    {
+                        throw new InvalidDataException($"Imported mesh '{geometry.Name}' changed while copying material regions.");
+                    }
+                }
+                var materialIdsByIndex = materialIndexes.ToDictionary(pair => pair.Value, pair => pair.Key);
+                var regions = new ImportedMeshMaterialRegionData[nativeRegions.Length];
+                for (var index = 0; index < nativeRegions.Length; index++)
+                {
+                    var nativeRegion = nativeRegions[index];
+                    if (!materialIdsByIndex.TryGetValue(nativeRegion.MaterialIndex, out var regionMaterialId))
+                    {
+                        throw new InvalidDataException($"Imported mesh '{geometry.Name}' returned an unknown acoustic material region.");
+                    }
+                    regions[index] = new(
+                        nativeRegion.SourceMeshIndex,
+                        nativeRegion.SourceMaterialIndex,
+                        FixedUtf8(nativeRegion.SourceMeshNameUtf8, 64),
+                        FixedUtf8(nativeRegion.SourceMaterialNameUtf8, 64),
+                        regionMaterialId,
+                        nativeRegion.TriangleCount);
+                }
                 results.Add(new(
                     geometry.Id,
                     geometry.MeshAssetHash!,
@@ -160,9 +217,113 @@ public static unsafe class NativeSceneRenderer
                     receipt.SourceMeshCount,
                     receipt.SourceVertexCount,
                     new(receipt.BoundsMinMetres.X, receipt.BoundsMinMetres.Y, receipt.BoundsMinMetres.Z),
-                    new(receipt.BoundsMaxMetres.X, receipt.BoundsMaxMetres.Y, receipt.BoundsMaxMetres.Z)));
+                    new(receipt.BoundsMaxMetres.X, receipt.BoundsMaxMetres.Y, receipt.BoundsMaxMetres.Z),
+                    regions));
             }
             return results;
+        }
+        finally
+        {
+            Native.pg_engine_destroy(engine);
+        }
+    }
+
+    public static IReadOnlyList<ImportedMeshReflectionPathData> TraceImportedMeshReflectionPaths(
+        SceneDocument scene,
+        Guid receiverId,
+        double receiveTimeSeconds,
+        RenderProfile? profile = null,
+        string? projectDirectory = null)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        SceneValidator.EnsureValid(scene);
+        EnsureReceiverCapabilities(scene);
+        if (!double.IsFinite(receiveTimeSeconds) || receiveTimeSeconds < 0 || receiveTimeSeconds > scene.Timeline.DurationSeconds)
+        {
+            throw new ArgumentOutOfRangeException(nameof(receiveTimeSeconds));
+        }
+        profile ??= scene.RenderProfiles.FirstOrDefault()
+            ?? throw new InvalidOperationException("The scene has no render profile.");
+        var emitters = scene.Emitters.Where(item => item.Enabled).ToArray();
+        var receivers = scene.ReceiverRigs.Where(item => item.Enabled).ToArray();
+        var receiverIndex = Array.FindIndex(receivers, item => item.Id == receiverId);
+        if (receiverIndex < 0)
+        {
+            throw new ArgumentException("The requested reflection monitor must identify an enabled receiver rig.", nameof(receiverId));
+        }
+        if (!scene.Geometry.Any(item => item.Kind == GeometryKind.ImportedMesh && item.Reflects))
+        {
+            return [];
+        }
+
+        var engine = CreateConfiguredEngine(scene, projectDirectory, profile.AtmosphereIntegrationSegments);
+        try
+        {
+            var query = new NativeReflectionPathQuery
+            {
+                Size = (uint)sizeof(NativeReflectionPathQuery),
+                Version = AbiVersion,
+                ReceiverIndex = checked((uint)receiverIndex),
+                ReflectionOrder = checked((uint)profile.ReflectionOrder),
+                ReceiveTimeSeconds = receiveTimeSeconds,
+                SampleRate = checked((uint)profile.SampleRate),
+                RayCount = checked((uint)profile.RayCount)
+            };
+            Check(
+                Native.pg_engine_query_reflection_paths(engine, &query, null, 0, out var pathCount),
+                engine,
+                "measure imported-mesh reflection paths");
+            if (pathCount == 0)
+            {
+                return [];
+            }
+            var nativePaths = new NativeReflectionPath[checked((int)pathCount)];
+            fixed (NativeReflectionPath* pathPointer = nativePaths)
+            {
+                Check(
+                    Native.pg_engine_query_reflection_paths(engine, &query, pathPointer, pathCount, out var copiedPathCount),
+                    engine,
+                    "query imported-mesh reflection paths");
+                if (copiedPathCount != pathCount)
+                {
+                    throw new InvalidDataException("Imported-mesh reflection path count changed while copying solver diagnostics.");
+                }
+            }
+
+            var paths = new ImportedMeshReflectionPathData[nativePaths.Length];
+            for (var index = 0; index < nativePaths.Length; index++)
+            {
+                var native = nativePaths[index];
+                if (native.EmitterIndex >= emitters.Length || native.ReceiverIndex >= receivers.Length ||
+                    native.FirstMaterialIndex >= scene.Materials.Count || native.PointCount is < 3 or > 4)
+                {
+                    throw new InvalidDataException("Native reflection diagnostics referenced an unknown scene object.");
+                }
+                var points = new List<Vector3d>(checked((int)native.PointCount))
+                {
+                    FromNative(native.Point0),
+                    FromNative(native.Point1),
+                    FromNative(native.Point2)
+                };
+                if (native.PointCount == 4)
+                {
+                    points.Add(FromNative(native.Point3));
+                }
+                Guid? secondMaterialId = native.ReflectionOrder == 2 && native.SecondMaterialIndex < scene.Materials.Count
+                    ? scene.Materials[checked((int)native.SecondMaterialIndex)].Id
+                    : null;
+                paths[index] = new(
+                    emitters[native.EmitterIndex].Id,
+                    receivers[native.ReceiverIndex].Id,
+                    checked((int)native.ReflectionOrder),
+                    points,
+                    native.DistanceMetres,
+                    native.TravelTimeSeconds,
+                    native.PressureGain,
+                    scene.Materials[checked((int)native.FirstMaterialIndex)].Id,
+                    secondMaterialId);
+            }
+            return paths;
         }
         finally
         {
@@ -718,7 +879,7 @@ public static unsafe class NativeSceneRenderer
 
             if (geometry.Kind == GeometryKind.ImportedMesh)
             {
-                _ = ConfigureImportedMesh(scene, engine, geometry, materialIndex, projectDirectory, out _);
+                _ = ConfigureImportedMesh(scene, engine, geometry, materialIndex, materialIndexes, projectDirectory, out _);
                 continue;
             }
 
@@ -764,6 +925,7 @@ public static unsafe class NativeSceneRenderer
         nint engine,
         AcousticGeometry geometry,
         uint materialIndex,
+        IReadOnlyDictionary<Guid, uint> materialIndexes,
         string? projectDirectory,
         out uint meshIndex)
     {
@@ -811,9 +973,27 @@ public static unsafe class NativeSceneRenderer
             Size = (uint)sizeof(NativeMeshImportReceipt),
             Version = AbiVersion
         };
+        var bindings = new NativeMeshMaterialBinding[geometry.MaterialBindings.Count];
+        for (var index = 0; index < bindings.Length; index++)
+        {
+            var binding = geometry.MaterialBindings[index];
+            if (!materialIndexes.TryGetValue(binding.MaterialId, out var boundMaterialIndex))
+            {
+                throw new InvalidOperationException($"Imported mesh '{geometry.Name}' material region references a missing acoustic material.");
+            }
+            bindings[index] = new()
+            {
+                Size = (uint)sizeof(NativeMeshMaterialBinding),
+                Version = AbiVersion,
+                SourceMeshIndex = binding.SourceMeshIndex,
+                SourceMaterialIndex = binding.SourceMaterialIndex,
+                MaterialIndex = boundMaterialIndex
+            };
+        }
         try
         {
             fixed (byte* encodedPointer = encoded)
+            fixed (NativeMeshMaterialBinding* bindingPointer = bindings)
             {
                 var descriptor = new NativeMeshGeometry
                 {
@@ -830,7 +1010,9 @@ public static unsafe class NativeSceneRenderer
                     Occludes = geometry.Occludes ? 1U : 0U,
                     Reflects = geometry.Reflects ? 1U : 0U,
                     Enabled = 1U,
-                    MaxTriangles = MaximumImportedMeshTriangles
+                    MaxTriangles = MaximumImportedMeshTriangles,
+                    MaterialBindings = bindingPointer,
+                    MaterialBindingCount = (uint)bindings.Length
                 };
                 Check(Native.pg_engine_add_mesh_geometry(engine, &descriptor, out meshIndex, &receipt), engine, "import acoustic mesh");
                 if (receipt.TriangleCount == 0 || receipt.TriangleCount > MaximumImportedMeshTriangles || receipt.BvhNodeCount == 0)
@@ -845,6 +1027,16 @@ public static unsafe class NativeSceneRenderer
             Marshal.FreeCoTaskMem(formatPointer);
         }
         return receipt;
+    }
+
+    private static string FixedUtf8(byte* value, int capacity)
+    {
+        var length = 0;
+        while (length < capacity && value[length] != 0)
+        {
+            length++;
+        }
+        return length == 0 ? string.Empty : Marshal.PtrToStringUTF8((nint)value, length) ?? string.Empty;
     }
 
     private static double BandValue(AcousticMaterial material, IReadOnlyList<double> values, double frequencyHz) =>
@@ -1177,6 +1369,8 @@ public static unsafe class NativeSceneRenderer
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_triangles", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_material_regions", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_query_reflection_paths", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_atmosphere_field", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_set_receiver_motion", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_recover_device", out _))
@@ -1203,6 +1397,8 @@ public static unsafe class NativeSceneRenderer
 
     private static NativeVector ToNative(Vector3d vector) => new() { X = vector.X, Y = vector.Y, Z = vector.Z };
 
+    private static Vector3d FromNative(NativeVector vector) => new(vector.X, vector.Y, vector.Z);
+
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate uint GetAbiVersionDelegate();
 
@@ -1224,8 +1420,12 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeRoom { public uint Size, Version; public NativeVector CentreMetres, DimensionsMetres; public double WallReflectionLow, WallReflectionMid, WallReflectionHigh, Scattering; public uint Enabled, Reserved; public double DecayTimeSeconds, DecayTimeLowSeconds, DecayTimeHighSeconds; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAcousticMaterial { public uint Size, Version; public nint NameUtf8; public fixed double OctaveBandCentresHz[8]; public fixed double Absorption[8]; public fixed double Scattering[8]; public fixed double Transmission[8]; public double Roughness; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeGeometry { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres, DimensionsMetres, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshGeometry { public uint Size, Version; public nint NameUtf8; public void* EncodedData; public ulong EncodedSizeBytes; public nint FormatHintUtf8; public NativeVector CentreMetres, Scale, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, MaxTriangles, Reserved; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshImportReceipt { public uint Size, Version, SourceMeshCount, SourceVertexCount, TriangleCount, BvhNodeCount; public NativeVector BoundsMinMetres, BoundsMaxMetres; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshMaterialBinding { public uint Size, Version, SourceMeshIndex, SourceMaterialIndex, MaterialIndex, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshGeometry { public uint Size, Version; public nint NameUtf8; public void* EncodedData; public ulong EncodedSizeBytes; public nint FormatHintUtf8; public NativeVector CentreMetres, Scale, RotationDegrees; public uint MaterialIndex, Occludes, Reflects, Enabled, MaxTriangles, Reserved; public NativeMeshMaterialBinding* MaterialBindings; public uint MaterialBindingCount, Reserved2; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshImportReceipt { public uint Size, Version, SourceMeshCount, SourceVertexCount, TriangleCount, BvhNodeCount; public NativeVector BoundsMinMetres, BoundsMaxMetres; public uint SourceMaterialCount, MaterialRegionCount; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeMeshMaterialRegion { public uint Size, Version, SourceMeshIndex, SourceMaterialIndex, MaterialIndex, TriangleCount; public fixed byte SourceMeshNameUtf8[64]; public fixed byte SourceMaterialNameUtf8[64]; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeReflectionPathQuery { public uint Size, Version, ReceiverIndex, ReflectionOrder; public double ReceiveTimeSeconds; public uint SampleRate, RayCount; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeReflectionPath { public uint Size, Version; public int Kind; public uint ReflectionOrder, EmitterIndex, ReceiverIndex, FirstMeshIndex, SecondMeshIndex, FirstPatchIndex, SecondPatchIndex, FirstMaterialIndex, SecondMaterialIndex, PointCount, Reserved; public NativeVector Point0, Point1, Point2, Point3; public double DistanceMetres, TravelTimeSeconds, PressureGain; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeMotionKeyframe { public double TimeSeconds; public NativeVector PositionMetres; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
@@ -1250,6 +1450,8 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_geometry(nint engine, NativeGeometry* geometry, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_mesh_geometry(nint engine, NativeMeshGeometry* geometry, out uint index, NativeMeshImportReceipt* receipt);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_copy_mesh_triangles(nint engine, uint meshIndex, NativeVector* triangleVertices, uint vertexCapacity, out uint vertexCount);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_copy_mesh_material_regions(nint engine, uint meshIndex, NativeMeshMaterialRegion* regions, uint regionCapacity, out uint regionCount);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_query_reflection_paths(nint engine, NativeReflectionPathQuery* query, NativeReflectionPath* paths, uint pathCapacity, out uint pathCount);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_capsules(nint engine, uint receiverIndex, NativeReceiverCapsule* leftCapsule, NativeReceiverCapsule* rightCapsule);

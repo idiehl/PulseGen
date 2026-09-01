@@ -43,6 +43,7 @@ public sealed partial class MainWindow : Window
     private readonly ViewportCameraController viewportCamera = new();
     private readonly DispatcherTimer previewTimer;
     private readonly DispatcherTimer autosaveTimer;
+    private readonly DispatcherTimer reflectionDiagnosticTimer;
     private readonly AudioDeviceRecoveryController audioDeviceRecovery = new();
     private DateTimeOffset nextAudioPerformanceRefreshAtUtc;
     private DateTimeOffset previewStarted;
@@ -98,6 +99,9 @@ public sealed partial class MainWindow : Window
     private bool discardRecoveryArmed;
     private bool closingInProgress;
     private bool closeFinalized;
+    private bool reflectionDiagnosticInFlight;
+    private bool reflectionDiagnosticPending;
+    private int reflectionDiagnosticVersion;
 
     public MainWindow()
     {
@@ -123,6 +127,8 @@ public sealed partial class MainWindow : Window
         previewTimer.Stop();
         autosaveTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Background, OnAutosaveTick);
         autosaveTimer.Stop();
+        reflectionDiagnosticTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(180), DispatcherPriority.Background, OnReflectionDiagnosticTick);
+        reflectionDiagnosticTimer.Stop();
         recoveryService = EditorRecoveryService.CreateForCurrentProcess(workspaceIndex);
         Opened += OnEditorOpened;
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
@@ -311,6 +317,7 @@ public sealed partial class MainWindow : Window
         Viewport.Selection = selection;
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, selection)?.Id;
         PopulateInspector(selection);
+        ScheduleReflectionDiagnostics();
         if (refreshTree)
         {
             RefreshSceneTree();
@@ -381,11 +388,39 @@ public sealed partial class MainWindow : Window
                         GeometryOccludesBox.IsChecked = geometry.Occludes;
                         GeometryReflectsBox.IsChecked = geometry.Reflects;
                         var room = geometry.Kind == GeometryKind.ParametricRoom;
+                        var importedMesh = geometry.Kind == GeometryKind.ImportedMesh;
                         GeometryRotationX.IsEnabled = !room;
                         GeometryRotationY.IsEnabled = !room;
                         GeometryRotationZ.IsEnabled = !room;
                         GeometryReflectsBox.IsEnabled = true;
                         RoomDecayPanel.IsVisible = room;
+                        MeshMaterialRegionPanel.IsVisible = importedMesh;
+                        if (importedMesh)
+                        {
+                            var regionChoices = geometry.MaterialBindings
+                                .OrderBy(item => item.SourceMeshIndex)
+                                .Select(item => new ImportedMeshRegionChoice(
+                                    item.SourceMeshIndex,
+                                    item.SourceMaterialIndex,
+                                    item.SourceMeshName,
+                                    item.SourceMaterialName,
+                                    0))
+                                .ToArray();
+                            GeometryRegionBox.ItemsSource = regionChoices;
+                            GeometryRegionMaterialBox.ItemsSource = materials;
+                            GeometryRegionBox.IsEnabled = regionChoices.Length > 0;
+                            GeometryRegionMaterialBox.IsEnabled = regionChoices.Length > 0;
+                            RefreshMeshRegionsButton.IsEnabled = lastProjectDirectory is not null;
+                            MeshMaterialRegionSummaryText.Text = regionChoices.Length == 0
+                                ? "This older import uses the fallback material for every triangle. Read the verified mesh to expose its source regions."
+                                : $"{regionChoices.Length} source region{(regionChoices.Length == 1 ? string.Empty : "s")} retained · choose one to assign its physical surface.";
+                            if (regionChoices.Length > 0)
+                            {
+                                GeometryRegionBox.SelectedIndex = 0;
+                                GeometryRegionMaterialBox.SelectedItem = materials.FirstOrDefault(item =>
+                                    item.Id == geometry.MaterialBindings.First(binding => binding.SourceMeshIndex == regionChoices[0].SourceMeshIndex).MaterialId);
+                            }
+                        }
                         if (room)
                         {
                             var material = scene.Materials.First(item => item.Id == geometry.MaterialId);
@@ -405,7 +440,7 @@ public sealed partial class MainWindow : Window
                         }
                         GeometryConstraintText.Text = room
                             ? "The current modal-room solver keeps rooms axis-aligned. Position and size remain fully editable."
-                            : geometry.Kind == GeometryKind.ImportedMesh
+                            : importedMesh
                                 ? "Dimensions control the editable selection handle; the shaded surface and echoes use verified imported triangles. Scale and rotation transform both the acoustic and visible mesh."
                                 : "Drag the selected centre handle in the world for X/Z movement; use these fields for exact position, size, and rotation.";
                         GeometryInspectorPanel.IsVisible = true;
@@ -538,8 +573,8 @@ public sealed partial class MainWindow : Window
                         RenderAtmosphereSegmentsBox.Text = profile.AtmosphereIntegrationSegments.ToString(CultureInfo.InvariantCulture);
                         RenderSeedBox.Text = profile.Seed.ToString(CultureInfo.InvariantCulture);
                         RenderProfileExplanationText.Text = profile.Quality == RenderQuality.Final
-                            ? "Final mode uses every authored air-path slice. Depth 2 adds an opposing-wall second bounce in axis-aligned rooms; authored planes and boxes stay first-bounce. Diffuse detail controls tail density."
-                            : "Preview uses one air sample per path leg. Depth 2 adds an opposing-wall second bounce in axis-aligned rooms; authored planes and boxes stay first-bounce. Diffuse detail controls tail density.";
+                            ? "Final mode uses every authored air-path slice. Depth 2 adds bounded imported-surface pairs and opposing-wall room bounces; authored primitive planes and boxes stay first-bounce. Diffuse detail controls tail density."
+                            : "Preview uses one air sample per path leg. Depth 2 keeps one selected imported-surface pair plus opposing-wall room bounces; authored primitive planes and boxes stay first-bounce. Diffuse detail controls tail density.";
                         RenderProfileInspectorPanel.IsVisible = true;
                         RefreshRenderProfileSummary();
                         break;
@@ -653,7 +688,11 @@ public sealed partial class MainWindow : Window
         BuildMaterialBandRows(material);
         MaterialRoughnessBox.Text = FormatNumber(material.Roughness);
 
-        var usedBy = scene.Geometry.Where(item => item.MaterialId == material.Id).Select(item => item.Name).ToArray();
+        var usedBy = scene.Geometry
+            .Where(item => item.MaterialId == material.Id || item.MaterialBindings.Any(binding => binding.MaterialId == material.Id))
+            .Select(item => item.Name)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         MaterialUsageText.Text = usedBy.Length switch
         {
             0 => "Not assigned to a surface yet.",
@@ -915,6 +954,7 @@ public sealed partial class MainWindow : Window
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
         StatusText.Text = message;
         GestureButton.Content = "●  Gesture";
+        ScheduleReflectionDiagnostics();
     }
 
     private static string FormatNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
@@ -1314,6 +1354,17 @@ public sealed partial class MainWindow : Window
         var original = scene.Geometry[index];
         var isRoom = original.Kind == GeometryKind.ParametricRoom;
         var materialId = (GeometryMaterialBox.SelectedItem as MaterialChoice)?.Id;
+        var materialBindings = original.MaterialBindings;
+        if (original.Kind == GeometryKind.ImportedMesh &&
+            GeometryRegionBox.SelectedItem is ImportedMeshRegionChoice region &&
+            GeometryRegionMaterialBox.SelectedItem is MaterialChoice regionMaterial)
+        {
+            materialBindings = original.MaterialBindings
+                .Select(binding => binding.SourceMeshIndex == region.SourceMeshIndex
+                    ? binding with { MaterialId = regionMaterial.Id }
+                    : binding)
+                .ToList();
+        }
         var replacement = original with
         {
             Transform = original.Transform with
@@ -1324,6 +1375,7 @@ public sealed partial class MainWindow : Window
             },
             DimensionsMetres = dimensions,
             MaterialId = materialId,
+            MaterialBindings = materialBindings,
             Occludes = GeometryOccludesBox.IsChecked == true,
             Reflects = GeometryReflectsBox.IsChecked == true
         };
@@ -1335,6 +1387,82 @@ public sealed partial class MainWindow : Window
         }
         CommitSceneEdit($"{original.Name} geometry");
         PopulateInspector(currentSelection);
+    }
+
+    private void OnGeometryRegionSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Geometry ||
+            GeometryRegionBox.SelectedItem is not ImportedMeshRegionChoice region)
+        {
+            return;
+        }
+        var geometry = scene.Geometry.FirstOrDefault(item => item.Id == currentSelection.Id);
+        var binding = geometry?.MaterialBindings.FirstOrDefault(item => item.SourceMeshIndex == region.SourceMeshIndex);
+        if (binding is null)
+        {
+            return;
+        }
+        GeometryRegionMaterialBox.SelectedItem = (GeometryRegionMaterialBox.ItemsSource as IEnumerable<MaterialChoice>)?
+            .FirstOrDefault(item => item.Id == binding.MaterialId);
+    }
+
+    private async void OnRefreshMeshRegionsClicked(object? sender, RoutedEventArgs e)
+    {
+        if (currentSelection.Kind != SceneSelectionKind.Geometry || lastProjectDirectory is null)
+        {
+            return;
+        }
+        var index = scene.Geometry.FindIndex(item => item.Id == currentSelection.Id);
+        if (index < 0 || scene.Geometry[index].Kind != GeometryKind.ImportedMesh)
+        {
+            return;
+        }
+        var original = scene.Geometry[index];
+        RefreshMeshRegionsButton.IsEnabled = false;
+        try
+        {
+            StopPreviewTransport();
+            StatusText.Text = $"Reading verified source-material regions from {original.Name}…";
+            var snapshot = ProjectStore.DeserializeManifest(ProjectStore.SerializeManifest(scene));
+            var projectDirectory = lastProjectDirectory;
+            var decoded = await Task.Run(() =>
+                NativeSceneRenderer.DecodeImportedMeshes(snapshot, [original.Id], projectDirectory).Single());
+            var fallbackMaterialId = original.MaterialId
+                ?? throw new InvalidOperationException("Imported mesh fallback material is missing.");
+            var existingBySourceMesh = original.MaterialBindings.ToDictionary(item => item.SourceMeshIndex);
+            var materialBindings = decoded.MaterialRegions.Select(region =>
+            {
+                var materialId = existingBySourceMesh.TryGetValue(region.SourceMeshIndex, out var existing) &&
+                    existing.SourceMaterialIndex == region.SourceMaterialIndex
+                        ? existing.MaterialId
+                        : fallbackMaterialId;
+                return new ImportedMeshMaterialBinding
+                {
+                    SourceMeshIndex = region.SourceMeshIndex,
+                    SourceMaterialIndex = region.SourceMaterialIndex,
+                    SourceMeshName = region.SourceMeshName,
+                    SourceMaterialName = region.SourceMaterialName,
+                    MaterialId = materialId
+                };
+            }).ToList();
+            var replacement = original with { MaterialBindings = materialBindings };
+            if (!SceneAuthoringOperations.TryReplaceGeometry(scene, original.Id, replacement, out var error))
+            {
+                RejectSceneEdit($"{original.Name} source material regions", error);
+                return;
+            }
+            CommitSceneEdit($"{original.Name} source material regions");
+            PopulateInspector(currentSelection);
+            StatusText.Text = $"{original.Name} · {materialBindings.Count} verified source material region{(materialBindings.Count == 1 ? string.Empty : "s")} retained";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Mesh region read failed without changing the scene: {exception.Message}";
+        }
+        finally
+        {
+            RefreshMeshRegionsButton.IsEnabled = lastProjectDirectory is not null;
+        }
     }
 
     private void OnApplyWindClicked(object? sender, RoutedEventArgs e)
@@ -1918,6 +2046,7 @@ public sealed partial class MainWindow : Window
 
         ImportMeshButton.IsEnabled = false;
         string? newlyDeclaredAssetHash = null;
+        var geometryAdded = false;
         try
         {
             StopPreviewTransport();
@@ -1974,6 +2103,25 @@ public sealed partial class MainWindow : Window
                 Occludes = true,
                 Reflects = true
             };
+            StatusText.Text = "Verifying triangles and retaining source material regions…";
+            var inspectionScene = scene with { Geometry = [.. scene.Geometry, geometry] };
+            var inspection = await Task.Run(() =>
+                NativeSceneRenderer.DecodeImportedMeshes(inspectionScene, [geometry.Id], lastProjectDirectory).Single());
+            geometry = geometry with
+            {
+                DimensionsMetres = new(
+                    Math.Max(0.001, inspection.BoundsMaximum.X - inspection.BoundsMinimum.X),
+                    Math.Max(0.001, inspection.BoundsMaximum.Y - inspection.BoundsMinimum.Y),
+                    Math.Max(0.001, inspection.BoundsMaximum.Z - inspection.BoundsMinimum.Z)),
+                MaterialBindings = inspection.MaterialRegions.Select(region => new ImportedMeshMaterialBinding
+                {
+                    SourceMeshIndex = region.SourceMeshIndex,
+                    SourceMaterialIndex = region.SourceMaterialIndex,
+                    SourceMeshName = region.SourceMeshName,
+                    SourceMaterialName = region.SourceMaterialName,
+                    MaterialId = material.Id
+                }).ToList()
+            };
             if (!SceneAuthoringOperations.TryAddGeometry(scene, geometry, out var error))
             {
                 if (newlyDeclaredAssetHash is not null)
@@ -1985,15 +2133,23 @@ public sealed partial class MainWindow : Window
                 }
                 throw new InvalidDataException(error?.Message ?? "The imported mesh could not be added to the scene.");
             }
+            geometryAdded = true;
 
             currentSelection = SceneSelection.Geometry(geometry.Id);
             CommitSceneEdit($"Imported {imported.FileName}");
             RefreshSceneTree();
             PopulateInspector(currentSelection);
-            StatusText.Text = $"Imported {imported.FileName} · verified triangles loading in the viewport · direct occlusion and first echoes active · save to commit the manifest";
+            StatusText.Text = $"Imported {imported.FileName} · {inspection.TriangleCount:N0} verified triangles · {geometry.MaterialBindings.Count} source material region{(geometry.MaterialBindings.Count == 1 ? string.Empty : "s")} · bounded first/second echoes active · save to commit the manifest";
         }
         catch (Exception exception)
         {
+            if (!geometryAdded && newlyDeclaredAssetHash is not null)
+            {
+                scene.Assets.RemoveAll(asset => string.Equals(
+                    asset.Sha256,
+                    newlyDeclaredAssetHash,
+                    StringComparison.OrdinalIgnoreCase));
+            }
             StatusText.Text = $"Mesh import failed without changing the scene manifest: {exception.Message}";
         }
         finally
@@ -4048,6 +4204,8 @@ public sealed partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         autosaveTimer.Stop();
+        reflectionDiagnosticTimer.Stop();
+        reflectionDiagnosticVersion++;
         recoveryCancellation.Cancel();
         StopPreviewTransport();
         analysisCancellation?.Cancel();
@@ -4084,6 +4242,94 @@ public sealed partial class MainWindow : Window
         VelocityText.Text = $"{velocity.Length:0.00} m/s";
         var timelineWidth = (Playhead.Parent as Control)?.Bounds.Width ?? 0;
         Canvas.SetLeft(Playhead, Math.Max(0, timelineWidth * (time / duration)));
+        ScheduleReflectionDiagnostics();
+    }
+
+    private void ScheduleReflectionDiagnostics()
+    {
+        reflectionDiagnosticVersion++;
+        var receiver = currentSelection.Kind == SceneSelectionKind.Receiver
+            ? scene.ReceiverRigs.FirstOrDefault(item => item.Id == currentSelection.Id && item.Enabled)
+            : scene.ReceiverRigs.FirstOrDefault(item => item.Enabled);
+        var profile = scene.RenderProfiles.FirstOrDefault(item => item.Id == activeRenderProfileId)
+            ?? scene.RenderProfiles.FirstOrDefault();
+        if (lastProjectDirectory is null || receiver is null || profile is null || profile.ReflectionOrder == 0 ||
+            !scene.Geometry.Any(item => item.Kind == GeometryKind.ImportedMesh && item.Reflects))
+        {
+            reflectionDiagnosticPending = false;
+            reflectionDiagnosticTimer.Stop();
+            Viewport.ReflectionPaths = [];
+            ReflectionPathText.Text = "ECHO ROUTES —";
+            return;
+        }
+        reflectionDiagnosticPending = true;
+        if (!reflectionDiagnosticInFlight && !reflectionDiagnosticTimer.IsEnabled)
+        {
+            reflectionDiagnosticTimer.Start();
+        }
+    }
+
+    private async void OnReflectionDiagnosticTick(object? sender, EventArgs e)
+    {
+        reflectionDiagnosticTimer.Stop();
+        if (reflectionDiagnosticInFlight || !reflectionDiagnosticPending || lastProjectDirectory is null)
+        {
+            return;
+        }
+        reflectionDiagnosticPending = false;
+        reflectionDiagnosticInFlight = true;
+        var version = reflectionDiagnosticVersion;
+        try
+        {
+            var receiver = currentSelection.Kind == SceneSelectionKind.Receiver
+                ? scene.ReceiverRigs.FirstOrDefault(item => item.Id == currentSelection.Id && item.Enabled)
+                : scene.ReceiverRigs.FirstOrDefault(item => item.Enabled);
+            var profile = scene.RenderProfiles.FirstOrDefault(item => item.Id == activeRenderProfileId)
+                ?? scene.RenderProfiles.First();
+            if (receiver is null)
+            {
+                return;
+            }
+            var time = Viewport.TimeSeconds;
+            var projectDirectory = lastProjectDirectory;
+            var snapshot = ProjectStore.DeserializeManifest(ProjectStore.SerializeManifest(scene));
+            var routes = await Task.Run(() => NativeSceneRenderer.TraceImportedMeshReflectionPaths(
+                snapshot,
+                receiver.Id,
+                time,
+                profile,
+                projectDirectory));
+            if (version != reflectionDiagnosticVersion)
+            {
+                return;
+            }
+            Viewport.ReflectionPaths = routes;
+            var firstOrder = routes.Count(item => item.ReflectionOrder == 1);
+            var secondOrder = routes.Count - firstOrder;
+            ReflectionPathText.Text = routes.Count == 0
+                ? "ECHO ROUTES 0"
+                : $"ECHO ROUTES {routes.Count} · {firstOrder}×1 + {secondOrder}×2";
+            ReflectionPathText.Foreground = routes.Count == 0
+                ? new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#718198"))
+                : new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#74CFC8"));
+        }
+        catch (Exception exception)
+        {
+            if (version == reflectionDiagnosticVersion)
+            {
+                Viewport.ReflectionPaths = [];
+                ReflectionPathText.Text = "ECHO ROUTES unavailable";
+                ToolTip.SetTip(ReflectionPathText, exception.Message);
+            }
+        }
+        finally
+        {
+            reflectionDiagnosticInFlight = false;
+            if (reflectionDiagnosticPending && !closingInProgress)
+            {
+                reflectionDiagnosticTimer.Start();
+            }
+        }
     }
 
     private void SelectKeyframe(int index)

@@ -75,12 +75,12 @@ public sealed class ViewportCameraAndPickingTests
         var farId = Guid.NewGuid();
         var vertices = new[]
         {
-            -1F, -1F, 1F, 0F, 0F, 1F,
-            1F, -1F, 1F, 0F, 0F, 1F,
-            0F, 1F, 1F, 0F, 0F, 1F,
-            -1F, -1F, 0F, 0F, 0F, 1F,
-            1F, -1F, 0F, 0F, 0F, 1F,
-            0F, 1F, 0F, 0F, 0F, 1F
+            -1F, -1F, 1F, 0F, 0F, 1F, 1F, 1F, 1F,
+            1F, -1F, 1F, 0F, 0F, 1F, 1F, 1F, 1F,
+            0F, 1F, 1F, 0F, 0F, 1F, 1F, 1F, 1F,
+            -1F, -1F, 0F, 0F, 0F, 1F, 1F, 1F, 1F,
+            1F, -1F, 0F, 0F, 0F, 1F, 1F, 1F, 1F,
+            0F, 1F, 0F, 0F, 0F, 1F, 1F, 1F, 1F
         };
         var mesh = new ViewportMesh(
             vertices,
@@ -127,10 +127,10 @@ public sealed class ViewportCameraAndPickingTests
 
     private static ViewportMesh TriangleMesh(Guid geometryId, Vector3d a, Vector3d b, Vector3d c)
     {
-        var vertices = new float[18];
+        var vertices = new float[ViewportMesh.FloatsPerVertex * 3];
         WriteVertex(vertices, 0, a);
-        WriteVertex(vertices, 6, b);
-        WriteVertex(vertices, 12, c);
+        WriteVertex(vertices, ViewportMesh.FloatsPerVertex, b);
+        WriteVertex(vertices, ViewportMesh.FloatsPerVertex * 2, c);
         var minimum = new Vector3d(
             Math.Min(a.X, Math.Min(b.X, c.X)),
             Math.Min(a.Y, Math.Min(b.Y, c.Y)),
@@ -157,6 +157,9 @@ public sealed class ViewportCameraAndPickingTests
         vertices[offset + 3] = 0;
         vertices[offset + 4] = 1;
         vertices[offset + 5] = 0;
+        vertices[offset + 6] = 1;
+        vertices[offset + 7] = 1;
+        vertices[offset + 8] = 1;
     }
 
     private static Vector3d ReadPosition(ViewportMesh mesh, uint vertexIndex)

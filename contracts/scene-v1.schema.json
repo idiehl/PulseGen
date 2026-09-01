@@ -153,6 +153,17 @@
         "visualTextureAssetHash": { "type": ["string", "null"] }
       }
     },
+    "importedMeshMaterialBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sourceMeshIndex", "sourceMaterialIndex", "sourceMeshName", "sourceMaterialName", "materialId"],
+      "properties": {
+        "sourceMeshIndex": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "sourceMaterialIndex": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "sourceMeshName": { "type": "string", "minLength": 1 },
+        "sourceMaterialName": { "type": "string", "minLength": 1 },
+        "materialId": { "$ref": "#/$defs/guid" }
+      }
+    },
     "geometry": {
       "type": "object", "additionalProperties": false,
       "required": ["id", "name", "kind", "transform", "dimensionsMetres", "isDynamic", "occludes", "reflects"],
@@ -162,6 +173,7 @@
         "transform": { "$ref": "#/$defs/transform" }, "materialId": { "oneOf": [{ "$ref": "#/$defs/guid" }, { "type": "null" }] },
         "dimensionsMetres": { "$ref": "#/$defs/vec3" },
         "meshAssetHash": { "oneOf": [{ "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" }, { "type": "null" }] },
+        "materialBindings": { "type": "array", "maxItems": 4096, "items": { "$ref": "#/$defs/importedMeshMaterialBinding" } },
         "isDynamic": { "type": "boolean" }, "occludes": { "type": "boolean" }, "reflects": { "type": "boolean" }
       }
     },

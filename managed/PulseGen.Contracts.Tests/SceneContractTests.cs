@@ -469,6 +469,68 @@ public sealed class SceneContractTests
     }
 
     [Fact]
+    public void ImportedMeshMaterialBindingsAreVersionedPersistedAndValidated()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        var alternate = scene.Materials[0] with { Id = Guid.NewGuid(), Name = "Alternate region" };
+        scene.Materials.Add(alternate);
+        var hash = new string('b', 64);
+        scene.Assets.Add(new AssetRef
+        {
+            Sha256 = hash,
+            Kind = AssetKind.Mesh,
+            FileName = "regions.obj",
+            MediaType = "model/obj",
+            SizeBytes = 128
+        });
+        var geometry = new AcousticGeometry
+        {
+            Id = Guid.NewGuid(),
+            Name = "Bound regions",
+            Kind = GeometryKind.ImportedMesh,
+            MaterialId = scene.Materials[0].Id,
+            MeshAssetHash = hash,
+            MaterialBindings =
+            [
+                new ImportedMeshMaterialBinding
+                {
+                    SourceMeshIndex = 0,
+                    SourceMaterialIndex = 1,
+                    SourceMeshName = "StoneWall",
+                    SourceMaterialName = "Stone",
+                    MaterialId = scene.Materials[0].Id
+                },
+                new ImportedMeshMaterialBinding
+                {
+                    SourceMeshIndex = 1,
+                    SourceMaterialIndex = 2,
+                    SourceMeshName = "CurtainWall",
+                    SourceMaterialName = "Curtain",
+                    MaterialId = alternate.Id
+                }
+            ]
+        };
+        scene.Geometry.Add(geometry);
+
+        Assert.DoesNotContain(SceneValidator.Validate(scene), issue => issue.Severity == ValidationSeverity.Error);
+        var restored = ProjectStore.DeserializeManifest(ProjectStore.SerializeManifest(scene));
+        Assert.Equal(2, restored.Geometry[^1].MaterialBindings.Count);
+        Assert.Equal(alternate.Id, restored.Geometry[^1].MaterialBindings[1].MaterialId);
+
+        scene.Geometry[^1] = geometry with
+        {
+            MaterialBindings =
+            [
+                geometry.MaterialBindings[0],
+                geometry.MaterialBindings[1] with { SourceMeshIndex = 0, MaterialId = Guid.NewGuid() }
+            ]
+        };
+        var issues = SceneValidator.Validate(scene);
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/sourceMeshIndex", StringComparison.Ordinal));
+        Assert.Contains(issues, issue => issue.Path.EndsWith("/materialId", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void AssetHashesMustBeValidUniqueAndNonNegative()
     {
         var scene = SampleScenes.CreateFlyby();

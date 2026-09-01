@@ -47,6 +47,16 @@ internal sealed record MaterialChoice(Guid Id, string Name)
     public override string ToString() => Name;
 }
 
+internal sealed record ImportedMeshRegionChoice(
+    uint SourceMeshIndex,
+    uint SourceMaterialIndex,
+    string SourceMeshName,
+    string SourceMaterialName,
+    uint TriangleCount)
+{
+    public override string ToString() => $"{SourceMeshIndex + 1}: {SourceMaterialName}";
+}
+
 internal sealed record MotionPathChoice(Guid? Id, string Name)
 {
     public override string ToString() => Name;
@@ -250,7 +260,11 @@ internal static class SceneAuthoringOperations
             return false;
         }
 
-        var usedBy = scene.Geometry.Where(item => item.MaterialId == id).Select(item => item.Name).ToArray();
+        var usedBy = scene.Geometry
+            .Where(item => item.MaterialId == id || item.MaterialBindings.Any(binding => binding.MaterialId == id))
+            .Select(item => item.Name)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         if (usedBy.Length > 0)
         {
             var names = string.Join(", ", usedBy.Take(3));

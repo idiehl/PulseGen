@@ -92,6 +92,7 @@
           <TextBlock Text="GRID 1 m" Foreground="#718198" FontSize="10" />
           <TextBlock Text="RMB ORBIT · MMB PAN · WHEEL ZOOM" Foreground="#718198" FontSize="10" />
           <Button Content="FIT" Padding="7,2" FontSize="9" Click="OnFitViewportClicked" ToolTip.Tip="Frame the complete sound space. You can also press F while the viewport is focused." />
+          <TextBlock x:Name="ReflectionPathText" Text="ECHO ROUTES —" Foreground="#74CFC8" FontSize="10" ToolTip.Tip="Exact bounded imported-mesh paths selected by the native acoustic solver at the current playhead." />
           <TextBlock x:Name="ViewportPerformanceText" Text="GPU STARTING" Foreground="#718198" FontSize="10" ToolTip.Tip="Live GPU frame rate and retained triangle count." />
         </StackPanel>
       </Border>
@@ -258,6 +259,22 @@
                   </StackPanel>
                 </Grid>
                 <TextBlock x:Name="GeometryConstraintText" Text="Drag the selected centre handle in the world for X/Z movement." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <Border x:Name="MeshMaterialRegionPanel" IsVisible="False" Background="#111B25" BorderBrush="#28394A" BorderThickness="1" CornerRadius="5" Padding="9">
+                  <StackPanel Spacing="7">
+                    <Grid ColumnDefinitions="*,Auto">
+                      <TextBlock Classes="sectionTitle" Text="SOURCE MATERIAL REGIONS" />
+                      <Button x:Name="RefreshMeshRegionsButton" Grid.Column="1" Content="READ MESH" Padding="7,2" FontSize="9" Click="OnRefreshMeshRegionsClicked" ToolTip.Tip="Re-read the verified content-addressed mesh and retain its submesh/material regions." />
+                    </Grid>
+                    <TextBlock x:Name="MeshMaterialRegionSummaryText" Text="No source regions retained yet." TextWrapping="Wrap" Foreground="#8192A7" FontSize="9" />
+                    <Grid ColumnDefinitions="*,130" RowDefinitions="Auto,Auto" RowSpacing="6">
+                      <TextBlock Text="Source region" Foreground="#8192A7" VerticalAlignment="Center" />
+                      <ComboBox x:Name="GeometryRegionBox" Grid.Column="1" SelectionChanged="OnGeometryRegionSelectionChanged" />
+                      <TextBlock Grid.Row="1" Text="Acoustic material" Foreground="#8192A7" VerticalAlignment="Center" />
+                      <ComboBox x:Name="GeometryRegionMaterialBox" Grid.Row="1" Grid.Column="1" />
+                    </Grid>
+                    <TextBlock Text="Each source submesh keeps its own acoustic surface. The main material above remains the explicit fallback for any region not listed here." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                  </StackPanel>
+                </Border>
                 <Border x:Name="RoomDecayPanel" IsVisible="False" Background="#111B25" BorderBrush="#28394A" BorderThickness="1" CornerRadius="5" Padding="9">
                   <StackPanel Spacing="6">
                     <TextBlock Classes="sectionTitle" Text="ESTIMATED NATURAL ROOM FADE" />

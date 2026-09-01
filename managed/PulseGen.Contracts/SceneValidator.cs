@@ -599,6 +599,32 @@ public static class SceneValidator
         {
             issues.Add(new($"geometry/{geometry.Id}/meshAssetHash", "Imported mesh geometry must reference a declared Mesh asset."));
         }
+        if (geometry.Kind != GeometryKind.ImportedMesh && geometry.MaterialBindings.Count > 0)
+        {
+            issues.Add(new($"geometry/{geometry.Id}/materialBindings", "Only imported mesh geometry can bind source material regions."));
+        }
+        if (geometry.MaterialBindings.Count > 4096)
+        {
+            issues.Add(new($"geometry/{geometry.Id}/materialBindings", "Imported mesh material bindings exceed the 4,096-region safety cap."));
+        }
+        var boundSourceMeshes = new HashSet<uint>();
+        for (var index = 0; index < geometry.MaterialBindings.Count; index++)
+        {
+            var binding = geometry.MaterialBindings[index];
+            var path = $"geometry/{geometry.Id}/materialBindings/{index}";
+            if (!boundSourceMeshes.Add(binding.SourceMeshIndex))
+            {
+                issues.Add(new($"{path}/sourceMeshIndex", "Each imported source submesh can have only one acoustic material binding."));
+            }
+            if (!materialIds.Contains(binding.MaterialId))
+            {
+                issues.Add(new($"{path}/materialId", "Imported mesh material binding references a material that is not in the scene."));
+            }
+            if (string.IsNullOrWhiteSpace(binding.SourceMeshName) || string.IsNullOrWhiteSpace(binding.SourceMaterialName))
+            {
+                issues.Add(new(path, "Imported mesh material bindings retain non-empty source mesh and source material names."));
+            }
+        }
         if (geometry.IsDynamic && (geometry.Occludes || geometry.Reflects))
         {
             issues.Add(new($"geometry/{geometry.Id}/isDynamic", "Dynamic acoustic geometry is retained in the project but requires a future motion adapter.", ValidationSeverity.Warning));

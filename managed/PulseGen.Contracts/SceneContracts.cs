@@ -5,7 +5,7 @@ namespace PulseGen.Contracts;
 public static class ContractVersions
 {
     public const int SceneDocument = 1;
-    public const int NativeAbi = 4;
+    public const int NativeAbi = 5;
     public const int ModelPack = 1;
 }
 
@@ -191,6 +191,15 @@ public enum GeometryKind
     ImportedMesh
 }
 
+public sealed record ImportedMeshMaterialBinding
+{
+    public required uint SourceMeshIndex { get; init; }
+    public required uint SourceMaterialIndex { get; init; }
+    public required string SourceMeshName { get; init; }
+    public required string SourceMaterialName { get; init; }
+    public required Guid MaterialId { get; init; }
+}
+
 public sealed record AcousticGeometry
 {
     public required Guid Id { get; init; }
@@ -200,6 +209,7 @@ public sealed record AcousticGeometry
     public Guid? MaterialId { get; init; }
     public Vector3d DimensionsMetres { get; init; } = new(10, 4, 8);
     public string? MeshAssetHash { get; init; }
+    public List<ImportedMeshMaterialBinding> MaterialBindings { get; init; } = [];
     public bool IsDynamic { get; init; }
     public bool Occludes { get; init; } = true;
     public bool Reflects { get; init; } = true;

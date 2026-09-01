@@ -39,14 +39,20 @@ commands and reads bounded telemetry.
   glTF/GLB acoustic meshes. Project assets are size/SHA-256 verified before a
   memory-only native import, capped at 250,000 triangles per mesh, and compiled
   into immutable BVHs for direct occlusion, transmission, and exact reflection-point
-  membership. Coplanar triangles become deterministic acoustic patches, with a
-  bounded strongest-path cache supplying material-shaped first echoes in preview
-  and final stereo renders without allocating on the audio thread. A read-only native
-  copy operation gives the editor the exact transformed, non-degenerate triangle
+  membership. The importer retains each source mesh/material region so one model
+  can deliberately mix stone, timber, cloth, or any other authored PulseGen
+  material instead of being forced to share one acoustic surface. Coplanar
+  triangles become deterministic acoustic patches, with a bounded strongest-path
+  cache supplying material-shaped first echoes and selected two-surface echoes in
+  preview and final stereo renders without allocating on the audio thread. A
+  read-only native copy operation gives the editor the exact transformed,
+  non-degenerate triangle
   set accepted by that acoustic importer; the dashed authored bounds remain only
   as an editable selection handle. Highly faceted meshes retain a bounded mix
   of their largest and deterministically distributed coplanar surface groups,
-  up to 256 reflection candidates per imported asset.
+  up to 256 reflection candidates per imported asset. For each moving source,
+  two-bounce work is narrowed to at most 12 candidate patches and four selected
+  routes so interactive cost remains bounded.
 - WAV render output as 16/24-bit PCM with explicit TPDF dither or unclipped
   32-bit float, isolated stereo takes, and deterministic provenance receipts
   with scene/profile/dependency and per-take SHA-256 identities.
@@ -63,9 +69,14 @@ commands and reads bounded telemetry.
 - Retained OpenGL/ANGLE terrain and imported-mesh rendering beneath the editable
   world overlay. Geometry is verified and prepared away from the UI thread,
   uploaded once to retained vertex/index buffers, and submitted in one indexed
-  draw. Flat acoustic-surface normals make imported triangles readable without
-  inventing source materials. The GPU surface and editing overlay now share one
-  perspective camera: right-drag orbits, middle-drag pans, the wheel zooms, and
+  draw. Flat acoustic-surface normals make imported triangles readable, while
+  source regions are colored from their assigned acoustic behavior. The geometry
+  inspector can read an older imported asset, list its source regions, and assign
+  a different PulseGen material to each one. The World view draws the exact echo
+  routes chosen by the native solver: cyan for one bounce and purple for two,
+  with visible contact points and a small route-count readout. The GPU surface and
+  editing overlay now share one perspective camera: right-drag orbits, middle-drag
+  pans, the wheel zooms, and
   Fit/F reframes the authored sound space. Exact ray/triangle hits select the
   rendered terrain or imported surface beneath the pointer while leaving source,
   receiver, path-point, and surface-drag gestures intact. A live viewport badge
@@ -159,15 +170,18 @@ commands and reads bounded telemetry.
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
 
-Steam Audio, KISS FFT, GPU model execution, full mesh authoring, and source
-material/texture recreation for imported meshes remain explicit adapters; their
-dependency records prevent an unfinished integration from being presented as
-active.
+Steam Audio, KISS FFT, GPU model execution, full mesh authoring, automatic
+physical-coefficient inference, and source texture recreation for imported meshes
+remain explicit adapters; their dependency records prevent an unfinished
+integration from being presented as active. Imported source material identities
+are preserved for explicit user mapping, but PulseGen does not pretend a visual
+material name proves how a surface sounds.
 
-Reflection depth 2 currently applies only to opposing wall pairs in an
-axis-aligned parametric room. Authored finite planes and boxes remain deliberately
-limited to one reflection, and imported meshes still provide occlusion rather
-than reflection paths.
+Within an axis-aligned parametric room, reflection depth 2 currently covers only
+opposing wall pairs. Authored finite planes and boxes remain deliberately limited
+to one reflection. Imported meshes separately support bounded one- and
+two-surface image-source routes over the retained acoustic patches; this is
+geometric acoustics, not full wave or diffraction simulation.
 
 ## Build
 

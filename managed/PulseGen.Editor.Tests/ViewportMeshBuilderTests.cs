@@ -54,7 +54,7 @@ public sealed class ViewportMeshBuilderTests
     }
 
     [Fact]
-    public void MeshBuildKeyIgnoresAudioEditsButTracksTerrainMovement()
+    public void MeshBuildKeyIgnoresAudioEditsButTracksGeometryAndAcousticMaterialColoring()
     {
         var scene = SampleScenes.CreateViewportStress();
         var original = ViewportMeshBuilder.KeyFor(scene);
@@ -67,7 +67,14 @@ public sealed class ViewportMeshBuilderTests
         {
             Transform = terrain.Transform with { PositionMetres = new(3, -1.5, 0) }
         };
-        Assert.NotEqual(original, ViewportMeshBuilder.KeyFor(scene));
+        var moved = ViewportMeshBuilder.KeyFor(scene);
+        Assert.NotEqual(original, moved);
+
+        scene.Materials[0] = scene.Materials[0] with
+        {
+            Absorption = [0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8]
+        };
+        Assert.NotEqual(moved, ViewportMeshBuilder.KeyFor(scene));
     }
 
     [Fact]

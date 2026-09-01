@@ -14,7 +14,7 @@ internal sealed record ViewportMesh(
     int ImportedMeshCount,
     IReadOnlyList<ViewportMeshSection> Sections)
 {
-    public const int FloatsPerVertex = 6;
+    public const int FloatsPerVertex = 9;
 
     public int VertexCount => InterleavedPositionNormals.Length / FloatsPerVertex;
 
@@ -61,6 +61,13 @@ internal static class ViewportMeshBuilder
             else
             {
                 signature.Append(':').Append(geometry.MeshAssetHash);
+                signature.Append(':').Append(geometry.MaterialId);
+                foreach (var binding in geometry.MaterialBindings.OrderBy(item => item.SourceMeshIndex))
+                {
+                    signature.Append(':').Append(binding.SourceMeshIndex);
+                    signature.Append(':').Append(binding.SourceMaterialIndex);
+                    signature.Append(':').Append(binding.MaterialId);
+                }
                 var asset = scene.Assets.FirstOrDefault(item =>
                     item.Kind == AssetKind.Mesh &&
                     string.Equals(item.Sha256, geometry.MeshAssetHash, StringComparison.OrdinalIgnoreCase));
@@ -70,6 +77,15 @@ internal static class ViewportMeshBuilder
                     signature.Append(':').Append(asset.SizeBytes.ToString(CultureInfo.InvariantCulture));
                 }
             }
+        }
+        foreach (var material in scene.Materials.OrderBy(item => item.Id))
+        {
+            signature.Append("|material:").Append(material.Id);
+            foreach (var value in material.Absorption.Concat(material.Scattering).Concat(material.Transmission))
+            {
+                AppendDouble(signature, value);
+            }
+            AppendDouble(signature, material.Roughness);
         }
         return new(signature.ToString());
     }
@@ -102,7 +118,7 @@ internal static class ViewportMeshBuilder
             foreach (var imported in importedMeshes)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                parts.Add(BuildImportedMesh(imported, cancellationToken));
+                parts.Add(BuildImportedMesh(scene, imported, cancellationToken));
             }
         }
         return Combine(parts, cancellationToken);
@@ -153,7 +169,7 @@ internal static class ViewportMeshBuilder
                 var position = TransformPoint(geometry.Transform, new(localX, localY, localZ));
                 var normal = TransformNormal(geometry.Transform, localNormal);
                 var offset = ((zIndex * verticesX) + xIndex) * ViewportMesh.FloatsPerVertex;
-                WriteVertex(vertices, offset, position, normal);
+                WriteVertex(vertices, offset, position, normal, new(0.12, 0.38, 0.31));
                 ExpandBounds(ref minimum, ref maximum, position);
             }
         }
@@ -188,6 +204,7 @@ internal static class ViewportMeshBuilder
     }
 
     private static ViewportMesh BuildImportedMesh(
+        SceneDocument scene,
         ImportedMeshTriangleData imported,
         CancellationToken cancellationToken)
     {
@@ -199,15 +216,33 @@ internal static class ViewportMeshBuilder
         {
             throw new InvalidDataException("Imported viewport mesh exceeds the 250,000-triangle per-asset safety cap.");
         }
+        if (imported.MaterialRegions.Sum(region => (long)region.TriangleCount) != imported.TriangleCount)
+        {
+            throw new InvalidDataException("Imported viewport material regions do not cover the accepted triangle stream exactly.");
+        }
 
         var vertices = new float[checked(imported.TriangleVertices.Length * ViewportMesh.FloatsPerVertex)];
         var indices = new uint[imported.TriangleVertices.Length];
+        var materials = scene.Materials.ToDictionary(material => material.Id);
+        var regionIndex = 0;
+        var regionTriangleEnd = imported.MaterialRegions.Count == 0 ? 0 : checked((int)imported.MaterialRegions[0].TriangleCount);
         for (var triangleIndex = 0; triangleIndex < imported.TriangleCount; triangleIndex++)
         {
             if ((triangleIndex & 2047) == 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
             }
+            while (triangleIndex >= regionTriangleEnd && regionIndex + 1 < imported.MaterialRegions.Count)
+            {
+                regionIndex++;
+                regionTriangleEnd = checked(regionTriangleEnd + (int)imported.MaterialRegions[regionIndex].TriangleCount);
+            }
+            var region = imported.MaterialRegions[regionIndex];
+            if (!materials.TryGetValue(region.MaterialId, out var material))
+            {
+                throw new InvalidDataException("Imported viewport material region references a missing scene material.");
+            }
+            var color = MaterialColor(material);
             var sourceOffset = triangleIndex * 3;
             var a = imported.TriangleVertices[sourceOffset];
             var b = imported.TriangleVertices[sourceOffset + 1];
@@ -220,7 +255,8 @@ internal static class ViewportMeshBuilder
                     vertices,
                     flatIndex * ViewportMesh.FloatsPerVertex,
                     imported.TriangleVertices[flatIndex],
-                    normal);
+                    normal,
+                    color);
                 indices[flatIndex] = checked((uint)flatIndex);
             }
         }
@@ -293,7 +329,7 @@ internal static class ViewportMeshBuilder
         return new(vertices, indices, minimum, maximum, terrainTriangles, importedMeshCount, sections);
     }
 
-    private static void WriteVertex(float[] destination, int offset, Vector3d position, Vector3d normal)
+    private static void WriteVertex(float[] destination, int offset, Vector3d position, Vector3d normal, Vector3d color)
     {
         destination[offset] = checked((float)position.X);
         destination[offset + 1] = checked((float)position.Y);
@@ -301,6 +337,20 @@ internal static class ViewportMeshBuilder
         destination[offset + 3] = checked((float)normal.X);
         destination[offset + 4] = checked((float)normal.Y);
         destination[offset + 5] = checked((float)normal.Z);
+        destination[offset + 6] = checked((float)color.X);
+        destination[offset + 7] = checked((float)color.Y);
+        destination[offset + 8] = checked((float)color.Z);
+    }
+
+    private static Vector3d MaterialColor(AcousticMaterial material)
+    {
+        var absorption = material.Absorption.DefaultIfEmpty(0.2).Average();
+        var scattering = material.Scattering.DefaultIfEmpty(0.1).Average();
+        var transmission = material.Transmission.DefaultIfEmpty(0).Average();
+        return new(
+            Math.Clamp(0.16 + (0.44 * (1 - absorption)) + (0.12 * material.Roughness), 0.08, 0.9),
+            Math.Clamp(0.28 + (0.42 * scattering), 0.12, 0.9),
+            Math.Clamp(0.34 + (0.38 * transmission) + (0.12 * absorption), 0.16, 0.95));
     }
 
     private static void ExpandBounds(ref Vector3d minimum, ref Vector3d maximum, Vector3d point)

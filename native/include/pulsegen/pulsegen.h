@@ -20,10 +20,12 @@
 extern "C" {
 #endif
 
-#define PG_ABI_VERSION 4u
+#define PG_ABI_VERSION 5u
 #define PG_MAX_NAME_BYTES 64u
 #define PG_ACOUSTIC_BAND_COUNT 8u
 #define PG_MAX_IMPORTED_MESH_TRIANGLES 250000u
+#define PG_MAX_MESH_MATERIAL_REGIONS 4096u
+#define PG_MAX_REFLECTION_PATH_POINTS 4u
 #define PG_MAX_ATMOSPHERE_LAYERS 64u
 #define PG_MAX_WIND_ZONES 64u
 
@@ -204,6 +206,20 @@ typedef struct pg_geometry_desc {
     uint32_t reserved;
 } pg_geometry_desc;
 
+/*
+ * A binding assigns one decoded source submesh/material region to a PulseGen
+ * acoustic material. The source material index is retained as an integrity
+ * check so a project cannot silently remap a changed mesh asset.
+ */
+typedef struct pg_mesh_material_binding {
+    uint32_t size;
+    uint32_t version;
+    uint32_t source_mesh_index;
+    uint32_t source_material_index;
+    uint32_t material_index;
+    uint32_t reserved;
+} pg_mesh_material_binding;
+
 typedef struct pg_mesh_geometry_desc {
     uint32_t size;
     uint32_t version;
@@ -220,6 +236,9 @@ typedef struct pg_mesh_geometry_desc {
     uint32_t enabled;
     uint32_t max_triangles;
     uint32_t reserved;
+    const pg_mesh_material_binding* material_bindings;
+    uint32_t material_binding_count;
+    uint32_t reserved2;
 } pg_mesh_geometry_desc;
 
 typedef struct pg_mesh_import_receipt {
@@ -231,7 +250,55 @@ typedef struct pg_mesh_import_receipt {
     uint32_t bvh_node_count;
     pg_vec3 bounds_min_metres;
     pg_vec3 bounds_max_metres;
+    uint32_t source_material_count;
+    uint32_t material_region_count;
 } pg_mesh_import_receipt;
+
+typedef struct pg_mesh_material_region {
+    uint32_t size;
+    uint32_t version;
+    uint32_t source_mesh_index;
+    uint32_t source_material_index;
+    uint32_t material_index;
+    uint32_t triangle_count;
+    char source_mesh_name_utf8[PG_MAX_NAME_BYTES];
+    char source_material_name_utf8[PG_MAX_NAME_BYTES];
+} pg_mesh_material_region;
+
+typedef enum pg_reflection_path_kind {
+    PG_REFLECTION_IMPORTED_MESH = 0
+} pg_reflection_path_kind;
+
+typedef struct pg_reflection_path_query {
+    uint32_t size;
+    uint32_t version;
+    uint32_t receiver_index;
+    uint32_t reflection_order;
+    double receive_time_seconds;
+    uint32_t sample_rate;
+    uint32_t ray_count;
+} pg_reflection_path_query;
+
+typedef struct pg_reflection_path {
+    uint32_t size;
+    uint32_t version;
+    pg_reflection_path_kind kind;
+    uint32_t reflection_order;
+    uint32_t emitter_index;
+    uint32_t receiver_index;
+    uint32_t first_mesh_index;
+    uint32_t second_mesh_index;
+    uint32_t first_patch_index;
+    uint32_t second_patch_index;
+    uint32_t first_material_index;
+    uint32_t second_material_index;
+    uint32_t point_count;
+    uint32_t reserved;
+    pg_vec3 points[PG_MAX_REFLECTION_PATH_POINTS];
+    double distance_metres;
+    double travel_time_seconds;
+    double pressure_gain;
+} pg_reflection_path;
 
 typedef struct pg_motion_keyframe {
     double time_seconds;
@@ -422,6 +489,20 @@ PG_API pg_status PG_CALL pg_engine_copy_mesh_triangles(
     pg_vec3* out_triangle_vertices,
     uint32_t vertex_capacity,
     uint32_t* out_vertex_count);
+/* Returns stable source-region metadata after a verified import. */
+PG_API pg_status PG_CALL pg_engine_copy_mesh_material_regions(
+    pg_engine* engine,
+    uint32_t mesh_index,
+    pg_mesh_material_region* out_regions,
+    uint32_t region_capacity,
+    uint32_t* out_region_count);
+/* Computes the bounded imported-mesh routes selected by the native solver. */
+PG_API pg_status PG_CALL pg_engine_query_reflection_paths(
+    pg_engine* engine,
+    const pg_reflection_path_query* query,
+    pg_reflection_path* out_paths,
+    uint32_t path_capacity,
+    uint32_t* out_path_count);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);

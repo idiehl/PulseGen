@@ -58,7 +58,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.14", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.15", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
@@ -67,8 +67,8 @@ public sealed class PrimitiveAcousticsTests
                 Assert.NotEqual(Guid.Empty, take.GetProperty("receiverRigId").GetGuid());
                 Assert.False(string.IsNullOrWhiteSpace(take.GetProperty("receiverName").GetString()));
             });
-            Assert.Equal(4, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal(5, receipt.RootElement.GetProperty("nativeAbiVersion").GetInt32());
+            Assert.Equal("bounded-propagation-v8", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal("eyring-three-band-v1", receipt.RootElement.GetProperty("roomResponseModel").GetString());
             Assert.Contains(
@@ -116,7 +116,7 @@ public sealed class PrimitiveAcousticsTests
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(first.RenderReceiptPath));
             Assert.Equal(8, receipt.RootElement.GetProperty("receiptVersion").GetInt32());
-            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v8", receipt.RootElement.GetProperty("acousticModel").GetString());
             Assert.Equal("layered-bounded-wind-v1", receipt.RootElement.GetProperty("atmosphereModel").GetString());
             Assert.Equal(2, receipt.RootElement.GetProperty("atmosphereLayerCount").GetInt32());
             Assert.Equal(2, receipt.RootElement.GetProperty("windZoneCount").GetInt32());
@@ -287,6 +287,10 @@ public sealed class PrimitiveAcousticsTests
             Assert.Equal(6, decoded.TriangleVertices.Length);
             Assert.Equal(1U, decoded.SourceMeshCount);
             Assert.Equal(4U, decoded.SourceVertexCount);
+            var decodedRegion = Assert.Single(decoded.MaterialRegions);
+            Assert.Equal(0U, decodedRegion.SourceMeshIndex);
+            Assert.Equal(scene.Materials[0].Id, decodedRegion.MaterialId);
+            Assert.Equal(2U, decodedRegion.TriangleCount);
             Assert.All(decoded.TriangleVertices, vertex => Assert.Equal(1, vertex.Z, 9));
             Assert.Equal(new Vector3d(-5, -5, 1), decoded.BoundsMinimum);
             Assert.Equal(new Vector3d(5, 5, 1), decoded.BoundsMaximum);
@@ -383,6 +387,143 @@ public sealed class PrimitiveAcousticsTests
     }
 
     [Fact]
+    public async Task ImportedMeshMaterialRegionsDriveNativeFirstAndSecondOrderPathDiagnostics()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-mesh-routes-{Guid.NewGuid():N}");
+        var project = Path.Combine(root, "Routes.pulseproj");
+        var sourcePath = Path.Combine(root, "corner.obj");
+        const string obj = """
+            o SideWall
+            usemtl Stone
+            v 0 -5 0
+            v 0 5 0
+            v 0 5 5
+            v 0 -5 5
+            f 1 2 3
+            f 1 3 4
+            o BackWall
+            usemtl Curtain
+            v 0 -5 0
+            v 5 -5 0
+            v 5 5 0
+            v 0 5 0
+            f 5 6 7
+            f 5 7 8
+            """;
+        try
+        {
+            Directory.CreateDirectory(root);
+            await File.WriteAllTextAsync(sourcePath, obj, Encoding.UTF8);
+            var scene = CreateScene(withSurface: false);
+            var hardMaterial = scene.Materials[0] with
+            {
+                Name = "Hard stone",
+                Absorption = [0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05],
+                Scattering = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02],
+                Transmission = [0, 0, 0, 0, 0, 0, 0, 0],
+                Roughness = 0.05
+            };
+            var softMaterial = hardMaterial with
+            {
+                Id = Guid.NewGuid(),
+                Name = "Soft curtain",
+                Absorption = [0.55, 0.55, 0.55, 0.55, 0.55, 0.55, 0.55, 0.55],
+                Scattering = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
+                Roughness = 0.35
+            };
+            scene.Materials[0] = hardMaterial;
+            scene.Materials.Add(softMaterial);
+            scene.MotionPaths[0] = scene.MotionPaths[0] with
+            {
+                Keyframes =
+                [
+                    new MotionKeyframe { TimeSeconds = 0, PositionMetres = new(1, 0, 2) },
+                    new MotionKeyframe { TimeSeconds = 1, PositionMetres = new(1, 0, 2) }
+                ]
+            };
+            scene.ReceiverRigs[0] = scene.ReceiverRigs[0] with
+            {
+                Transform = new Transform { PositionMetres = new(2, 0, 1) }
+            };
+            scene.RenderProfiles[0] = scene.RenderProfiles[0] with
+            {
+                ReflectionOrder = 2,
+                RayCount = 4096,
+                ImpulseResponseSeconds = 0
+            };
+            await ProjectStore.SaveAsync(scene, project);
+            var asset = await ProjectStore.ImportAssetAsync(project, sourcePath, AssetKind.Mesh, "model/obj", "test fixture", "CC0-1.0");
+            scene.Assets.Add(asset);
+            var geometry = new AcousticGeometry
+            {
+                Id = Guid.NewGuid(),
+                Name = "Two-region corner",
+                Kind = GeometryKind.ImportedMesh,
+                MaterialId = hardMaterial.Id,
+                MeshAssetHash = asset.Sha256,
+                DimensionsMetres = new(5, 10, 5),
+                Occludes = true,
+                Reflects = true
+            };
+            scene.Geometry.Add(geometry);
+            var inspection = Assert.Single(NativeSceneRenderer.DecodeImportedMeshes(scene, [geometry.Id], project));
+            Assert.Equal(2, inspection.MaterialRegions.Count);
+            geometry = geometry with
+            {
+                MaterialBindings = inspection.MaterialRegions
+                    .OrderBy(region => region.SourceMeshIndex)
+                    .Select((region, index) => new ImportedMeshMaterialBinding
+                    {
+                        SourceMeshIndex = region.SourceMeshIndex,
+                        SourceMaterialIndex = region.SourceMaterialIndex,
+                        SourceMeshName = region.SourceMeshName,
+                        SourceMaterialName = region.SourceMaterialName,
+                        MaterialId = index == 0 ? hardMaterial.Id : softMaterial.Id
+                    }).ToList()
+            };
+            scene.Geometry[0] = geometry;
+            await ProjectStore.SaveAsync(scene, project);
+
+            var rebound = Assert.Single(NativeSceneRenderer.DecodeImportedMeshes(scene, [geometry.Id], project));
+            Assert.Equal(
+                [hardMaterial.Id, softMaterial.Id],
+                rebound.MaterialRegions.OrderBy(region => region.SourceMeshIndex).Select(region => region.MaterialId));
+            var paths = NativeSceneRenderer.TraceImportedMeshReflectionPaths(
+                scene,
+                scene.ReceiverRigs[0].Id,
+                0.5,
+                scene.RenderProfiles[0],
+                project);
+            Assert.True(paths.Count >= 3);
+            Assert.Contains(paths, path => path.ReflectionOrder == 1 && path.Points.Count == 3);
+            var secondOrder = Assert.Single(paths, path => path.ReflectionOrder == 2);
+            Assert.Equal(4, secondOrder.Points.Count);
+            Assert.NotEqual(secondOrder.FirstMaterialId, secondOrder.SecondMaterialId);
+            Assert.InRange(secondOrder.DistanceMetres, 4.2, 4.3);
+            Assert.True(secondOrder.PressureGain > 0);
+
+            var firstOrderProfile = scene.RenderProfiles[0] with { ReflectionOrder = 1 };
+            var secondOrderProfile = scene.RenderProfiles[0];
+            var firstOrderDirectory = Path.Combine(root, "first-order-audio");
+            var secondOrderDirectory = Path.Combine(root, "second-order-audio");
+            NativeSceneRenderer.Render(scene, firstOrderDirectory, firstOrderProfile, project);
+            NativeSceneRenderer.Render(scene, secondOrderDirectory, secondOrderProfile, project);
+            var firstOrderSamples = ReadFloatSamples(Directory.GetFiles(firstOrderDirectory, "*.wav").Single());
+            var secondOrderSamples = ReadFloatSamples(Directory.GetFiles(secondOrderDirectory, "*.wav").Single());
+            var secondOrderPeak = firstOrderSamples.Zip(secondOrderSamples)
+                .Max(pair => Math.Abs(pair.First - pair.Second));
+            Assert.True(secondOrderPeak > 1.0e-5, $"Expected the bounded second imported-surface bounce in rendered audio; peak={secondOrderPeak:R}.");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void RenderProfileRayCountActivatesADeterministicScatteredTail()
     {
         var root = Path.Combine(Path.GetTempPath(), $"pulsegen-diffuse-tail-{Guid.NewGuid():N}");
@@ -447,7 +588,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.True(PeakDifferenceAfterFrame(firstSamples, secondSamples, secondBounceArrival) > 1.0e-4);
             using var receipt = JsonDocument.Parse(File.ReadAllText(secondReceipt.RenderReceiptPath));
             Assert.Equal(2, receipt.RootElement.GetProperty("reflectionOrder").GetInt32());
-            Assert.Equal("bounded-propagation-v7", receipt.RootElement.GetProperty("acousticModel").GetString());
+            Assert.Equal("bounded-propagation-v8", receipt.RootElement.GetProperty("acousticModel").GetString());
         }
         finally
         {

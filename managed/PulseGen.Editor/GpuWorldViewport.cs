@@ -219,8 +219,10 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
                 gl.BindBuffer(GlElementArrayBuffer, indexBuffer);
                 gl.EnableVertexAttribArray(0);
                 gl.EnableVertexAttribArray(1);
+                gl.EnableVertexAttribArray(2);
                 gl.VertexAttribPointer(0, 3, GlFloat, 0, ViewportMesh.FloatsPerVertex * sizeof(float), IntPtr.Zero);
                 gl.VertexAttribPointer(1, 3, GlFloat, 0, ViewportMesh.FloatsPerVertex * sizeof(float), new IntPtr(3 * sizeof(float)));
+                gl.VertexAttribPointer(2, 3, GlFloat, 0, ViewportMesh.FloatsPerVertex * sizeof(float), new IntPtr(6 * sizeof(float)));
                 var viewProjection = camera.ViewProjection(Bounds.Size);
                 gl.UniformMatrix4fv(matrixUniform, 1, false, &viewProjection.M11);
                 gl.DrawElements(GlTriangles, activeMesh.Indices.Length, GlUnsignedInt, IntPtr.Zero);
@@ -361,18 +363,18 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
         var embedded = GlVersion.Type == GlProfileType.OpenGLES;
         var vertexSource = modern
             ? embedded
-                ? "#version 300 es\nprecision highp float;\nin vec3 aPosition;\nin vec3 aNormal;\nuniform mat4 uViewProjection;\nout float vLight;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); }"
-                : "#version 330 core\nin vec3 aPosition;\nin vec3 aNormal;\nuniform mat4 uViewProjection;\nout float vLight;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); }"
+                ? "#version 300 es\nprecision highp float;\nin vec3 aPosition;\nin vec3 aNormal;\nin vec3 aColor;\nuniform mat4 uViewProjection;\nout float vLight;\nout vec3 vColor;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); vColor = aColor; }"
+                : "#version 330 core\nin vec3 aPosition;\nin vec3 aNormal;\nin vec3 aColor;\nuniform mat4 uViewProjection;\nout float vLight;\nout vec3 vColor;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); vColor = aColor; }"
             : embedded
-                ? "#version 100\nprecision highp float;\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nuniform mat4 uViewProjection;\nvarying float vLight;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); }"
-                : "#version 120\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nuniform mat4 uViewProjection;\nvarying float vLight;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); }";
+                ? "#version 100\nprecision highp float;\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nuniform mat4 uViewProjection;\nvarying float vLight;\nvarying vec3 vColor;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); vColor = aColor; }"
+                : "#version 120\nattribute vec3 aPosition;\nattribute vec3 aNormal;\nattribute vec3 aColor;\nuniform mat4 uViewProjection;\nvarying float vLight;\nvarying vec3 vColor;\nvoid main(){ gl_Position = uViewProjection * vec4(aPosition, 1.0); vLight = 0.32 + 0.68 * max(dot(normalize(aNormal), normalize(vec3(0.35, 1.0, 0.45))), 0.0); vColor = aColor; }";
         var fragmentSource = modern
             ? embedded
-                ? "#version 300 es\nprecision highp float;\nin float vLight;\nout vec4 outputColor;\nvoid main(){ outputColor = vec4(vec3(0.10, 0.43, 0.48) * vLight, 1.0); }"
-                : "#version 330 core\nin float vLight;\nout vec4 outputColor;\nvoid main(){ outputColor = vec4(vec3(0.10, 0.43, 0.48) * vLight, 1.0); }"
+                ? "#version 300 es\nprecision highp float;\nin float vLight;\nin vec3 vColor;\nout vec4 outputColor;\nvoid main(){ outputColor = vec4(vColor * vLight, 1.0); }"
+                : "#version 330 core\nin float vLight;\nin vec3 vColor;\nout vec4 outputColor;\nvoid main(){ outputColor = vec4(vColor * vLight, 1.0); }"
             : embedded
-                ? "#version 100\nprecision highp float;\nvarying float vLight;\nvoid main(){ gl_FragColor = vec4(vec3(0.10, 0.43, 0.48) * vLight, 1.0); }"
-                : "#version 120\nvarying float vLight;\nvoid main(){ gl_FragColor = vec4(vec3(0.10, 0.43, 0.48) * vLight, 1.0); }";
+                ? "#version 100\nprecision highp float;\nvarying float vLight;\nvarying vec3 vColor;\nvoid main(){ gl_FragColor = vec4(vColor * vLight, 1.0); }"
+                : "#version 120\nvarying float vLight;\nvarying vec3 vColor;\nvoid main(){ gl_FragColor = vec4(vColor * vLight, 1.0); }";
         var vertexShader = 0;
         var fragmentShader = 0;
         var program = 0;
@@ -385,6 +387,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
             gl.AttachShader(program, fragmentShader);
             gl.BindAttribLocationString(program, 0, "aPosition");
             gl.BindAttribLocationString(program, 1, "aNormal");
+            gl.BindAttribLocationString(program, 2, "aColor");
             var linkError = gl.LinkProgramAndGetError(program);
             if (!string.IsNullOrWhiteSpace(linkError))
             {

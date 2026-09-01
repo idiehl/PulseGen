@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Media;
 using PulseGen.Contracts;
+using PulseGen.Engine.Client;
 
 namespace PulseGen.Editor;
 
@@ -26,6 +27,9 @@ public sealed class WorldViewport : Control
     private static readonly Pen WindArrowPen = new(new SolidColorBrush(Color.Parse("#62BEEB")), 2.0);
     private static readonly Pen SelectedWindZonePen = new(new SolidColorBrush(Color.Parse("#8EE8FF")), 2.2, new DashStyle([7, 3], 0));
     private static readonly Pen SelectedObjectPen = new(new SolidColorBrush(Color.Parse("#F6D48A")), 2.6);
+    private static readonly Pen FirstReflectionPen = new(new SolidColorBrush(Color.FromArgb(220, 71, 220, 210)), 1.8, new DashStyle([7, 3], 0));
+    private static readonly Pen SecondReflectionPen = new(new SolidColorBrush(Color.FromArgb(225, 199, 139, 246)), 2.0, new DashStyle([4, 3], 0));
+    private static readonly IBrush ReflectionPointBrush = new SolidColorBrush(Color.Parse("#FFE29B"));
     private static readonly Pen AtmosphereLayerPen = new(new SolidColorBrush(Color.FromArgb(105, 101, 206, 196)), 1.0, new DashStyle([5, 5], 0));
     private static readonly Pen SelectedAtmosphereLayerPen = new(new SolidColorBrush(Color.Parse("#7BE5D8")), 2.0);
     private static readonly IBrush RoomBrush = new SolidColorBrush(Color.Parse("#121D27"));
@@ -43,6 +47,7 @@ public sealed class WorldViewport : Control
     private DateTimeOffset gestureStarted;
     private readonly List<MotionKeyframe> gesturePoints = [];
     private SceneDocument? scene;
+    private IReadOnlyList<ImportedMeshReflectionPathData> reflectionPaths = [];
     private ViewportCameraController camera = new();
     private CameraGesture cameraGesture;
     private Point cameraGesturePoint;
@@ -64,6 +69,16 @@ public sealed class WorldViewport : Control
     }
 
     public bool IsGestureRecording { get; set; }
+
+    public IReadOnlyList<ImportedMeshReflectionPathData> ReflectionPaths
+    {
+        get => reflectionPaths;
+        set
+        {
+            reflectionPaths = value ?? [];
+            InvalidateVisual();
+        }
+    }
 
     internal ViewportCameraController Camera
     {
@@ -156,6 +171,7 @@ public sealed class WorldViewport : Control
         {
             DrawPath(context, path);
         }
+        DrawReflectionPaths(context);
 
         foreach (var receiver in Scene.ReceiverRigs.Where(receiver => receiver.Enabled))
         {
@@ -690,6 +706,30 @@ public sealed class WorldViewport : Control
         var point = Project(position);
         context.DrawEllipse(new SolidColorBrush(Color.FromArgb(40, 242, 183, 102)), null, point, 20, 20);
         context.DrawEllipse(EmitterBrush, selected ? SelectedObjectPen : new Pen(Brushes.White, 1), point, selected ? 8 : 7, selected ? 8 : 7);
+    }
+
+    private void DrawReflectionPaths(DrawingContext context)
+    {
+        foreach (var route in ReflectionPaths)
+        {
+            if (route.Points.Count is < 3 or > 4)
+            {
+                continue;
+            }
+            var pen = route.ReflectionOrder == 2 ? SecondReflectionPen : FirstReflectionPen;
+            for (var index = 1; index < route.Points.Count; index++)
+            {
+                var start = Project(route.Points[index - 1]);
+                var end = Project(route.Points[index]);
+                context.DrawLine(new Pen(new SolidColorBrush(Color.FromArgb(65, 3, 8, 12)), pen.Thickness + 3.5), start, end);
+                context.DrawLine(pen, start, end);
+            }
+            for (var index = 1; index < route.Points.Count - 1; index++)
+            {
+                var point = Project(route.Points[index]);
+                context.DrawEllipse(ReflectionPointBrush, new Pen(pen.Brush, 1.2), point, 4.2, 4.2);
+            }
+        }
     }
 
     private void DrawReceiver(DrawingContext context, ReceiverRig receiver, Vector3d position, bool selected)

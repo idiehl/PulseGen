@@ -396,6 +396,24 @@ constexpr std::string_view bounded_wall_obj =
     "f 1 2 3\n"
     "f 1 3 4\n";
 
+constexpr std::string_view two_region_corner_obj =
+    "o SideWall\n"
+    "usemtl Stone\n"
+    "v 0 -5 0\n"
+    "v 0 5 0\n"
+    "v 0 5 5\n"
+    "v 0 -5 5\n"
+    "f 1 2 3\n"
+    "f 1 3 4\n"
+    "o BackWall\n"
+    "usemtl Curtain\n"
+    "v 0 -5 0\n"
+    "v 5 -5 0\n"
+    "v 5 5 0\n"
+    "v 0 5 0\n"
+    "f 5 6 7\n"
+    "f 5 7 8\n";
+
 constexpr std::string_view embedded_triangle_gltf = R"gltf({
   "asset":{"version":"2.0"},
   "buffers":[{"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAABAAIA","byteLength":42}],
@@ -607,7 +625,7 @@ std::size_t first_active_frame(const std::vector<float>& samples, float threshol
 int main(int argument_count, char** arguments)
 {
     try {
-    static_assert(PG_ABI_VERSION == 4U);
+    static_assert(PG_ABI_VERSION == 5U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
     REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 
@@ -921,6 +939,8 @@ int main(int argument_count, char** arguments)
     REQUIRE(mesh_receipt.source_vertex_count == 4U);
     REQUIRE(mesh_receipt.triangle_count == 2U);
     REQUIRE(mesh_receipt.bvh_node_count == 1U);
+    REQUIRE(mesh_receipt.source_material_count >= 1U);
+    REQUIRE(mesh_receipt.material_region_count == 1U);
     REQUIRE(std::abs(mesh_receipt.bounds_min_metres.x + 10.0) < 1.0e-9);
     REQUIRE(std::abs(mesh_receipt.bounds_max_metres.x - 10.0) < 1.0e-9);
     REQUIRE(std::abs(mesh_receipt.bounds_min_metres.z - 1.0) < 1.0e-9);
@@ -966,6 +986,24 @@ int main(int argument_count, char** arguments)
         nullptr,
         0U,
         nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    std::uint32_t mesh_region_count = 0U;
+    REQUIRE(pg_engine_copy_mesh_material_regions(
+        mesh_validation_engine,
+        mesh_index,
+        nullptr,
+        0U,
+        &mesh_region_count) == PG_STATUS_OK);
+    REQUIRE(mesh_region_count == 1U);
+    std::array<pg_mesh_material_region, 1> mesh_regions{};
+    REQUIRE(pg_engine_copy_mesh_material_regions(
+        mesh_validation_engine,
+        mesh_index,
+        mesh_regions.data(),
+        static_cast<std::uint32_t>(mesh_regions.size()),
+        &mesh_region_count) == PG_STATUS_OK);
+    REQUIRE(mesh_regions[0].source_mesh_index == 0U);
+    REQUIRE(mesh_regions[0].material_index == mesh_material_index);
+    REQUIRE(mesh_regions[0].triangle_count == 2U);
 
     pg_mesh_geometry_desc gltf_descriptor = mesh_descriptor;
     gltf_descriptor.name_utf8 = "Embedded_glTF";
@@ -1041,6 +1079,152 @@ int main(int argument_count, char** arguments)
     rejected_mesh.max_triangles = 1U;
     REQUIRE(pg_engine_add_mesh_geometry(mesh_validation_engine, &rejected_mesh, nullptr, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
     pg_engine_destroy(mesh_validation_engine);
+
+    pg_engine* corner_inspection_engine = create_engine();
+    std::uint32_t corner_default_material_index = 0U;
+    REQUIRE(pg_engine_add_acoustic_material(corner_inspection_engine, &mesh_material, &corner_default_material_index) == PG_STATUS_OK);
+    pg_mesh_geometry_desc corner_descriptor{};
+    corner_descriptor.size = sizeof(corner_descriptor);
+    corner_descriptor.version = PG_ABI_VERSION;
+    corner_descriptor.name_utf8 = "Two_Region_Corner";
+    corner_descriptor.encoded_data = two_region_corner_obj.data();
+    corner_descriptor.encoded_size_bytes = two_region_corner_obj.size();
+    corner_descriptor.format_hint_utf8 = "obj";
+    corner_descriptor.scale = { 1.0, 1.0, 1.0 };
+    corner_descriptor.material_index = corner_default_material_index;
+    corner_descriptor.occludes = 1U;
+    corner_descriptor.reflects = 1U;
+    corner_descriptor.enabled = 1U;
+    corner_descriptor.max_triangles = PG_MAX_IMPORTED_MESH_TRIANGLES;
+    pg_mesh_import_receipt corner_inspection_receipt{};
+    corner_inspection_receipt.size = sizeof(corner_inspection_receipt);
+    corner_inspection_receipt.version = PG_ABI_VERSION;
+    std::uint32_t corner_inspection_index = 0U;
+    REQUIRE(pg_engine_add_mesh_geometry(
+        corner_inspection_engine,
+        &corner_descriptor,
+        &corner_inspection_index,
+        &corner_inspection_receipt) == PG_STATUS_OK);
+    REQUIRE(corner_inspection_receipt.material_region_count == 2U);
+    std::array<pg_mesh_material_region, 2> corner_regions{};
+    std::uint32_t corner_region_count = 0U;
+    REQUIRE(pg_engine_copy_mesh_material_regions(
+        corner_inspection_engine,
+        corner_inspection_index,
+        corner_regions.data(),
+        static_cast<std::uint32_t>(corner_regions.size()),
+        &corner_region_count) == PG_STATUS_OK);
+    REQUIRE(corner_region_count == corner_regions.size());
+    REQUIRE(corner_regions[0].source_mesh_index != corner_regions[1].source_mesh_index);
+    REQUIRE(corner_regions[0].source_material_index != corner_regions[1].source_material_index);
+    pg_engine_destroy(corner_inspection_engine);
+
+    pg_engine* corner_engine = create_engine();
+    pg_acoustic_material_desc hard_corner_material = mesh_material;
+    hard_corner_material.name_utf8 = "Hard_Corner";
+    for (std::size_t index = 0U; index < standard_bands.size(); ++index) {
+        hard_corner_material.absorption[index] = 0.05;
+        hard_corner_material.scattering[index] = 0.02;
+        hard_corner_material.transmission[index] = 0.0;
+    }
+    hard_corner_material.roughness = 0.05;
+    pg_acoustic_material_desc soft_corner_material = mesh_material;
+    soft_corner_material.name_utf8 = "Soft_Corner";
+    for (std::size_t index = 0U; index < standard_bands.size(); ++index) {
+        soft_corner_material.absorption[index] = 0.55;
+        soft_corner_material.scattering[index] = 0.2;
+        soft_corner_material.transmission[index] = 0.0;
+    }
+    soft_corner_material.roughness = 0.35;
+    std::uint32_t hard_corner_index = 0U;
+    std::uint32_t soft_corner_index = 0U;
+    REQUIRE(pg_engine_add_acoustic_material(corner_engine, &hard_corner_material, &hard_corner_index) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_acoustic_material(corner_engine, &soft_corner_material, &soft_corner_index) == PG_STATUS_OK);
+    std::array<pg_mesh_material_binding, 2> corner_bindings{};
+    for (std::size_t index = 0U; index < corner_bindings.size(); ++index) {
+        corner_bindings[index].size = sizeof(pg_mesh_material_binding);
+        corner_bindings[index].version = PG_ABI_VERSION;
+        corner_bindings[index].source_mesh_index = corner_regions[index].source_mesh_index;
+        corner_bindings[index].source_material_index = corner_regions[index].source_material_index;
+        corner_bindings[index].material_index = index == 0U ? hard_corner_index : soft_corner_index;
+    }
+    corner_descriptor.material_index = hard_corner_index;
+    corner_descriptor.material_bindings = corner_bindings.data();
+    corner_descriptor.material_binding_count = static_cast<std::uint32_t>(corner_bindings.size());
+    pg_mesh_import_receipt corner_receipt{};
+    corner_receipt.size = sizeof(corner_receipt);
+    corner_receipt.version = PG_ABI_VERSION;
+    std::uint32_t corner_mesh_index = 0U;
+    REQUIRE(pg_engine_add_mesh_geometry(corner_engine, &corner_descriptor, &corner_mesh_index, &corner_receipt) == PG_STATUS_OK);
+    std::array<pg_mesh_material_region, 2> bound_corner_regions{};
+    REQUIRE(pg_engine_copy_mesh_material_regions(
+        corner_engine,
+        corner_mesh_index,
+        bound_corner_regions.data(),
+        static_cast<std::uint32_t>(bound_corner_regions.size()),
+        &corner_region_count) == PG_STATUS_OK);
+    REQUIRE(bound_corner_regions[0].material_index == hard_corner_index);
+    REQUIRE(bound_corner_regions[1].material_index == soft_corner_index);
+
+    const std::array<pg_motion_keyframe, 2> corner_source_keyframes{
+        pg_motion_keyframe{ 0.0, { 1.0, 0.0, 2.0 } },
+        pg_motion_keyframe{ 1.0, { 1.0, 0.0, 2.0 } }
+    };
+    pg_sine_emitter_desc corner_emitter{};
+    corner_emitter.size = sizeof(corner_emitter);
+    corner_emitter.version = PG_ABI_VERSION;
+    corner_emitter.name_utf8 = "Corner_Source";
+    corner_emitter.frequency_hz = 1000.0;
+    corner_emitter.amplitude = 1.0;
+    corner_emitter.gain_linear = 1.0;
+    corner_emitter.min_distance_metres = 0.1;
+    corner_emitter.keyframes = corner_source_keyframes.data();
+    corner_emitter.keyframe_count = static_cast<std::uint32_t>(corner_source_keyframes.size());
+    corner_emitter.enabled = 1U;
+    REQUIRE(pg_engine_add_sine_emitter(corner_engine, &corner_emitter, nullptr) == PG_STATUS_OK);
+    pg_receiver_rig_desc corner_receiver{};
+    corner_receiver.size = sizeof(corner_receiver);
+    corner_receiver.version = PG_ABI_VERSION;
+    corner_receiver.name_utf8 = "Corner_Receiver";
+    corner_receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    corner_receiver.centre_metres = { 2.0, 0.0, 1.0 };
+    corner_receiver.spacing_metres = 0.2;
+    corner_receiver.head_radius_metres = 0.09;
+    corner_receiver.polar_pattern = PG_POLAR_OMNI;
+    corner_receiver.enabled = 1U;
+    REQUIRE(pg_engine_add_receiver(corner_engine, &corner_receiver, nullptr) == PG_STATUS_OK);
+    pg_reflection_path_query corner_query{};
+    corner_query.size = sizeof(corner_query);
+    corner_query.version = PG_ABI_VERSION;
+    corner_query.receiver_index = 0U;
+    corner_query.reflection_order = 2U;
+    corner_query.receive_time_seconds = 0.5;
+    corner_query.sample_rate = 48000U;
+    corner_query.ray_count = 4096U;
+    std::uint32_t corner_path_count = 0U;
+    REQUIRE(pg_engine_query_reflection_paths(corner_engine, &corner_query, nullptr, 0U, &corner_path_count) == PG_STATUS_OK);
+    REQUIRE(corner_path_count >= 3U);
+    std::vector<pg_reflection_path> corner_paths(corner_path_count);
+    REQUIRE(pg_engine_query_reflection_paths(
+        corner_engine,
+        &corner_query,
+        corner_paths.data(),
+        static_cast<std::uint32_t>(corner_paths.size()),
+        &corner_path_count) == PG_STATUS_OK);
+    const auto second_order_corner_path = std::find_if(corner_paths.begin(), corner_paths.end(), [](const auto& path) {
+        return path.reflection_order == 2U;
+    });
+    REQUIRE(second_order_corner_path != corner_paths.end());
+    REQUIRE(second_order_corner_path->point_count == 4U);
+    REQUIRE(second_order_corner_path->first_material_index != second_order_corner_path->second_material_index);
+    REQUIRE(second_order_corner_path->distance_metres > 4.2 && second_order_corner_path->distance_metres < 4.3);
+    REQUIRE(second_order_corner_path->pressure_gain > 0.0);
+    REQUIRE(
+        (std::abs(second_order_corner_path->points[1].x) < 1.0e-6 &&
+            std::abs(second_order_corner_path->points[2].z) < 1.0e-6) ||
+        (std::abs(second_order_corner_path->points[1].z) < 1.0e-6 &&
+            std::abs(second_order_corner_path->points[2].x) < 1.0e-6));
+    pg_engine_destroy(corner_engine);
 
     surface_render_options baseline_surface{};
     baseline_surface.add_surface = false;
