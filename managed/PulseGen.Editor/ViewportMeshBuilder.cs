@@ -11,7 +11,8 @@ internal sealed record ViewportMesh(
     Vector3d BoundsMinimum,
     Vector3d BoundsMaximum,
     int TerrainTriangleCount,
-    int ImportedMeshCount)
+    int ImportedMeshCount,
+    IReadOnlyList<ViewportMeshSection> Sections)
 {
     public const int FloatsPerVertex = 6;
 
@@ -21,8 +22,15 @@ internal sealed record ViewportMesh(
 
     public int ImportedTriangleCount => TriangleCount - TerrainTriangleCount;
 
-    public static ViewportMesh Empty { get; } = new([], [], Vector3d.Zero, Vector3d.Zero, 0, 0);
+    public static ViewportMesh Empty { get; } = new([], [], Vector3d.Zero, Vector3d.Zero, 0, 0, []);
 }
+
+internal readonly record struct ViewportMeshSection(
+    Guid GeometryId,
+    int FirstIndex,
+    int IndexCount,
+    Vector3d BoundsMinimum,
+    Vector3d BoundsMaximum);
 
 internal readonly record struct ViewportMeshBuildKey(string Signature);
 
@@ -169,7 +177,14 @@ internal static class ViewportMeshBuilder
             }
         }
 
-        return new(vertices, indices, minimum, maximum, triangleCount, 0);
+        return new(
+            vertices,
+            indices,
+            minimum,
+            maximum,
+            triangleCount,
+            0,
+            [new(geometry.Id, 0, indices.Length, minimum, maximum)]);
     }
 
     private static ViewportMesh BuildImportedMesh(
@@ -215,7 +230,8 @@ internal static class ViewportMeshBuilder
             imported.BoundsMinimum,
             imported.BoundsMaximum,
             0,
-            1);
+            1,
+            [new(imported.GeometryId, 0, indices.Length, imported.BoundsMinimum, imported.BoundsMaximum)]);
     }
 
     private static ViewportMesh Combine(IReadOnlyList<ViewportMesh> parts, CancellationToken cancellationToken)
@@ -246,9 +262,11 @@ internal static class ViewportMeshBuilder
         var indexOffset = 0;
         var terrainTriangles = 0;
         var importedMeshCount = 0;
+        var sections = new List<ViewportMeshSection>(nonEmpty.Sum(part => part.Sections.Count));
         foreach (var part in nonEmpty)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var combinedFirstIndex = indexOffset;
             Array.Copy(part.InterleavedPositionNormals, 0, vertices, floatOffset, part.InterleavedPositionNormals.Length);
             for (var index = 0; index < part.Indices.Length; index++)
             {
@@ -262,13 +280,17 @@ internal static class ViewportMeshBuilder
                 Math.Max(maximum.X, part.BoundsMaximum.X),
                 Math.Max(maximum.Y, part.BoundsMaximum.Y),
                 Math.Max(maximum.Z, part.BoundsMaximum.Z));
+            foreach (var section in part.Sections)
+            {
+                sections.Add(section with { FirstIndex = checked(section.FirstIndex + combinedFirstIndex) });
+            }
             vertexOffset += part.VertexCount;
             floatOffset += part.InterleavedPositionNormals.Length;
             indexOffset += part.Indices.Length;
             terrainTriangles += part.TerrainTriangleCount;
             importedMeshCount += part.ImportedMeshCount;
         }
-        return new(vertices, indices, minimum, maximum, terrainTriangles, importedMeshCount);
+        return new(vertices, indices, minimum, maximum, terrainTriangles, importedMeshCount, sections);
     }
 
     private static void WriteVertex(float[] destination, int offset, Vector3d position, Vector3d normal)

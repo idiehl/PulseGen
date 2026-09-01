@@ -90,6 +90,8 @@
           <TextBlock Text="PERSPECTIVE" Foreground="#AFC0D2" FontSize="10" />
           <TextBlock Text="Y ↑" Foreground="#66DCCF" FontSize="10" />
           <TextBlock Text="GRID 1 m" Foreground="#718198" FontSize="10" />
+          <TextBlock Text="RMB ORBIT · MMB PAN · WHEEL ZOOM" Foreground="#718198" FontSize="10" />
+          <Button Content="FIT" Padding="7,2" FontSize="9" Click="OnFitViewportClicked" ToolTip.Tip="Frame the complete sound space. You can also press F while the viewport is focused." />
           <TextBlock x:Name="ViewportPerformanceText" Text="GPU STARTING" Foreground="#718198" FontSize="10" ToolTip.Tip="Live GPU frame rate and retained triangle count." />
         </StackPanel>
       </Border>

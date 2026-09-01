@@ -40,6 +40,7 @@ public sealed partial class MainWindow : Window
     }
 
     private SceneDocument scene = SampleScenes.CreateFlyby();
+    private readonly ViewportCameraController viewportCamera = new();
     private readonly DispatcherTimer previewTimer;
     private readonly DispatcherTimer autosaveTimer;
     private readonly AudioDeviceRecoveryController audioDeviceRecovery = new();
@@ -101,9 +102,12 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        Viewport.Camera = viewportCamera;
+        GpuViewport.Camera = viewportCamera;
         Viewport.PlayheadChanged += (_, time) => UpdatePlayhead(time);
         Viewport.PathPointSelected += (_, index) => SelectKeyframe(index);
         Viewport.SceneObjectSelected += selection => SelectSceneObject(selection, refreshTree: true);
+        Viewport.GeometryPickRequested += point => GpuViewport.Pick(point)?.GeometryId;
         Viewport.SpatialObjectMoved += selection => PopulateInspector(selection);
         Viewport.SceneEditRejected += message =>
         {
@@ -164,6 +168,7 @@ public sealed partial class MainWindow : Window
         atlasBaseRevisionId = null;
         atlasBaseETag = null;
         sceneDirty = false;
+        viewportCamera.SetScene(scene, fit: true);
         Viewport.Scene = scene;
         GpuViewport.SetScene(scene, projectDirectory);
         Viewport.TimeSeconds = 0;
@@ -902,6 +907,8 @@ public sealed partial class MainWindow : Window
             SelectKeyframe(Viewport.SelectedKeyframeIndex);
         }
         RefreshAtmosphereSummary();
+        var sceneBounds = ViewportSceneBounds.Calculate(scene);
+        viewportCamera.ExtendContentBounds(sceneBounds.Minimum, sceneBounds.Maximum, fit: false);
         Viewport.Scene = scene;
         GpuViewport.Scene = scene;
         Viewport.Selection = currentSelection;
@@ -952,6 +959,13 @@ public sealed partial class MainWindow : Window
     private void OnAddBoxClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.Box);
 
     private void OnAddRoomClicked(object? sender, RoutedEventArgs e) => AddGeometry(GeometryKind.ParametricRoom);
+
+    private void OnFitViewportClicked(object? sender, RoutedEventArgs e)
+    {
+        GpuViewport.FitCameraToScene();
+        Viewport.Focus();
+        StatusText.Text = "Viewport fitted to the complete authored sound space";
+    }
 
     private void OnAddMaterialClicked(object? sender, RoutedEventArgs e)
     {

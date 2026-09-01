@@ -8,6 +8,13 @@ namespace PulseGen.Editor;
 
 public sealed class WorldViewport : Control
 {
+    private enum CameraGesture
+    {
+        None,
+        Orbit,
+        Pan
+    }
+
     private static readonly Pen GridPen = new(new SolidColorBrush(Color.Parse("#1A2633")), 1);
     private static readonly Pen AxisPen = new(new SolidColorBrush(Color.Parse("#2C4D54")), 1.2);
     private static readonly Pen PathPen = new(new SolidColorBrush(Color.Parse("#56D6C8")), 2.5);
@@ -28,6 +35,7 @@ public sealed class WorldViewport : Control
     private Guid? draggingMotionPathId;
     private MotionPath? draggingMotionPathOriginal;
     private SceneSelection? draggingSpatialObject;
+    private bool draggingSpatialObjectMoved;
     private Vector3d spatialDragOffset;
     private SceneSelection selection;
     private Guid? activeMotionPathId;
@@ -35,6 +43,15 @@ public sealed class WorldViewport : Control
     private DateTimeOffset gestureStarted;
     private readonly List<MotionKeyframe> gesturePoints = [];
     private SceneDocument? scene;
+    private ViewportCameraController camera = new();
+    private CameraGesture cameraGesture;
+    private Point cameraGesturePoint;
+
+    public WorldViewport()
+    {
+        Focusable = true;
+        camera.Changed += OnCameraChanged;
+    }
 
     public SceneDocument? Scene
     {
@@ -47,6 +64,23 @@ public sealed class WorldViewport : Control
     }
 
     public bool IsGestureRecording { get; set; }
+
+    internal ViewportCameraController Camera
+    {
+        get => camera;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (ReferenceEquals(camera, value))
+            {
+                return;
+            }
+            camera.Changed -= OnCameraChanged;
+            camera = value;
+            camera.Changed += OnCameraChanged;
+            InvalidateVisual();
+        }
+    }
 
     public int SelectedKeyframeIndex { get; private set; }
 
@@ -98,6 +132,8 @@ public sealed class WorldViewport : Control
 
     internal event Action<SceneSelection>? SpatialObjectMoved;
 
+    internal event Func<Point, Guid?>? GeometryPickRequested;
+
     public override void Render(DrawingContext context)
     {
         base.Render(context);
@@ -139,12 +175,24 @@ public sealed class WorldViewport : Control
     protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
         base.OnPointerPressed(e);
+        Focus();
+        var point = e.GetPosition(this);
+        var pointerProperties = e.GetCurrentPoint(this).Properties;
+        if (pointerProperties.IsRightButtonPressed || pointerProperties.IsMiddleButtonPressed)
+        {
+            cameraGesture = pointerProperties.IsMiddleButtonPressed || e.KeyModifiers.HasFlag(KeyModifiers.Shift)
+                ? CameraGesture.Pan
+                : CameraGesture.Orbit;
+            cameraGesturePoint = point;
+            e.Pointer.Capture(this);
+            e.Handled = true;
+            return;
+        }
         if (Scene is null)
         {
             return;
         }
 
-        var point = e.GetPosition(this);
         if (IsGestureRecording)
         {
             gesturePoints.Clear();
@@ -174,6 +222,10 @@ public sealed class WorldViewport : Control
         }
 
         var worldSelection = FindWorldSelection(point);
+        if (worldSelection.Kind == SceneSelectionKind.None && GeometryPickRequested?.Invoke(point) is { } geometryId)
+        {
+            worldSelection = SceneSelection.Geometry(geometryId);
+        }
         if (worldSelection.Kind != SceneSelectionKind.None)
         {
             Selection = worldSelection;
@@ -181,6 +233,7 @@ public sealed class WorldViewport : Control
             if (worldSelection.IsSpatial && TryGetSpatialPosition(worldSelection, out var spatialPosition))
             {
                 draggingSpatialObject = worldSelection;
+                draggingSpatialObjectMoved = false;
                 spatialDragOffset = spatialPosition - InverseProject(point, spatialPosition.Y);
                 e.Pointer.Capture(this);
             }
@@ -196,12 +249,28 @@ public sealed class WorldViewport : Control
     protected override void OnPointerMoved(PointerEventArgs e)
     {
         base.OnPointerMoved(e);
+        var point = e.GetPosition(this);
+        if (cameraGesture != CameraGesture.None)
+        {
+            var deltaX = point.X - cameraGesturePoint.X;
+            var deltaY = point.Y - cameraGesturePoint.Y;
+            cameraGesturePoint = point;
+            if (cameraGesture == CameraGesture.Orbit)
+            {
+                camera.Orbit(deltaX, deltaY);
+            }
+            else
+            {
+                camera.Pan(deltaX, deltaY, Bounds.Size);
+            }
+            e.Handled = true;
+            return;
+        }
         if (Scene is null)
         {
             return;
         }
 
-        var point = e.GetPosition(this);
         if (gestureCapturing)
         {
             var elapsed = (DateTimeOffset.UtcNow - gestureStarted).TotalSeconds;
@@ -233,8 +302,12 @@ public sealed class WorldViewport : Control
         if (draggingSpatialObject is { } spatialSelection && TryGetSpatialPosition(spatialSelection, out var spatialPosition))
         {
             var position = InverseProject(point, spatialPosition.Y) + spatialDragOffset;
-            MoveSpatialObject(spatialSelection, position);
-            SpatialObjectMoved?.Invoke(spatialSelection);
+            if ((position - spatialPosition).Length > 1.0e-9)
+            {
+                MoveSpatialObject(spatialSelection, position);
+                draggingSpatialObjectMoved = true;
+                SpatialObjectMoved?.Invoke(spatialSelection);
+            }
             e.Handled = true;
         }
     }
@@ -242,6 +315,13 @@ public sealed class WorldViewport : Control
     protected override void OnPointerReleased(PointerReleasedEventArgs e)
     {
         base.OnPointerReleased(e);
+        if (cameraGesture != CameraGesture.None)
+        {
+            cameraGesture = CameraGesture.None;
+            e.Pointer.Capture(null);
+            e.Handled = true;
+            return;
+        }
         if (gestureCapturing)
         {
             var elapsed = Math.Max((DateTimeOffset.UtcNow - gestureStarted).TotalSeconds, 0.01);
@@ -268,7 +348,7 @@ public sealed class WorldViewport : Control
                 SceneEdited?.Invoke(this, $"Motion keyframe {draggingKeyframeIndex.Value + 1} moved in SI world coordinates · scene is dirty");
             }
         }
-        else if (draggingSpatialObject is { } spatialSelection)
+        else if (draggingSpatialObject is { } spatialSelection && draggingSpatialObjectMoved)
         {
             var name = SpatialObjectName(spatialSelection);
             SceneEdited?.Invoke(this, $"{name} moved in SI world coordinates · scene is dirty");
@@ -278,8 +358,26 @@ public sealed class WorldViewport : Control
         draggingMotionPathId = null;
         draggingMotionPathOriginal = null;
         draggingSpatialObject = null;
+        draggingSpatialObjectMoved = false;
         e.Pointer.Capture(null);
         e.Handled = true;
+    }
+
+    protected override void OnPointerWheelChanged(PointerWheelEventArgs e)
+    {
+        base.OnPointerWheelChanged(e);
+        camera.Zoom(e.Delta.Y);
+        e.Handled = true;
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (e.Key == Key.F && e.KeyModifiers == KeyModifiers.None)
+        {
+            camera.Fit();
+            e.Handled = true;
+        }
     }
 
     public void SetPathPoint(int index, Vector3d position)
@@ -626,12 +724,7 @@ public sealed class WorldViewport : Control
     }
 
     private Point Project(Vector3d point)
-    {
-        var scale = Math.Clamp(Bounds.Width / 78.0, 8, 18);
-        var x = (Bounds.Width * 0.5) + ((point.X + (point.Z * 0.35)) * scale);
-        var y = (Bounds.Height * 0.58) - (point.Y * scale) + (point.Z * scale * 0.24);
-        return new(x, y);
-    }
+        => camera.Project(point, Bounds.Size);
 
     private static void DrawFace(DrawingContext context, IReadOnlyList<Point> points, IBrush brush, Pen? pen = null)
     {
@@ -649,12 +742,9 @@ public sealed class WorldViewport : Control
     }
 
     private Vector3d InverseProject(Point point, double yMetres)
-    {
-        var scale = Math.Clamp(Bounds.Width / 78.0, 8, 18);
-        var z = (point.Y - (Bounds.Height * 0.58) + (yMetres * scale)) / (scale * 0.24);
-        var x = ((point.X - (Bounds.Width * 0.5)) / scale) - (z * 0.35);
-        return new(x, yMetres, z);
-    }
+        => camera.ProjectToHorizontalPlane(point, Bounds.Size, yMetres);
+
+    private void OnCameraChanged(object? sender, EventArgs e) => InvalidateVisual();
 
     private (int Index, double Distance) FindNearestPathPoint(MotionPath path, Point point)
     {

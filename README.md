@@ -60,8 +60,12 @@ commands and reads bounded telemetry.
   world overlay. Geometry is verified and prepared away from the UI thread,
   uploaded once to retained vertex/index buffers, and submitted in one indexed
   draw. Flat acoustic-surface normals make imported triangles readable without
-  inventing source materials. A live viewport badge reports measured frame rate,
-  triangle count, and imported-mesh count. Procedural and verified-OBJ acceptance
+  inventing source materials. The GPU surface and editing overlay now share one
+  perspective camera: right-drag orbits, middle-drag pans, the wheel zooms, and
+  Fit/F reframes the authored sound space. Exact ray/triangle hits select the
+  rendered terrain or imported surface beneath the pointer while leaving source,
+  receiver, path-point, and surface-drag gestures intact. A live viewport badge
+  reports measured frame rate, triangle count, and imported-mesh count. Procedural and verified-OBJ acceptance
   modes each exercise exactly 250,000 triangles and produce atomic JSON receipts
   instead of treating a successful build as a responsiveness result.
 - First-class acoustic-material authoring with eight-band soak/scatter/pass

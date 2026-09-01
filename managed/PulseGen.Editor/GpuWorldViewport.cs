@@ -4,7 +4,6 @@ using Avalonia.OpenGL.Controls;
 using Avalonia.Threading;
 using PulseGen.Contracts;
 using System.Diagnostics;
-using System.Numerics;
 
 namespace PulseGen.Editor;
 
@@ -40,6 +39,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     private const int GlVertexShader = 0x8B31;
     private const int GlFragmentShader = 0x8B30;
     private const double SlowFrameThresholdMilliseconds = 1000.0 / 55.0;
+    private const double IdleMeasurementResetMilliseconds = 250;
 
     private SceneDocument? scene;
     private string? projectDirectory;
@@ -65,6 +65,12 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     private long frameIntervalTicksMaximum;
     private long slowFrameCount;
     private long nextPerformancePublishTimestamp;
+    private ViewportCameraController camera = new();
+
+    public GpuWorldViewport()
+    {
+        camera.Changed += OnCameraChanged;
+    }
 
     public SceneDocument? Scene
     {
@@ -76,6 +82,23 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     {
         get => projectDirectory;
         set => SetScene(scene, value);
+    }
+
+    internal ViewportCameraController Camera
+    {
+        get => camera;
+        set
+        {
+            ArgumentNullException.ThrowIfNull(value);
+            if (ReferenceEquals(camera, value))
+            {
+                return;
+            }
+            camera.Changed -= OnCameraChanged;
+            camera = value;
+            camera.Changed += OnCameraChanged;
+            RequestNextFrameRendering();
+        }
     }
 
     public void SetScene(SceneDocument? value, string? owningProjectDirectory)
@@ -110,11 +133,25 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
     internal void LoadMesh(ViewportMesh mesh)
     {
         ArgumentNullException.ThrowIfNull(mesh);
+        if (mesh.TriangleCount > 0)
+        {
+            camera.ExtendContentBounds(
+                mesh.BoundsMinimum,
+                mesh.BoundsMaximum,
+                fit: activeMesh.TriangleCount == 0);
+        }
         Interlocked.Exchange(ref pendingMesh, mesh);
         error = null;
         ResetPerformanceMeasurement();
         RequestNextFrameRendering();
     }
+
+    internal ViewportPickResult? Pick(Point point) =>
+        activeMesh.TriangleCount == 0
+            ? null
+            : ViewportPicker.Pick(activeMesh, camera.Ray(point, Bounds.Size));
+
+    internal void FitCameraToScene() => camera.Fit();
 
     internal void ResetPerformanceMeasurement()
     {
@@ -184,11 +221,7 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
                 gl.EnableVertexAttribArray(1);
                 gl.VertexAttribPointer(0, 3, GlFloat, 0, ViewportMesh.FloatsPerVertex * sizeof(float), IntPtr.Zero);
                 gl.VertexAttribPointer(1, 3, GlFloat, 0, ViewportMesh.FloatsPerVertex * sizeof(float), new IntPtr(3 * sizeof(float)));
-                var aspectRatio = Math.Clamp(
-                    (float)(Bounds.Width / Math.Max(1D, Bounds.Height)),
-                    0.5F,
-                    3F);
-                var viewProjection = CreateViewProjection(activeMesh, aspectRatio);
+                var viewProjection = camera.ViewProjection(Bounds.Size);
                 gl.UniformMatrix4fv(matrixUniform, 1, false, &viewProjection.M11);
                 gl.DrawElements(GlTriangles, activeMesh.Indices.Length, GlUnsignedInt, IntPtr.Zero);
             }
@@ -393,18 +426,6 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
         throw new InvalidOperationException($"Viewport {stage} shader compilation failed: {compileError}");
     }
 
-    private static Matrix4x4 CreateViewProjection(ViewportMesh mesh, float aspectRatio)
-    {
-        var minimum = new Vector3((float)mesh.BoundsMinimum.X, (float)mesh.BoundsMinimum.Y, (float)mesh.BoundsMinimum.Z);
-        var maximum = new Vector3((float)mesh.BoundsMaximum.X, (float)mesh.BoundsMaximum.Y, (float)mesh.BoundsMaximum.Z);
-        var centre = (minimum + maximum) * 0.5F;
-        var radius = Math.Max(2F, Vector3.Distance(minimum, maximum) * 0.5F);
-        var eye = centre + new Vector3(radius * 0.9F, radius * 0.72F, radius * 1.15F);
-        var view = Matrix4x4.CreateLookAt(eye, centre, Vector3.UnitY);
-        var projection = Matrix4x4.CreatePerspectiveFieldOfView(MathF.PI / 3.2F, aspectRatio, Math.Max(0.05F, radius * 0.01F), radius * 6F);
-        return view * projection;
-    }
-
     private void RecordFrame(long timestamp, long cpuSubmitTicks)
     {
         if (measurementStartedTimestamp == 0)
@@ -414,10 +435,23 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
         if (previousFrameTimestamp != 0)
         {
             var interval = timestamp - previousFrameTimestamp;
-            frameIntervalTicksMaximum = Math.Max(frameIntervalTicksMaximum, interval);
-            if (interval * 1000.0 / Stopwatch.Frequency > SlowFrameThresholdMilliseconds)
+            var intervalMilliseconds = interval * 1000.0 / Stopwatch.Frequency;
+            if (!continuousRendering && intervalMilliseconds > IdleMeasurementResetMilliseconds)
             {
-                slowFrameCount++;
+                measurementStartedTimestamp = timestamp;
+                frameCount = 0;
+                cpuSubmitTicksTotal = 0;
+                cpuSubmitTicksMaximum = 0;
+                frameIntervalTicksMaximum = 0;
+                slowFrameCount = 0;
+            }
+            else
+            {
+                frameIntervalTicksMaximum = Math.Max(frameIntervalTicksMaximum, interval);
+                if (intervalMilliseconds > SlowFrameThresholdMilliseconds)
+                {
+                    slowFrameCount++;
+                }
             }
         }
         previousFrameTimestamp = timestamp;
@@ -459,6 +493,8 @@ public sealed unsafe class GpuWorldViewport : OpenGlControlBase
         nextPerformancePublishTimestamp = now + (Stopwatch.Frequency / 4);
         PerformanceUpdated?.Invoke(CreatePerformanceStatus());
     }
+
+    private void OnCameraChanged(object? sender, EventArgs e) => RequestNextFrameRendering();
 
     private void ReleaseGlResources(GlInterface gl)
     {

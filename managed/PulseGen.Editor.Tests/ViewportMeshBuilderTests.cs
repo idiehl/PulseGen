@@ -9,7 +9,8 @@ public sealed class ViewportMeshBuilderTests
     [Fact]
     public void StressTerrainBuildsExactlyQuarterMillionIndexedTriangles()
     {
-        var mesh = ViewportMeshBuilder.Build(SampleScenes.CreateViewportStress());
+        var scene = SampleScenes.CreateViewportStress();
+        var mesh = ViewportMeshBuilder.Build(scene);
 
         Assert.Equal(250_000, mesh.TriangleCount);
         Assert.Equal(125_751, mesh.VertexCount);
@@ -19,6 +20,9 @@ public sealed class ViewportMeshBuilderTests
         Assert.True(mesh.BoundsMaximum.X > 24.9);
         Assert.True(mesh.BoundsMinimum.Z < -12.4);
         Assert.True(mesh.BoundsMaximum.Z > 12.4);
+        var terrain = Assert.Single(mesh.Sections);
+        Assert.Equal(scene.Geometry[0].Id, terrain.GeometryId);
+        Assert.Equal(mesh.Indices.Length, terrain.IndexCount);
     }
 
     [Fact]
@@ -124,6 +128,9 @@ public sealed class ViewportMeshBuilderTests
             Assert.Equal(200, mesh.TerrainTriangleCount);
             Assert.Equal(2, mesh.ImportedTriangleCount);
             Assert.Equal(1, mesh.ImportedMeshCount);
+            Assert.Equal(2, mesh.Sections.Count);
+            Assert.Contains(mesh.Sections, section => section.GeometryId == scene.Geometry[0].Id && section.IndexCount == 6);
+            Assert.Contains(mesh.Sections, section => section.GeometryId == scene.Geometry[1].Id && section.IndexCount == 600);
             Assert.Equal(127, mesh.VertexCount);
             Assert.Contains(mesh.InterleavedPositionNormals.Chunk(ViewportMesh.FloatsPerVertex), vertex =>
                 Math.Abs(vertex[0] + 0.0F) < 1.0e-6F &&
