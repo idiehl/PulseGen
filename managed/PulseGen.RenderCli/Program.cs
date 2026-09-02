@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using PulseGen.Contracts;
 using PulseGen.Engine.Client;
@@ -57,6 +59,148 @@ if (arguments.TryGetValue("write-project", out var destination))
 {
     var hash = await ProjectStore.SaveAsync(scene, destination);
     Console.WriteLine($"PULSEGEN_PROJECT_OK {Path.GetFullPath(destination)} sha256={hash}");
+}
+
+if (arguments.TryGetValue("reflection-monitor-queries", out var reflectionQueryCountText))
+{
+    if (!arguments.ContainsKey("project") || string.IsNullOrWhiteSpace(projectDirectory))
+    {
+        throw new ArgumentException("Reflection-monitor benchmarking requires --project so imported assets can be verified.");
+    }
+    var reflectionQueryCount = int.Parse(reflectionQueryCountText, System.Globalization.CultureInfo.InvariantCulture);
+    if (reflectionQueryCount is < 2 or > 1000)
+    {
+        throw new ArgumentOutOfRangeException("reflection-monitor-queries", "Reflection-monitor query count must be between 2 and 1000.");
+    }
+
+    var benchmarkScene = arguments.ContainsKey("enable-imported-reflections")
+        ? scene with
+        {
+            Geometry = scene.Geometry.Select(item => item.Kind == GeometryKind.ImportedMesh
+                ? item with { Reflects = true }
+                : item).ToList()
+        }
+        : scene;
+    if (arguments.ContainsKey("add-benchmark-reflection-plane"))
+    {
+        benchmarkScene = await AddBenchmarkReflectionPlaneAsync(benchmarkScene, projectDirectory);
+    }
+    var importedGeometry = benchmarkScene.Geometry
+        .Where(item => item.Kind == GeometryKind.ImportedMesh && item.Reflects)
+        .ToArray();
+    if (importedGeometry.Length == 0)
+    {
+        throw new InvalidOperationException(
+            "Reflection-monitor benchmarking requires at least one reflective imported mesh; pass --enable-imported-reflections to benchmark a non-reflective fixture without changing its project.");
+    }
+    var monitorProfile = benchmarkScene.RenderProfiles[0] with
+    {
+        ReflectionOrder = Math.Max(1, benchmarkScene.RenderProfiles[0].ReflectionOrder)
+    };
+    var monitorReceiverIndex = arguments.TryGetValue("receiver-index", out var monitorReceiverIndexText)
+        ? int.Parse(monitorReceiverIndexText, System.Globalization.CultureInfo.InvariantCulture)
+        : 0;
+    var enabledMonitorReceivers = benchmarkScene.ReceiverRigs.Where(item => item.Enabled).ToArray();
+    if (monitorReceiverIndex < 0 || monitorReceiverIndex >= enabledMonitorReceivers.Length)
+    {
+        throw new ArgumentOutOfRangeException(
+            "receiver-index",
+            $"Receiver index {monitorReceiverIndex} does not identify one of the {enabledMonitorReceivers.Length} enabled rigs.");
+    }
+    var monitorReceiver = enabledMonitorReceivers[monitorReceiverIndex];
+    var probeTime = benchmarkScene.Timeline.DurationSeconds * 0.5;
+
+    var start = Stopwatch.GetTimestamp();
+    var oneShotRoutes = NativeSceneRenderer.TraceImportedMeshReflectionPaths(
+        benchmarkScene,
+        monitorReceiver.Id,
+        probeTime,
+        monitorProfile,
+        projectDirectory);
+    var oneShotMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+
+    start = Stopwatch.GetTimestamp();
+    using var reflectionMonitor = NativeSceneRenderer.CreateReflectionMonitor(
+        benchmarkScene,
+        projectDirectory,
+        monitorProfile.AtmosphereIntegrationSegments);
+    var configurationMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+
+    start = Stopwatch.GetTimestamp();
+    var warmupRoutes = reflectionMonitor.Query(monitorReceiver.Id, probeTime, monitorProfile);
+    var warmupMilliseconds = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+    var queryMilliseconds = new double[reflectionQueryCount];
+    var routeCounts = new int[reflectionQueryCount];
+    for (var index = 0; index < reflectionQueryCount; index++)
+    {
+        var receiveTime = benchmarkScene.Timeline.DurationSeconds * (index + 1.0) / (reflectionQueryCount + 1.0);
+        start = Stopwatch.GetTimestamp();
+        var routes = reflectionMonitor.Query(monitorReceiver.Id, receiveTime, monitorProfile);
+        queryMilliseconds[index] = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+        routeCounts[index] = routes.Count;
+    }
+    var deterministicProbe = reflectionMonitor.Query(monitorReceiver.Id, probeTime, monitorProfile);
+    var oneShotHash = ReflectionRouteHash(oneShotRoutes);
+    var warmupHash = ReflectionRouteHash(warmupRoutes);
+    var deterministicHash = ReflectionRouteHash(deterministicProbe);
+    var sortedQueryMilliseconds = queryMilliseconds.Order().ToArray();
+    var percentile95Index = (int)Math.Ceiling(sortedQueryMilliseconds.Length * 0.95) - 1;
+    var queryAverageMilliseconds = queryMilliseconds.Average();
+    var speedup = oneShotMilliseconds / Math.Max(queryAverageMilliseconds, 1.0e-9);
+    var deterministic = string.Equals(oneShotHash, warmupHash, StringComparison.Ordinal) &&
+        string.Equals(warmupHash, deterministicHash, StringComparison.Ordinal);
+    var passed = deterministic &&
+        reflectionMonitor.CompletedQueryCount == checked((ulong)reflectionQueryCount + 2UL) &&
+        deterministicProbe.Count > 0 &&
+        routeCounts.Max() > 0 &&
+        oneShotMilliseconds > queryAverageMilliseconds;
+    var reflectionReceipt = new
+    {
+        marker = passed ? "PULSEGEN_REFLECTION_MONITOR_STRESS_OK" : "PULSEGEN_REFLECTION_MONITOR_STRESS_FAILED",
+        capturedAtUtc = DateTimeOffset.UtcNow,
+        engineVersion = NativeSceneRenderer.EngineVersion,
+        project = Path.GetFullPath(projectDirectory),
+        scene = benchmarkScene.Name,
+        machine = Environment.MachineName,
+        operatingSystem = Environment.OSVersion.VersionString,
+        runtime = Environment.Version.ToString(),
+        processor = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER") ?? "unknown",
+        importedMeshCount = importedGeometry.Length,
+        importedAssetSha256 = importedGeometry.Select(item => item.MeshAssetHash).ToArray(),
+        receiver = monitorReceiver.Name,
+        monitorProfile.SampleRate,
+        monitorProfile.ReflectionOrder,
+        monitorProfile.RayCount,
+        monitorProfile.AtmosphereIntegrationSegments,
+        configurationCount = 1,
+        baselineOneShotMilliseconds = oneShotMilliseconds,
+        retainedConfigurationMilliseconds = configurationMilliseconds,
+        retainedWarmupMilliseconds = warmupMilliseconds,
+        retainedQueryCount = reflectionQueryCount,
+        retainedCompletedQueryCount = reflectionMonitor.CompletedQueryCount,
+        retainedQueryMillisecondsAverage = queryAverageMilliseconds,
+        retainedQueryMillisecondsP95 = sortedQueryMilliseconds[percentile95Index],
+        retainedQueryMillisecondsMaximum = queryMilliseconds.Max(),
+        speedupVersusOneShot = speedup,
+        routeCountMinimum = routeCounts.Min(),
+        routeCountMaximum = routeCounts.Max(),
+        probeRouteCount = deterministicProbe.Count,
+        deterministic,
+        deterministicRouteSha256 = deterministicHash
+    };
+    var reflectionReceiptJson = JsonSerializer.Serialize(
+        reflectionReceipt,
+        new JsonSerializerOptions { WriteIndented = true });
+    if (arguments.TryGetValue("reflection-monitor-receipt", out var reflectionReceiptPath))
+    {
+        WriteTextAtomically(Path.GetFullPath(reflectionReceiptPath), reflectionReceiptJson);
+    }
+    Console.WriteLine(reflectionReceiptJson);
+    if (!passed)
+    {
+        throw new InvalidOperationException(
+            $"The retained reflection monitor was deterministic={deterministic} and averaged {queryAverageMilliseconds:0.###} ms versus {oneShotMilliseconds:0.###} ms for one-shot reconstruction.");
+    }
 }
 
 if (arguments.TryGetValue("preview-seconds", out var previewSecondsText))
@@ -171,4 +315,77 @@ static Dictionary<string, string> ParseArguments(string[] values)
         }
     }
     return parsed;
+}
+
+static string ReflectionRouteHash(IReadOnlyList<ImportedMeshReflectionPathData> routes) =>
+    Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(routes))).ToLowerInvariant();
+
+static void WriteTextAtomically(string destination, string contents)
+{
+    var directory = Path.GetDirectoryName(destination)
+        ?? throw new InvalidOperationException("The reflection-monitor receipt requires a parent directory.");
+    Directory.CreateDirectory(directory);
+    var temporary = Path.Combine(directory, $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.tmp");
+    try
+    {
+        File.WriteAllText(temporary, contents);
+        File.Move(temporary, destination, overwrite: true);
+    }
+    finally
+    {
+        if (File.Exists(temporary))
+        {
+            File.Delete(temporary);
+        }
+    }
+}
+
+static async Task<SceneDocument> AddBenchmarkReflectionPlaneAsync(SceneDocument scene, string projectDirectory)
+{
+    const string obj = """
+        o PulseGenReflectionMonitorProbe
+        v -40 0 -20
+        v -40 0 20
+        v 40 0 20
+        v 40 0 -20
+        f 1 2 3
+        f 1 3 4
+        """;
+    var sourcePath = Path.Combine(Path.GetTempPath(), $"pulsegen-reflection-monitor-{Guid.NewGuid():N}.obj");
+    try
+    {
+        await File.WriteAllTextAsync(sourcePath, obj);
+        var asset = await ProjectStore.ImportAssetAsync(
+            projectDirectory,
+            sourcePath,
+            AssetKind.Mesh,
+            "model/obj",
+            "PulseGen deterministic reflection-monitor benchmark plane",
+            "CC0-1.0");
+        var assets = scene.Assets.ToList();
+        if (!assets.Any(item => string.Equals(item.Sha256, asset.Sha256, StringComparison.OrdinalIgnoreCase)))
+        {
+            assets.Add(asset);
+        }
+        var geometry = scene.Geometry.ToList();
+        geometry.Add(new AcousticGeometry
+        {
+            Id = Guid.Parse("f3f3f3f3-0000-4000-8000-000000000001"),
+            Name = "Reflection monitor probe floor",
+            Kind = GeometryKind.ImportedMesh,
+            MaterialId = scene.Materials[0].Id,
+            MeshAssetHash = asset.Sha256,
+            DimensionsMetres = new(80, 0.01, 40),
+            Occludes = false,
+            Reflects = true
+        });
+        return scene with { Assets = assets, Geometry = geometry };
+    }
+    finally
+    {
+        if (File.Exists(sourcePath))
+        {
+            File.Delete(sourcePath);
+        }
+    }
 }

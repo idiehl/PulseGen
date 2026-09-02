@@ -17,6 +17,30 @@ public sealed class PrimitiveAcousticsTests
     }
 
     [Fact]
+    public void ReflectionMonitorOwnsAReusableValidatedLifecycleWithoutImportedReflectors()
+    {
+        var scene = CreateScene(withSurface: false);
+        var profile = scene.RenderProfiles[0];
+        var monitor = NativeSceneRenderer.CreateReflectionMonitor(
+            scene,
+            atmosphereIntegrationSegments: profile.AtmosphereIntegrationSegments);
+
+        Assert.False(monitor.HasReflectiveImportedMeshes);
+        Assert.Empty(monitor.Query(scene.ReceiverRigs[0].Id, 0.5, profile));
+        Assert.Equal(1UL, monitor.CompletedQueryCount);
+        Assert.Throws<ArgumentException>(() => monitor.Query(Guid.NewGuid(), 0.5, profile));
+        Assert.Throws<InvalidOperationException>(() => monitor.Query(
+            scene.ReceiverRigs[0].Id,
+            0.5,
+            profile with { AtmosphereIntegrationSegments = profile.AtmosphereIntegrationSegments + 1 }));
+        Assert.Equal(1UL, monitor.CompletedQueryCount);
+
+        monitor.Dispose();
+        monitor.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => monitor.Query(scene.ReceiverRigs[0].Id, 0.5, profile));
+    }
+
+    [Fact]
     public void PreviewTelemetryReportsBudgetAveragePeakAndNativeLoad()
     {
         var status = new PreviewDeviceStatus(
@@ -501,6 +525,47 @@ public sealed class PrimitiveAcousticsTests
             Assert.NotEqual(secondOrder.FirstMaterialId, secondOrder.SecondMaterialId);
             Assert.InRange(secondOrder.DistanceMetres, 4.2, 4.3);
             Assert.True(secondOrder.PressureGain > 0);
+
+            var monitor = NativeSceneRenderer.CreateReflectionMonitor(
+                scene,
+                project,
+                scene.RenderProfiles[0].AtmosphereIntegrationSegments);
+            try
+            {
+                Assert.True(monitor.HasReflectiveImportedMeshes);
+                Assert.Equal(0UL, monitor.CompletedQueryCount);
+                var retainedFirst = monitor.Query(scene.ReceiverRigs[0].Id, 0.5, scene.RenderProfiles[0]);
+                Assert.Equal(1UL, monitor.CompletedQueryCount);
+                Assert.Equal(JsonSerializer.Serialize(paths), JsonSerializer.Serialize(retainedFirst));
+
+                var storedAssetPath = ProjectStore.ResolveAssetPath(project, asset.Sha256);
+                var originalAssetBytes = await File.ReadAllBytesAsync(storedAssetPath);
+                var tamperedAssetBytes = originalAssetBytes.ToArray();
+                tamperedAssetBytes[0] ^= 0x01;
+                try
+                {
+                    await File.WriteAllBytesAsync(storedAssetPath, tamperedAssetBytes);
+                    var retainedSecond = monitor.Query(scene.ReceiverRigs[0].Id, 0.5, scene.RenderProfiles[0]);
+                    Assert.Equal(2UL, monitor.CompletedQueryCount);
+                    Assert.Equal(JsonSerializer.Serialize(retainedFirst), JsonSerializer.Serialize(retainedSecond));
+                    Assert.Throws<InvalidDataException>(() => NativeSceneRenderer.TraceImportedMeshReflectionPaths(
+                        scene,
+                        scene.ReceiverRigs[0].Id,
+                        0.5,
+                        scene.RenderProfiles[0],
+                        project));
+                }
+                finally
+                {
+                    await File.WriteAllBytesAsync(storedAssetPath, originalAssetBytes);
+                }
+            }
+            finally
+            {
+                monitor.Dispose();
+            }
+            Assert.Throws<ObjectDisposedException>(() =>
+                monitor.Query(scene.ReceiverRigs[0].Id, 0.5, scene.RenderProfiles[0]));
 
             var firstOrderProfile = scene.RenderProfiles[0] with { ReflectionOrder = 1 };
             var secondOrderProfile = scene.RenderProfiles[0];

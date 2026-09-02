@@ -102,6 +102,9 @@ public sealed partial class MainWindow : Window
     private bool reflectionDiagnosticInFlight;
     private bool reflectionDiagnosticPending;
     private int reflectionDiagnosticVersion;
+    private NativeSceneRenderer.ReflectionMonitorSession? reflectionMonitor;
+    private int reflectionMonitorConfigurationVersion;
+    private int reflectionMonitorSessionVersion = -1;
 
     public MainWindow()
     {
@@ -168,6 +171,7 @@ public sealed partial class MainWindow : Window
 
     private void ApplySceneToControls(SceneDocument loadedScene, string? projectDirectory)
     {
+        InvalidateReflectionMonitorConfiguration();
         scene = loadedScene;
         lastProjectDirectory = projectDirectory;
         lastRenderDirectory = null;
@@ -935,6 +939,7 @@ public sealed partial class MainWindow : Window
     private void MarkSceneEdited(string message)
     {
         StopPreviewTransport();
+        InvalidateReflectionMonitorConfiguration();
         sceneDirty = true;
         sceneEditedAtUtc = DateTimeOffset.UtcNow;
         AutosaveStateText.Text = "UNSAVED · AUTOSAVE PENDING";
@@ -1904,7 +1909,15 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        var projectDirectoryChanged = !string.Equals(
+            lastProjectDirectory is null ? null : Path.GetFullPath(lastProjectDirectory),
+            Path.GetFullPath(projectDirectory),
+            StringComparison.OrdinalIgnoreCase);
         lastProjectDirectory = projectDirectory;
+        if (projectDirectoryChanged)
+        {
+            InvalidateReflectionMonitorConfiguration();
+        }
         GpuViewport.SetScene(scene, projectDirectory);
         sceneDirty = false;
         sceneEditedAtUtc = null;
@@ -1922,6 +1935,7 @@ public sealed partial class MainWindow : Window
         RefreshSpectralWorkspace();
         RefreshReceiverTakeWorkspace();
         StatusText.Text = $"Project saved atomically · {hash[..12]}… · {projectDirectory}{recoveryWarning}";
+        ScheduleReflectionDiagnostics();
     }
 
     private async void OnImportSofaClicked(object? sender, RoutedEventArgs e)
@@ -4206,6 +4220,11 @@ public sealed partial class MainWindow : Window
         autosaveTimer.Stop();
         reflectionDiagnosticTimer.Stop();
         reflectionDiagnosticVersion++;
+        reflectionMonitorConfigurationVersion++;
+        var retainedReflectionMonitor = reflectionMonitor;
+        reflectionMonitor = null;
+        reflectionMonitorSessionVersion = -1;
+        retainedReflectionMonitor?.Dispose();
         recoveryCancellation.Cancel();
         StopPreviewTransport();
         analysisCancellation?.Cancel();
@@ -4269,6 +4288,19 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void InvalidateReflectionMonitorConfiguration()
+    {
+        reflectionMonitorConfigurationVersion++;
+        if (reflectionDiagnosticInFlight || reflectionMonitor is not { } retained)
+        {
+            return;
+        }
+
+        reflectionMonitor = null;
+        reflectionMonitorSessionVersion = -1;
+        _ = Task.Run(retained.Dispose);
+    }
+
     private async void OnReflectionDiagnosticTick(object? sender, EventArgs e)
     {
         reflectionDiagnosticTimer.Stop();
@@ -4279,6 +4311,7 @@ public sealed partial class MainWindow : Window
         reflectionDiagnosticPending = false;
         reflectionDiagnosticInFlight = true;
         var version = reflectionDiagnosticVersion;
+        var configurationVersion = reflectionMonitorConfigurationVersion;
         try
         {
             var receiver = currentSelection.Kind == SceneSelectionKind.Receiver
@@ -4292,17 +4325,53 @@ public sealed partial class MainWindow : Window
             }
             var time = Viewport.TimeSeconds;
             var projectDirectory = lastProjectDirectory;
-            var snapshot = ProjectStore.DeserializeManifest(ProjectStore.SerializeManifest(scene));
-            var routes = await Task.Run(() => NativeSceneRenderer.TraceImportedMeshReflectionPaths(
-                snapshot,
-                receiver.Id,
-                time,
-                profile,
-                projectDirectory));
+            var retainedMonitor = reflectionMonitor;
+            var retainedMonitorVersion = reflectionMonitorSessionVersion;
+            reflectionMonitor = null;
+            reflectionMonitorSessionVersion = -1;
+            var requiresConfiguration = retainedMonitor is null ||
+                retainedMonitorVersion != configurationVersion ||
+                retainedMonitor.AtmosphereIntegrationSegments != profile.AtmosphereIntegrationSegments;
+            var snapshot = requiresConfiguration
+                ? ProjectStore.DeserializeManifest(ProjectStore.SerializeManifest(scene))
+                : null;
+            var result = await Task.Run(() =>
+            {
+                var activeMonitor = retainedMonitor;
+                try
+                {
+                    if (requiresConfiguration)
+                    {
+                        activeMonitor?.Dispose();
+                        activeMonitor = NativeSceneRenderer.CreateReflectionMonitor(
+                            snapshot!,
+                            projectDirectory,
+                            profile.AtmosphereIntegrationSegments);
+                    }
+                    var routes = activeMonitor!.Query(receiver.Id, time, profile);
+                    return (Monitor: activeMonitor, Routes: routes);
+                }
+                catch
+                {
+                    activeMonitor?.Dispose();
+                    throw;
+                }
+            });
+
+            if (!closingInProgress && configurationVersion == reflectionMonitorConfigurationVersion)
+            {
+                reflectionMonitor = result.Monitor;
+                reflectionMonitorSessionVersion = configurationVersion;
+            }
+            else
+            {
+                await Task.Run(result.Monitor.Dispose);
+            }
             if (version != reflectionDiagnosticVersion)
             {
                 return;
             }
+            var routes = result.Routes;
             Viewport.ReflectionPaths = routes;
             var firstOrder = routes.Count(item => item.ReflectionOrder == 1);
             var secondOrder = routes.Count - firstOrder;
@@ -4312,6 +4381,9 @@ public sealed partial class MainWindow : Window
             ReflectionPathText.Foreground = routes.Count == 0
                 ? new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#718198"))
                 : new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#74CFC8"));
+            ToolTip.SetTip(
+                ReflectionPathText,
+                $"Retained acoustic scene · live query {result.Monitor.CompletedQueryCount:N0} · no mesh reread between playhead updates.");
         }
         catch (Exception exception)
         {

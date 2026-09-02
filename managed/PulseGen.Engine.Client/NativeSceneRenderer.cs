@@ -244,10 +244,7 @@ public static unsafe class NativeSceneRenderer
         }
         profile ??= scene.RenderProfiles.FirstOrDefault()
             ?? throw new InvalidOperationException("The scene has no render profile.");
-        var emitters = scene.Emitters.Where(item => item.Enabled).ToArray();
-        var receivers = scene.ReceiverRigs.Where(item => item.Enabled).ToArray();
-        var receiverIndex = Array.FindIndex(receivers, item => item.Id == receiverId);
-        if (receiverIndex < 0)
+        if (!scene.ReceiverRigs.Any(item => item.Enabled && item.Id == receiverId))
         {
             throw new ArgumentException("The requested reflection monitor must identify an enabled receiver rig.", nameof(receiverId));
         }
@@ -255,80 +252,42 @@ public static unsafe class NativeSceneRenderer
         {
             return [];
         }
+        using var monitor = CreateReflectionMonitor(
+            scene,
+            projectDirectory,
+            profile.AtmosphereIntegrationSegments);
+        return monitor.Query(receiverId, receiveTimeSeconds, profile);
+    }
 
-        var engine = CreateConfiguredEngine(scene, projectDirectory, profile.AtmosphereIntegrationSegments);
-        try
+    public static ReflectionMonitorSession CreateReflectionMonitor(
+        SceneDocument scene,
+        string? projectDirectory = null,
+        int atmosphereIntegrationSegments = 1)
+    {
+        ArgumentNullException.ThrowIfNull(scene);
+        SceneValidator.EnsureValid(scene);
+        EnsureReceiverCapabilities(scene);
+        if (atmosphereIntegrationSegments is < 1 or > 4096)
         {
-            var query = new NativeReflectionPathQuery
-            {
-                Size = (uint)sizeof(NativeReflectionPathQuery),
-                Version = AbiVersion,
-                ReceiverIndex = checked((uint)receiverIndex),
-                ReflectionOrder = checked((uint)profile.ReflectionOrder),
-                ReceiveTimeSeconds = receiveTimeSeconds,
-                SampleRate = checked((uint)profile.SampleRate),
-                RayCount = checked((uint)profile.RayCount)
-            };
-            Check(
-                Native.pg_engine_query_reflection_paths(engine, &query, null, 0, out var pathCount),
-                engine,
-                "measure imported-mesh reflection paths");
-            if (pathCount == 0)
-            {
-                return [];
-            }
-            var nativePaths = new NativeReflectionPath[checked((int)pathCount)];
-            fixed (NativeReflectionPath* pathPointer = nativePaths)
-            {
-                Check(
-                    Native.pg_engine_query_reflection_paths(engine, &query, pathPointer, pathCount, out var copiedPathCount),
-                    engine,
-                    "query imported-mesh reflection paths");
-                if (copiedPathCount != pathCount)
-                {
-                    throw new InvalidDataException("Imported-mesh reflection path count changed while copying solver diagnostics.");
-                }
-            }
+            throw new ArgumentOutOfRangeException(nameof(atmosphereIntegrationSegments));
+        }
 
-            var paths = new ImportedMeshReflectionPathData[nativePaths.Length];
-            for (var index = 0; index < nativePaths.Length; index++)
-            {
-                var native = nativePaths[index];
-                if (native.EmitterIndex >= emitters.Length || native.ReceiverIndex >= receivers.Length ||
-                    native.FirstMaterialIndex >= scene.Materials.Count || native.PointCount is < 3 or > 4)
-                {
-                    throw new InvalidDataException("Native reflection diagnostics referenced an unknown scene object.");
-                }
-                var points = new List<Vector3d>(checked((int)native.PointCount))
-                {
-                    FromNative(native.Point0),
-                    FromNative(native.Point1),
-                    FromNative(native.Point2)
-                };
-                if (native.PointCount == 4)
-                {
-                    points.Add(FromNative(native.Point3));
-                }
-                Guid? secondMaterialId = native.ReflectionOrder == 2 && native.SecondMaterialIndex < scene.Materials.Count
-                    ? scene.Materials[checked((int)native.SecondMaterialIndex)].Id
-                    : null;
-                paths[index] = new(
-                    emitters[native.EmitterIndex].Id,
-                    receivers[native.ReceiverIndex].Id,
-                    checked((int)native.ReflectionOrder),
-                    points,
-                    native.DistanceMetres,
-                    native.TravelTimeSeconds,
-                    native.PressureGain,
-                    scene.Materials[checked((int)native.FirstMaterialIndex)].Id,
-                    secondMaterialId);
-            }
-            return paths;
-        }
-        finally
-        {
-            Native.pg_engine_destroy(engine);
-        }
+        var emitters = scene.Emitters.Where(item => item.Enabled).Select(item => item.Id).ToArray();
+        var receivers = scene.ReceiverRigs.Where(item => item.Enabled).Select(item => item.Id).ToArray();
+        var materials = scene.Materials.Select(item => item.Id).ToArray();
+        var hasReflectiveImportedMeshes = scene.Geometry.Any(item =>
+            item.Kind == GeometryKind.ImportedMesh && item.Reflects);
+        var engine = hasReflectiveImportedMeshes
+            ? CreateConfiguredEngine(scene, projectDirectory, atmosphereIntegrationSegments)
+            : 0;
+        return new ReflectionMonitorSession(
+            engine,
+            emitters,
+            receivers,
+            materials,
+            scene.Timeline.DurationSeconds,
+            atmosphereIntegrationSegments,
+            hasReflectiveImportedMeshes);
     }
 
     public static RenderSummary Render(
@@ -678,6 +637,174 @@ public static unsafe class NativeSceneRenderer
         {
             Native.pg_engine_destroy(engine);
             throw;
+        }
+    }
+
+    public sealed unsafe class ReflectionMonitorSession : IDisposable
+    {
+        private readonly object gate = new();
+        private readonly Guid[] emitterIds;
+        private readonly Guid[] receiverIds;
+        private readonly Guid[] materialIds;
+        private readonly double timelineDurationSeconds;
+        private nint engine;
+        private bool disposed;
+        private ulong completedQueryCount;
+
+        internal ReflectionMonitorSession(
+            nint engineHandle,
+            Guid[] enabledEmitterIds,
+            Guid[] enabledReceiverIds,
+            Guid[] sceneMaterialIds,
+            double durationSeconds,
+            int atmosphereIntegrationSegments,
+            bool hasReflectiveImportedMeshes)
+        {
+            engine = engineHandle;
+            emitterIds = enabledEmitterIds;
+            receiverIds = enabledReceiverIds;
+            materialIds = sceneMaterialIds;
+            timelineDurationSeconds = durationSeconds;
+            AtmosphereIntegrationSegments = atmosphereIntegrationSegments;
+            HasReflectiveImportedMeshes = hasReflectiveImportedMeshes;
+        }
+
+        public int AtmosphereIntegrationSegments { get; }
+
+        public bool HasReflectiveImportedMeshes { get; }
+
+        public ulong CompletedQueryCount
+        {
+            get
+            {
+                lock (gate)
+                {
+                    return completedQueryCount;
+                }
+            }
+        }
+
+        public IReadOnlyList<ImportedMeshReflectionPathData> Query(
+            Guid receiverId,
+            double receiveTimeSeconds,
+            RenderProfile profile)
+        {
+            ArgumentNullException.ThrowIfNull(profile);
+            if (!double.IsFinite(receiveTimeSeconds) || receiveTimeSeconds < 0 || receiveTimeSeconds > timelineDurationSeconds)
+            {
+                throw new ArgumentOutOfRangeException(nameof(receiveTimeSeconds));
+            }
+            if (profile.AtmosphereIntegrationSegments != AtmosphereIntegrationSegments)
+            {
+                throw new InvalidOperationException(
+                    "The render profile uses a different atmosphere path resolution. Reconfigure the reflection monitor before querying it.");
+            }
+            var receiverIndex = Array.IndexOf(receiverIds, receiverId);
+            if (receiverIndex < 0)
+            {
+                throw new ArgumentException("The requested reflection monitor must identify an enabled receiver rig.", nameof(receiverId));
+            }
+
+            lock (gate)
+            {
+                ObjectDisposedException.ThrowIf(disposed, this);
+                if (!HasReflectiveImportedMeshes)
+                {
+                    completedQueryCount++;
+                    return [];
+                }
+
+                var current = engine;
+                if (current == 0)
+                {
+                    throw new ObjectDisposedException(nameof(ReflectionMonitorSession));
+                }
+                var query = new NativeReflectionPathQuery
+                {
+                    Size = (uint)sizeof(NativeReflectionPathQuery),
+                    Version = AbiVersion,
+                    ReceiverIndex = checked((uint)receiverIndex),
+                    ReflectionOrder = checked((uint)profile.ReflectionOrder),
+                    ReceiveTimeSeconds = receiveTimeSeconds,
+                    SampleRate = checked((uint)profile.SampleRate),
+                    RayCount = checked((uint)profile.RayCount)
+                };
+                Check(
+                    Native.pg_engine_query_reflection_paths(current, &query, null, 0, out var pathCount),
+                    current,
+                    "measure imported-mesh reflection paths");
+                if (pathCount == 0)
+                {
+                    completedQueryCount++;
+                    return [];
+                }
+                var nativePaths = new NativeReflectionPath[checked((int)pathCount)];
+                fixed (NativeReflectionPath* pathPointer = nativePaths)
+                {
+                    Check(
+                        Native.pg_engine_query_reflection_paths(current, &query, pathPointer, pathCount, out var copiedPathCount),
+                        current,
+                        "query imported-mesh reflection paths");
+                    if (copiedPathCount != pathCount)
+                    {
+                        throw new InvalidDataException("Imported-mesh reflection path count changed while copying solver diagnostics.");
+                    }
+                }
+
+                var paths = new ImportedMeshReflectionPathData[nativePaths.Length];
+                for (var index = 0; index < nativePaths.Length; index++)
+                {
+                    var native = nativePaths[index];
+                    if (native.EmitterIndex >= emitterIds.Length || native.ReceiverIndex >= receiverIds.Length ||
+                        native.FirstMaterialIndex >= materialIds.Length || native.PointCount is < 3 or > 4)
+                    {
+                        throw new InvalidDataException("Native reflection diagnostics referenced an unknown scene object.");
+                    }
+                    var points = new List<Vector3d>(checked((int)native.PointCount))
+                    {
+                        FromNative(native.Point0),
+                        FromNative(native.Point1),
+                        FromNative(native.Point2)
+                    };
+                    if (native.PointCount == 4)
+                    {
+                        points.Add(FromNative(native.Point3));
+                    }
+                    Guid? secondMaterialId = native.ReflectionOrder == 2 && native.SecondMaterialIndex < materialIds.Length
+                        ? materialIds[checked((int)native.SecondMaterialIndex)]
+                        : null;
+                    paths[index] = new(
+                        emitterIds[native.EmitterIndex],
+                        receiverIds[native.ReceiverIndex],
+                        checked((int)native.ReflectionOrder),
+                        points,
+                        native.DistanceMetres,
+                        native.TravelTimeSeconds,
+                        native.PressureGain,
+                        materialIds[checked((int)native.FirstMaterialIndex)],
+                        secondMaterialId);
+                }
+                completedQueryCount++;
+                return paths;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (gate)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+                disposed = true;
+                var current = engine;
+                engine = 0;
+                if (current != 0)
+                {
+                    Native.pg_engine_destroy(current);
+                }
+            }
         }
     }
 

@@ -74,7 +74,12 @@ commands and reads bounded telemetry.
   inspector can read an older imported asset, list its source regions, and assign
   a different PulseGen material to each one. The World view draws the exact echo
   routes chosen by the native solver: cyan for one bounce and purple for two,
-  with visible contact points and a small route-count readout. The GPU surface and
+  with visible contact points and a small route-count readout. A retained
+  reflection-monitor session now keeps the verified mesh, acoustic patches, BVH,
+  emitters, atmosphere, and receiver rigs alive between playhead updates. Moving
+  the playhead or selecting another receiver issues only a bounded route query;
+  the editor snapshots and rebuilds the native acoustic scene only after a scene,
+  project-root, or atmosphere-resolution change. The GPU surface and
   editing overlay now share one perspective camera: right-drag orbits, middle-drag
   pans, the wheel zooms, and
   Fit/F reframes the authored sound space. Exact ray/triangle hits select the
@@ -256,6 +261,18 @@ plus measured timing. Imported mode additionally records the verified asset
 SHA-256, native engine version, imported mesh count, and imported triangle count.
 Results are specific to the tested machine, driver, window size, build, and
 display refresh rate.
+
+Measure retained echo-route updates against the former one-shot reconstruction
+path using that same verified 250,000-triangle project:
+
+```powershell
+./scripts/run-reflection-monitor-stress.ps1 -Queries 12
+```
+
+The benchmark verifies deterministic route output, one retained configuration,
+the exact completed-query count, and a measured speedup over rebuilding and
+rereading the imported mesh for every update. It writes the hardware-specific
+receipt to `out/reflection-monitor-stress/reflection-monitor-receipt.json`.
 
 Atlas integration defaults to the production service origins but does not upload
 anything until **Sync project** is pressed. Candidate or local services can be
