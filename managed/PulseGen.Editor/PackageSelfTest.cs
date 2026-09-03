@@ -1,0 +1,201 @@
+using System.Reflection;
+using System.Text.Json;
+using PulseGen.Contracts;
+using PulseGen.Engine.Client;
+using PulseGen.ModelHost.Client;
+
+namespace PulseGen.Editor;
+
+internal sealed record PackageSelfTestOptions(string ReceiptPath, string OutputDirectory)
+{
+    public static PackageSelfTestOptions? TryParse(IReadOnlyList<string> arguments)
+    {
+        if (!arguments.Contains("--package-self-test", StringComparer.Ordinal))
+        {
+            return null;
+        }
+
+        static string? Value(IReadOnlyList<string> values, string name)
+        {
+            var index = values.IndexOf(name);
+            if (index < 0)
+            {
+                return null;
+            }
+            if (index + 1 >= values.Count || values[index + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                throw new ArgumentException($"{name} requires a value.", name);
+            }
+            return values[index + 1];
+        }
+
+        var receipt = Value(arguments, "--receipt")
+            ?? throw new ArgumentException("--package-self-test requires --receipt.", "--receipt");
+        if (!receipt.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("The package self-test receipt must be a .json file.", "--receipt");
+        }
+
+        var fullReceipt = Path.GetFullPath(receipt);
+        var output = Value(arguments, "--output")
+            ?? Path.Combine(Path.GetDirectoryName(fullReceipt)!, "render");
+        return new(fullReceipt, Path.GetFullPath(output));
+    }
+}
+
+internal static class PackageSelfTest
+{
+    private const string SuccessMarker = "PULSEGEN_PACKAGE_SELF_TEST_OK";
+    private const string FailureMarker = "PULSEGEN_PACKAGE_SELF_TEST_FAILED";
+
+    public static async Task<int> RunAsync(PackageSelfTestOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var checks = new List<SelfTestCheck>();
+        SceneDocument? flyby = null;
+
+        await CheckAsync("package-manifest", () =>
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "package-manifest.json");
+            using var manifest = JsonDocument.Parse(File.ReadAllText(path));
+            var root = manifest.RootElement;
+            if (root.GetProperty("schemaVersion").GetInt32() != 1 ||
+                root.GetProperty("product").GetString() != "PulseGen" ||
+                root.GetProperty("runtimeIdentifier").GetString() != "win-x64")
+            {
+                throw new InvalidDataException("The package manifest identity is invalid.");
+            }
+            return Task.FromResult($"{root.GetProperty("version").GetString()} · {root.GetProperty("channel").GetString()}");
+        });
+
+        await CheckAsync("native-engine", () =>
+        {
+            var engineVersion = NativeSceneRenderer.EngineVersion;
+            var productVersion = ProductVersion();
+            if (!string.Equals(engineVersion, productVersion, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"Native engine {engineVersion} does not match packaged editor {productVersion}.");
+            }
+            return Task.FromResult(engineVersion);
+        });
+
+        await CheckAsync("codec-runtime", () =>
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "sndfile.dll");
+            if (!File.Exists(path) || !SndFileCodecAdapter.VerifyRuntimeFile(path))
+            {
+                throw new InvalidDataException("The packaged codec runtime failed its pinned SHA-256 check.");
+            }
+            return Task.FromResult(SndFileCodecAdapter.RuntimeVersion);
+        });
+
+        await CheckAsync("model-host", async () =>
+        {
+            await using var client = await ModelHostClient.StartAsync();
+            var packs = await client.GetPackInventoryAsync();
+            if (packs.ValueKind != JsonValueKind.Array || packs.GetArrayLength() < 2)
+            {
+                throw new InvalidDataException("The local analysis host did not return its pack inventory.");
+            }
+            return $"local-only Python host · {packs.GetArrayLength()} optional pack adapters";
+        });
+
+        await CheckAsync("sample-projects", async () =>
+        {
+            var samples = Path.Combine(AppContext.BaseDirectory, "Samples");
+            flyby = await ProjectStore.LoadAsync(Path.Combine(samples, "PhysicsFlyby.pulseproj"));
+            var echo = await ProjectStore.LoadAsync(Path.Combine(samples, "SurfaceEcho.pulseproj"));
+            if (flyby.ReceiverRigs.Count < 2 || echo.Geometry.Count == 0)
+            {
+                throw new InvalidDataException("The packaged starter projects are incomplete.");
+            }
+            return $"{flyby.Name}; {echo.Name}";
+        });
+
+        await CheckAsync("offline-render", () =>
+        {
+            if (flyby is null)
+            {
+                throw new InvalidOperationException("The flyby starter project was not available for rendering.");
+            }
+            Directory.CreateDirectory(options.OutputDirectory);
+            var shortScene = flyby with
+            {
+                Name = "Package Smoke Flyby",
+                Timeline = flyby.Timeline with { DurationSeconds = 0.25 }
+            };
+            var summary = NativeSceneRenderer.Render(shortScene, options.OutputDirectory);
+            var takes = Directory.GetFiles(options.OutputDirectory, "*.wav", SearchOption.TopDirectoryOnly);
+            if (summary.FilesWritten != 2 || summary.FramesRendered != 12_000 || takes.Length != 2 ||
+                takes.Any(path => new FileInfo(path).Length <= 44))
+            {
+                throw new InvalidDataException("The packaged engine did not produce two valid quarter-second stereo takes.");
+            }
+            return Task.FromResult($"{summary.FilesWritten} stereo takes · {summary.FramesRendered} frames · 48 kHz float");
+        });
+
+        var passed = checks.All(check => check.Passed);
+        var receipt = new
+        {
+            schemaVersion = 1,
+            marker = passed ? SuccessMarker : FailureMarker,
+            product = "PulseGen",
+            version = ProductVersion(),
+            runtimeIdentifier = "win-x64",
+            createdAtUtc = DateTimeOffset.UtcNow,
+            packageRoot = AppContext.BaseDirectory,
+            outputDirectory = options.OutputDirectory,
+            checks
+        };
+
+        await WriteReceiptAtomicAsync(options.ReceiptPath, JsonSerializer.Serialize(receipt, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            WriteIndented = true
+        }));
+        return passed ? 0 : 1;
+
+        async Task CheckAsync(string name, Func<Task<string>> action)
+        {
+            try
+            {
+                checks.Add(new(name, true, await action(), null));
+            }
+            catch (Exception exception)
+            {
+                checks.Add(new(name, false, null, $"{exception.GetType().Name}: {exception.Message}"));
+            }
+        }
+    }
+
+    private static string ProductVersion()
+    {
+        var version = typeof(PackageSelfTest).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+        return string.IsNullOrWhiteSpace(version)
+            ? "unknown"
+            : version.Split('+', 2)[0];
+    }
+
+    private static async Task WriteReceiptAtomicAsync(string path, string json)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        Directory.CreateDirectory(directory);
+        var temporary = Path.Combine(directory, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, json);
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
+    }
+
+    private sealed record SelfTestCheck(string Name, bool Passed, string? Detail, string? Error);
+}

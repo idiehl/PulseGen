@@ -26,7 +26,7 @@ try {
         Remove-Item -LiteralPath $receipt -Force
     }
     $benchmarkArguments = @(
-        'managed\PulseGen.Editor\bin\Release\net10.0\PulseGen.Editor.dll',
+        'managed\PulseGen.Editor\bin\Release\net10.0\PulseGen.dll',
         '--viewport-benchmark',
         '--seconds', $Seconds,
         '--minimum-fps', $MinimumFramesPerSecond,

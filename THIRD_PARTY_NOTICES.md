@@ -52,5 +52,18 @@ The pinned DLL identifies its bundled encoders as libFLAC 1.4.2, LAME 3.100,
 libopus 1.4, and Xiph.Org libVorbis I 20200704. FLAC, Ogg, Vorbis, and Opus use
 Xiph/BSD-style licenses; LAME uses LGPL. Their copyright notices and applicable
 license texts must accompany a distributable PulseGen package. This development
-milestone does not yet produce the signed installer, so installer-level license
-assembly remains part of packaging hardening rather than being implied complete.
+milestone produces an unsigned portable engineering package and copies the
+verified libsndfile, Assimp, miniaudio, CPython, and NumPy license records beside
+the application. It also records the fully resolved managed NuGet inventory.
+Public installer-level notice review and code signing remain packaging-hardening
+gates rather than being implied complete.
+
+## CPython 3.11.9 and NumPy 2.0.2
+
+The optional local decomposition host uses the official CPython 3.11.9 Windows
+embeddable distribution and the exact NumPy 2.0.2 CPython 3.11 x64 wheel. Both
+artifacts are size- and SHA-256-verified against `modelhost/runtime.manifest.json`
+before packaging. Their upstream license files, including NumPy's bundled-library
+notices, are copied into the package `licenses` directory. Python is launched
+with bytecode writes disabled so a package self-test does not modify the sealed
+application payload.

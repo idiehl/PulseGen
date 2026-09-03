@@ -31,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.15";
+constexpr std::string_view engine_version = "0.1.0-alpha.16";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;

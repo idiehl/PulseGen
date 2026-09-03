@@ -174,6 +174,14 @@ commands and reads bounded telemetry.
   grants, and local-only defaults. The corresponding identity and immutable
   library services live in `I:\dev\AtlasUniversalis`.
 - JSON Schema, sample project, numerical tests, and CI verification.
+- A self-contained Windows x64 portable package with a single `PulseGen.exe`
+  entry point, embedded .NET and local Python runtimes, starter projects,
+  resolved dependency inventory, third-party notices, a per-file SHA-256
+  manifest, and a deterministic ZIP layout. A headless packaged-app self-test
+  loads the native engine and codecs, starts the local-only analysis host,
+  opens both starter projects, and renders two short isolated stereo takes.
+  The archive verifier repeats all hashes after execution to prove that the
+  test itself did not mutate the sealed payload.
 
 Steam Audio, KISS FFT, GPU model execution, full mesh authoring, automatic
 physical-coefficient inference, and source texture recreation for imported meshes
@@ -200,6 +208,35 @@ Bootstrap downloads the official libsndfile 1.2.2 Windows codec package into
 the ignored `.runtime` directory, verifies the archive, DLL, and license with
 the hashes in `dependencies.lock.json`, and never accepts a different DLL at
 runtime. The application links to it dynamically.
+
+## Private-alpha Windows package
+
+Create the portable Windows x64 candidate after a full verification run:
+
+```powershell
+./scripts/verify.ps1 -Configuration Release
+./scripts/package-windows.ps1 -NoBuild
+```
+
+Release candidates require a clean worktree. `-AllowDirty` exists only for an
+explicitly marked engineering package. The command publishes a self-contained
+editor, copies the checksum-pinned native/codec/model-host runtimes and starter
+projects, collects license and dependency inventories, seals every payload file
+in `package-manifest.json` and `SHA256SUMS.txt`, runs the package self-test, and
+then creates `out/packages/PulseGen-<version>-win-x64.zip` plus its archive hash.
+
+The portable private-alpha package is intentionally labeled unsigned unless a
+valid code-signing certificate thumbprint is supplied. This milestone does not
+claim an installed, automatically updating, or publicly supported Windows
+release. Verify either the extracted directory or the final ZIP independently:
+
+```powershell
+./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.16-win-x64.zip
+```
+
+`START_HERE.txt` inside the archive gives a tester the shortest safe path into
+the two included projects and clearly identifies the SOFA, semantic-model, and
+dynamic-mesh features that remain gated.
 
 Run the editor after a successful build:
 

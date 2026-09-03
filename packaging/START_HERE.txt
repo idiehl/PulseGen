@@ -1,0 +1,49 @@
+PULSEGEN PRIVATE-ALPHA TEST BUILD
+
+PulseGen is a physics-first sound workstation. This portable package is an
+engineering preview for invited Windows 11 x64 testers; it is not yet a signed
+installer or an automatically updating public release.
+
+START
+
+1. Extract the entire ZIP before running it. Do not run PulseGen from inside
+   the ZIP preview.
+2. Open PulseGen.exe.
+3. Begin with one of the project folders under Samples. PhysicsFlyby shows a
+   moving tone, Doppler shift, a head listener, and a stereo microphone pair.
+   SurfaceEcho is the clearer starting point for wall materials and echoes.
+4. Work from a copy of a sample if you want to preserve the original template.
+
+WHAT IS INCLUDED
+
+- The self-contained Windows editor and .NET runtime.
+- PulseGen's native audio engine and pinned codec library.
+- The local-only Python analysis runtime. Source audio is not uploaded for
+  decomposition.
+- Two editable starter projects.
+- A package manifest and SHA256SUMS.txt for integrity checks.
+
+CURRENTLY GATED
+
+- Imported measured SOFA head profiles remain authorable but do not render
+  until the Steam Audio adapter is active. Use the analytic head model.
+- Demucs and AudioSep model weights are not bundled. Their adapters remain off
+  until weight checksums and licenses are approved.
+- Dynamic acoustic meshes remain a future adapter.
+
+PRIVACY AND SAFETY
+
+Projects are local by default. Atlas sign-in or sync is explicit. This build
+does not normalize masters automatically. Keep irreplaceable source recordings
+backed up while testing pre-release software.
+
+PACKAGE VERIFICATION
+
+From PowerShell in the source repository, run:
+
+  .\scripts\verify-package.ps1 -PackagePath <path-to-extracted-package>
+
+The verifier checks every packaged file and asks PulseGen to test its native
+engine, codecs, local analysis host, starter projects, and a short two-receiver
+offline render without opening the editor window.
+

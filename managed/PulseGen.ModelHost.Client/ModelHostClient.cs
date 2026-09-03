@@ -55,6 +55,7 @@ public sealed class ModelHostClient : IAsyncDisposable
         startInfo.ArgumentList.Add("pulsegen_model_host");
         startInfo.Environment["PYTHONUTF8"] = "1";
         startInfo.Environment["PYTHONUNBUFFERED"] = "1";
+        startInfo.Environment["PYTHONDONTWRITEBYTECODE"] = "1";
         startInfo.Environment["PULSEGEN_LOCAL_ONLY"] = "1";
         var process = Process.Start(startInfo) ?? throw new InvalidOperationException("PulseGen.ModelHost did not start.");
         var client = new ModelHostClient(process);
