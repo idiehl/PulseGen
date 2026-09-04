@@ -231,12 +231,16 @@ claim an installed, automatically updating, or publicly supported Windows
 release. Verify either the extracted directory or the final ZIP independently:
 
 ```powershell
-./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.16-win-x64.zip
+./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.17-win-x64.zip
 ```
 
-`START_HERE.txt` inside the archive gives a tester the shortest safe path into
-the two included projects and clearly identifies the SOFA, semantic-model, and
-dynamic-mesh features that remain gated.
+On first launch, a plain-language start guide appears after protected crash
+recovery has been checked. It can open fresh, unsaved working copies of either
+starter scene, explain the five-step PulseGen workflow and its core terms, and
+separate features that work now from SOFA, semantic-model, and dynamic-mesh
+features that remain gated. The guide never replaces recovered or unsaved work,
+its launch preference is stored locally, and the `?` control reopens it at any
+time. `START_HERE.txt` inside the archive mirrors that safe path.
 
 Run the editor after a successful build:
 

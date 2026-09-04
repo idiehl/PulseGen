@@ -37,7 +37,12 @@
             <TextBlock x:Name="EngineStateText" Text="ENGINE READY" Foreground="#73E6C2" FontSize="10" FontWeight="SemiBold" ToolTip.Tip="During preview this shows how much of each hardware audio block PulseGen needs to finish its physics rendering." />
           </Border>
         </StackPanel>
-        <TextBlock Grid.Column="6" Text="0.1.0-alpha" Foreground="#64758B" VerticalAlignment="Center" />
+        <StackPanel Grid.Column="6" Orientation="Horizontal" VerticalAlignment="Center" Spacing="7">
+          <Button Content="?" Width="28" Height="28" Padding="0" Click="OnStartGuideClicked"
+                  ToolTip.Tip="Open the plain-language PulseGen start guide."
+                  AutomationProperties.Name="Open the PulseGen start guide" />
+          <TextBlock Text="0.1.0-alpha.17" Foreground="#64758B" VerticalAlignment="Center" />
+        </StackPanel>
       </Grid>
     </Border>
 

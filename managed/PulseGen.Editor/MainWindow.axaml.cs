@@ -72,6 +72,8 @@ public sealed partial class MainWindow : Window
     })
     { Timeout = Timeout.InfiniteTimeSpan };
     private readonly WorkspaceIndex workspaceIndex = WorkspaceIndex.CreateDefault();
+    private readonly EditorPreferencesStore preferencesStore = EditorPreferencesStore.CreateDefault();
+    private EditorPreferences editorPreferences = new();
     private AtlasOidcClient? atlasIdentity;
     private AtlasLibraryClient? atlasLibrary;
     private Guid? atlasBaseRevisionId;
@@ -105,6 +107,7 @@ public sealed partial class MainWindow : Window
     private NativeSceneRenderer.ReflectionMonitorSession? reflectionMonitor;
     private int reflectionMonitorConfigurationVersion;
     private int reflectionMonitorSessionVersion = -1;
+    private bool startGuideOpen;
 
     public MainWindow()
     {
@@ -1829,10 +1832,15 @@ public sealed partial class MainWindow : Window
 
     private async void OnOpenClicked(object? sender, RoutedEventArgs e)
     {
+        await OpenProjectFromPickerAsync();
+    }
+
+    private async Task<bool> OpenProjectFromPickerAsync()
+    {
         if (sceneDirty)
         {
             StatusText.Text = "Save the current scene before opening another project; unsaved work was preserved";
-            return;
+            return false;
         }
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
@@ -1841,7 +1849,7 @@ public sealed partial class MainWindow : Window
         });
         if (folders.Count == 0)
         {
-            return;
+            return false;
         }
 
         var projectDirectory = folders[0].Path.LocalPath;
@@ -1867,10 +1875,94 @@ public sealed partial class MainWindow : Window
             ApplySceneToControls(loaded, projectDirectory);
             ClearRecoveredState();
             StatusText.Text = $"Project opened · {projectDirectory}{recoveryWarning}";
+            return true;
         }
         catch (Exception exception)
         {
             StatusText.Text = $"Project open failed without replacing the current scene: {exception.Message}";
+            return false;
+        }
+        finally
+        {
+            initializingControls = false;
+        }
+    }
+
+    private async void OnStartGuideClicked(object? sender, RoutedEventArgs e)
+    {
+        await ShowStartGuideAsync();
+    }
+
+    private async Task ShowStartGuideAsync()
+    {
+        if (startGuideOpen)
+        {
+            return;
+        }
+
+        startGuideOpen = true;
+        try
+        {
+            var guide = new StartGuideWindow(scene.Name, editorPreferences.ShowStartGuideOnLaunch);
+            var result = await guide.ShowDialog<StartGuideResult?>(this);
+            var showOnLaunch = result?.ShowOnLaunch ?? guide.ShowOnLaunch;
+            if (showOnLaunch != editorPreferences.ShowStartGuideOnLaunch)
+            {
+                editorPreferences = editorPreferences with { ShowStartGuideOnLaunch = showOnLaunch };
+                try
+                {
+                    preferencesStore.Save(editorPreferences);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    StatusText.Text = $"The start-guide choice could not be saved, but the editor is unchanged: {exception.Message}";
+                }
+            }
+
+            switch (result?.Action)
+            {
+                case StartGuideAction.ExploreFlyby:
+                case StartGuideAction.ExploreSurfaceEcho:
+                    await LoadStarterSceneAsync(result.Action);
+                    break;
+                case StartGuideAction.OpenProject:
+                    await OpenProjectFromPickerAsync();
+                    break;
+            }
+        }
+        finally
+        {
+            startGuideOpen = false;
+        }
+    }
+
+    private async Task LoadStarterSceneAsync(StartGuideAction action)
+    {
+        if (sceneDirty)
+        {
+            StatusText.Text = "Save the current scene before opening a starter scene; unsaved work was preserved";
+            return;
+        }
+
+        var starter = StartGuideCatalog.CreateStarterScene(action);
+        StopPreviewTransport();
+        string? recoveryWarning = null;
+        try
+        {
+            await ResetRecoveryContextAsync(starter, projectDirectory: null);
+        }
+        catch (Exception exception)
+        {
+            DisableRecovery(exception);
+            recoveryWarning = " · autosave unavailable for this session";
+        }
+
+        try
+        {
+            initializingControls = true;
+            ApplySceneToControls(starter, projectDirectory: null);
+            ClearRecoveredState();
+            StatusText.Text = $"Fresh starter copy opened · {starter.Name} · choose Save to create your own project{recoveryWarning}";
         }
         finally
         {
@@ -3980,6 +4072,8 @@ public sealed partial class MainWindow : Window
     private async void OnEditorOpened(object? sender, EventArgs e)
     {
         Opened -= OnEditorOpened;
+        editorPreferences = preferencesStore.Load();
+        var showStartGuide = false;
         IsEnabled = false;
         AutosaveStateText.Text = "CHECKING RECOVERY…";
         StatusText.Text = "Checking protected local autosave history…";
@@ -4016,6 +4110,7 @@ public sealed partial class MainWindow : Window
                 AutosaveStateText.Text = "AUTOSAVE READY";
                 AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
                 StatusText.Text = "Ready · protected local autosave is active";
+                showStartGuide = editorPreferences.ShowStartGuideOnLaunch;
             }
             autosaveTimer.Start();
         }
@@ -4034,6 +4129,11 @@ public sealed partial class MainWindow : Window
         {
             initializingControls = false;
             IsEnabled = true;
+        }
+
+        if (showStartGuide && !recoveryCancellation.IsCancellationRequested)
+        {
+            await ShowStartGuideAsync();
         }
     }
 

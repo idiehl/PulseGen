@@ -1,0 +1,193 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="using:PulseGen.Editor"
+        x:Class="PulseGen.Editor.StartGuideWindow"
+        x:CompileBindings="True"
+        Title="Start in PulseGen"
+        Width="980" Height="720" MinWidth="820" MinHeight="620"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False"
+        Background="#0B0F14"
+        KeyDown="OnWindowKeyDown">
+  <Window.Styles>
+    <Style Selector="Border.guideCard">
+      <Setter Property="Background" Value="#121923" />
+      <Setter Property="BorderBrush" Value="#29384B" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Padding" Value="14" />
+    </Style>
+    <Style Selector="Button.guidePrimary">
+      <Setter Property="Background" Value="#2A746C" />
+      <Setter Property="Foreground" Value="#F3FFFD" />
+      <Setter Property="Padding" Value="14,8" />
+    </Style>
+    <Style Selector="TextBlock.guideLabel">
+      <Setter Property="Foreground" Value="#7EDDD1" />
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="LetterSpacing" Value="1" />
+    </Style>
+  </Window.Styles>
+
+  <Grid RowDefinitions="Auto,*,Auto">
+    <Border Background="#101721" BorderBrush="#2A3748" BorderThickness="0,0,0,1" Padding="24,20">
+      <Grid ColumnDefinitions="Auto,16,*,Auto" ColumnSpacing="0">
+        <Border Width="44" Height="44" CornerRadius="11" Background="#64D8CB">
+          <TextBlock Text="∿" Foreground="#071311" FontSize="33" FontWeight="Bold"
+                     HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
+          <TextBlock Text="MAKE SOUND. GIVE IT A WORLD." Foreground="#F0F8F7"
+                     FontSize="20" FontWeight="SemiBold" LetterSpacing="0.5" />
+          <TextBlock Text="PulseGen calculates what two ears or microphones receive as sound moves through a physical space."
+                     Foreground="#91A2B8" FontSize="12" TextWrapping="Wrap" />
+        </StackPanel>
+        <StackPanel Grid.Column="3" HorizontalAlignment="Right" VerticalAlignment="Center" Spacing="4">
+          <Border Background="#15332F" CornerRadius="10" Padding="10,4">
+            <TextBlock Text="PRIVATE · LOCAL BY DEFAULT" Foreground="#79E0CE" FontSize="9" FontWeight="SemiBold" />
+          </Border>
+          <TextBlock Text="HEADPHONES RECOMMENDED" Foreground="#71839A" FontSize="9" HorizontalAlignment="Center" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <ScrollViewer Grid.Row="1" HorizontalScrollBarVisibility="Disabled">
+      <Grid ColumnDefinitions="1.12*,0.88*" ColumnSpacing="16" Margin="22,20">
+        <StackPanel Spacing="12">
+          <StackPanel Margin="2,0,0,2" Spacing="4">
+            <TextBlock Text="CHOOSE A STARTING POINT" Classes="guideLabel" />
+            <TextBlock Text="Each example opens as a fresh working copy. The packaged original stays untouched."
+                       Foreground="#8394A9" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Border Classes="guideCard">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+              <StackPanel Spacing="5">
+                <TextBlock Text="MOVING SOUND" Classes="guideLabel" />
+                <TextBlock Text="Doppler flyby" Foreground="#ECF5F4" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Follow a tone across a reflective room. Hear its pitch, loudness, timing, and stereo position change as it passes."
+                           Foreground="#91A2B8" TextWrapping="Wrap" />
+              </StackPanel>
+              <Button Grid.Column="1" Classes="guidePrimary" Content="Explore flyby" Click="OnFlybyClicked"
+                      VerticalAlignment="Center" AutomationProperties.Name="Explore the Doppler flyby starter scene" />
+            </Grid>
+          </Border>
+
+          <Border Classes="guideCard">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+              <StackPanel Spacing="5">
+                <TextBlock Text="REFLECTED SOUND" Classes="guideLabel" />
+                <TextBlock Text="Surface echo lab" Foreground="#ECF5F4" FontSize="16" FontWeight="SemiBold" />
+                <TextBlock Text="Compare how stone, timber, and a heavy curtain change the same sound's clear echo and fading tail."
+                           Foreground="#91A2B8" TextWrapping="Wrap" />
+              </StackPanel>
+              <Button Grid.Column="1" Classes="guidePrimary" Content="Explore echoes" Click="OnEchoClicked"
+                      VerticalAlignment="Center" AutomationProperties.Name="Explore the surface echo starter scene" />
+            </Grid>
+          </Border>
+
+          <Border Classes="guideCard">
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+              <StackPanel Spacing="5">
+                <TextBlock Text="YOUR WORK" Classes="guideLabel" />
+                <TextBlock Text="Open a saved project" Foreground="#ECF5F4" FontSize="15" FontWeight="SemiBold" />
+                <TextBlock Text="Choose a folder ending in .pulseproj. PulseGen validates it before replacing the current scene."
+                           Foreground="#91A2B8" TextWrapping="Wrap" />
+              </StackPanel>
+              <Button Grid.Column="1" Content="Open project…" Click="OnOpenProjectClicked"
+                      VerticalAlignment="Center" AutomationProperties.Name="Open an existing PulseGen project" />
+            </Grid>
+          </Border>
+
+          <TextBlock Text="AVAILABLE IN THIS BUILD" Classes="guideLabel" Margin="2,8,0,0" />
+          <ItemsControl x:Name="ReadyFeatureList">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="local:StartGuideFeature">
+                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="9" Margin="2,5">
+                  <Border Width="7" Height="7" CornerRadius="4" Background="#5ED6B9" VerticalAlignment="Top" Margin="0,6,0,0" />
+                  <StackPanel Grid.Column="1" Spacing="1">
+                    <TextBlock Text="{CompiledBinding Name}" Foreground="#DDEAE8" FontWeight="SemiBold" />
+                    <TextBlock Text="{CompiledBinding Explanation}" Foreground="#7F91A8" FontSize="11" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Spacing="12">
+          <Border Classes="guideCard">
+            <StackPanel Spacing="10">
+              <TextBlock Text="THE BASIC LOOP" Classes="guideLabel" />
+              <Grid ColumnDefinitions="24,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="8">
+                <TextBlock Text="1" Foreground="#64D8CB" FontWeight="Bold" />
+                <TextBlock Grid.Column="1" Text="Make a sound from a tone, pulse, noise, additive layers, or procedural wind." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="1" Text="2" Foreground="#64D8CB" FontWeight="Bold" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="Place it in the world and draw how it moves." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="2" Text="3" Foreground="#64D8CB" FontWeight="Bold" />
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="Shape the room, surfaces, air, and wind." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="3" Text="4" Foreground="#64D8CB" FontWeight="Bold" />
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="Put a listener or stereo microphone pair where you want to hear it." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="4" Text="5" Foreground="#64D8CB" FontWeight="Bold" />
+                <TextBlock Grid.Row="4" Grid.Column="1" Text="Preview quickly, then Render to calculate clean stereo takes." Foreground="#D8E3E7" TextWrapping="Wrap" />
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="guideCard">
+            <StackPanel Spacing="9">
+              <TextBlock Text="WORDS PULSEGEN USES" Classes="guideLabel" />
+              <Grid ColumnDefinitions="74,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="6">
+                <TextBlock Text="Source" Foreground="#B7C5D5" FontWeight="SemiBold" /><TextBlock Grid.Column="1" Text="The thing making sound." Foreground="#8294A9" />
+                <TextBlock Grid.Row="1" Text="Receiver" Foreground="#B7C5D5" FontWeight="SemiBold" /><TextBlock Grid.Row="1" Grid.Column="1" Text="A listener or stereo microphone pair." Foreground="#8294A9" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="2" Text="Scene" Foreground="#B7C5D5" FontWeight="SemiBold" /><TextBlock Grid.Row="2" Grid.Column="1" Text="The sounds, space, air, and listeners together." Foreground="#8294A9" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="3" Text="Material" Foreground="#B7C5D5" FontWeight="SemiBold" /><TextBlock Grid.Row="3" Grid.Column="1" Text="How a surface absorbs, scatters, and passes sound." Foreground="#8294A9" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="4" Text="Render" Foreground="#B7C5D5" FontWeight="SemiBold" /><TextBlock Grid.Row="4" Grid.Column="1" Text="Calculate the scene and save its stereo audio." Foreground="#8294A9" TextWrapping="Wrap" />
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Classes="guideCard" BorderBrush="#59472B">
+            <StackPanel Spacing="8">
+              <TextBlock Text="CLEARLY GATED FOR NOW" Foreground="#DDB96E" FontSize="10" FontWeight="SemiBold" LetterSpacing="1" />
+              <ItemsControl x:Name="GatedFeatureList">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="local:StartGuideFeature">
+                    <StackPanel Spacing="2" Margin="0,4">
+                      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <TextBlock Text="{CompiledBinding Name}" Foreground="#E4D9C3" FontWeight="SemiBold" />
+                        <Border Grid.Column="1" Background="#352B1E" CornerRadius="8" Padding="7,2">
+                          <TextBlock Text="{CompiledBinding Status}" Foreground="#DDB96E" FontSize="8" FontWeight="SemiBold" />
+                        </Border>
+                      </Grid>
+                      <TextBlock Text="{CompiledBinding Explanation}" Foreground="#95886F" FontSize="10" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Grid>
+    </ScrollViewer>
+
+    <Border Grid.Row="2" Background="#101721" BorderBrush="#2A3748" BorderThickness="0,1,0,0" Padding="22,13">
+      <Grid ColumnDefinitions="*,Auto" ColumnSpacing="14">
+        <StackPanel Spacing="3" VerticalAlignment="Center">
+          <CheckBox x:Name="ShowOnLaunchCheck" Content="Show this guide when PulseGen opens" IsChecked="True" />
+          <TextBlock Text="Nothing leaves this computer unless you explicitly use Atlas sync or publishing."
+                     Foreground="#71839A" FontSize="10" />
+        </StackPanel>
+        <Button Grid.Column="1" Classes="guidePrimary" Click="OnContinueClicked"
+                AutomationProperties.Name="Continue to the current PulseGen workspace">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Text="Continue with" />
+            <TextBlock x:Name="CurrentSceneText" Text="current scene" FontWeight="SemiBold" />
+            <TextBlock Text="→" />
+          </StackPanel>
+        </Button>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>
