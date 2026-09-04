@@ -369,6 +369,7 @@ public sealed partial class MainWindow : Window
                         SignalFrequencyText.Text = $"{frequency:0.00} Hz";
                         SignalGainText.Text = $"gain {emitter.GainLinear:0.000}";
                         TimelineSourceText.Text = $"{emitter.Name} · source active";
+                        RefreshSampleSourceInspector(emitter);
                         EmitterInspectorPanel.IsVisible = true;
                         UpdatePlayhead(Viewport.TimeSeconds);
                         SelectKeyframe(selectedKeyframeIndex);
@@ -2641,6 +2642,13 @@ public sealed partial class MainWindow : Window
 
     private void OnSignalValueCommitted(object? sender, RoutedEventArgs e)
     {
+        if (initializingControls) return;
+        var selectedSource = SceneSelectionResolver.Emitter(scene, currentSelection);
+        if (selectedSource?.SignalGraph.Nodes.Any(node => node.SamplePlayback is not null) == true)
+        {
+            CommitSampleGain(selectedSource);
+            return;
+        }
         if (!double.TryParse(FrequencyBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var frequency) || !double.IsFinite(frequency) || frequency is < 0.1 or > 96000 ||
             !double.TryParse(GainBox.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var gain) || !double.IsFinite(gain) || gain is < 0 or > 16)
         {

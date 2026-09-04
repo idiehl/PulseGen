@@ -122,7 +122,7 @@
               <TextBlock Text="THE BASIC LOOP" Classes="guideLabel" />
               <Grid ColumnDefinitions="24,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto" RowSpacing="8">
                 <TextBlock Text="1" Foreground="#64D8CB" FontWeight="Bold" />
-                <TextBlock Grid.Column="1" Text="Make a sound from a tone, pulse, noise, additive layers, or procedural wind." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Column="1" Text="Make a sound from basic waveforms or import a recording." Foreground="#D8E3E7" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="1" Text="2" Foreground="#64D8CB" FontWeight="Bold" />
                 <TextBlock Grid.Row="1" Grid.Column="1" Text="Place it in the world and draw how it moves." Foreground="#D8E3E7" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="2" Text="3" Foreground="#64D8CB" FontWeight="Bold" />

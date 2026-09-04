@@ -306,7 +306,8 @@ public static unsafe class NativeSceneRenderer
         var appliedAtmosphereSegments = profile.Quality == RenderQuality.Final
             ? profile.AtmosphereIntegrationSegments
             : 1;
-        var engine = CreateConfiguredEngine(scene, projectDirectory, appliedAtmosphereSegments);
+        var sampleSources = new List<SampleSourceIdentity>();
+        var engine = CreateConfiguredEngine(scene, projectDirectory, appliedAtmosphereSegments, sampleSources);
         try
         {
             var outputPointer = Marshal.StringToCoTaskMemUTF8(Path.GetFullPath(outputDirectory));
@@ -346,7 +347,7 @@ public static unsafe class NativeSceneRenderer
                     receipt.SpeedOfSoundMetresPerSecond,
                     receipt.DeterministicSeed,
                     string.Empty);
-                var receiptPath = WriteRenderReceipt(scene, profile, appliedAtmosphereSegments, outputDirectory, summary);
+                var receiptPath = WriteRenderReceipt(scene, profile, appliedAtmosphereSegments, outputDirectory, summary, sampleSources);
                 return summary with { RenderReceiptPath = receiptPath };
             }
             finally
@@ -366,7 +367,8 @@ public static unsafe class NativeSceneRenderer
         RenderProfile profile,
         int appliedAtmosphereSegments,
         string outputDirectory,
-        RenderSummary summary)
+        RenderSummary summary,
+        IReadOnlyList<SampleSourceIdentity> sampleSources)
     {
         var output = Path.GetFullPath(outputDirectory);
         var prefix = SafePrefix(scene.Name);
@@ -397,7 +399,7 @@ public static unsafe class NativeSceneRenderer
             throw new InvalidDataException("Rendered take enumeration did not match the native engine receipt.");
         }
         var document = new RenderReceiptDocument(
-            8,
+            9,
             EngineVersion,
             AbiVersion,
             AcousticModel,
@@ -433,10 +435,13 @@ public static unsafe class NativeSceneRenderer
             [
                 new("PulseGen.Engine", EngineVersion, "native sample renderer"),
                 new("miniaudio", "0.11.25", "WASAPI device adapter"),
-                new("Assimp", "6.0.5", "bounded memory-only OBJ/glTF/GLB mesh importer")
+                new("Assimp", "6.0.5", "bounded memory-only OBJ/glTF/GLB mesh importer"),
+                .. sampleSources.Count == 0 ? Array.Empty<RenderDependency>() :
+                    [new("libsndfile", "1.2.2", "SHA-256 verified source decoding; no normalization")]
             ],
             [],
-            takeFiles);
+            takeFiles,
+            sampleSources);
         var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web)
         {
             WriteIndented = true,
@@ -466,6 +471,12 @@ public static unsafe class NativeSceneRenderer
 
     private sealed record RenderDependency(string Name, string Version, string Role);
     private sealed record RenderedTakeIdentity(Guid ReceiverRigId, string ReceiverName, string FileName, long SizeBytes, string Sha256);
+    private sealed record SampleSourceIdentity(
+        Guid EmitterId, string AssetSha256, string FileName, long SizeBytes, string? Provenance, string? License,
+        int SampleRate, int Channels, int Frames, double DurationSeconds, string Container,
+        string DecoderVersion, string DecoderBinarySha256, SourceChannelMapping ChannelMapping,
+        int ChannelIndex, double StartTimeSeconds, double OffsetSeconds, bool Loop,
+        string Resampler, string Normalization);
     private sealed record RenderReceiptDocument(
         int ReceiptVersion,
         string EngineVersion,
@@ -502,7 +513,8 @@ public static unsafe class NativeSceneRenderer
         string ManagedRuntime,
         IReadOnlyList<RenderDependency> Dependencies,
         IReadOnlyList<string> ModelPacks,
-        IReadOnlyList<RenderedTakeIdentity> Takes);
+        IReadOnlyList<RenderedTakeIdentity> Takes,
+        IReadOnlyList<SampleSourceIdentity> SampleSources);
 
     public static PreviewSession StartPreview(
         SceneDocument scene,
@@ -605,7 +617,8 @@ public static unsafe class NativeSceneRenderer
     private static nint CreateConfiguredEngine(
         SceneDocument scene,
         string? projectDirectory,
-        int atmosphereIntegrationSegments)
+        int atmosphereIntegrationSegments,
+        List<SampleSourceIdentity>? sampleSources = null)
     {
         var config = new NativeEngineConfig
         {
@@ -623,9 +636,10 @@ public static unsafe class NativeSceneRenderer
             var materialIndexes = ConfigureMaterials(scene, engine);
             ConfigureRoom(scene, engine);
             ConfigureGeometry(scene, engine, materialIndexes, projectDirectory);
+            var sampleCache = new Dictionary<string, DecodedSampleAudio>(StringComparer.OrdinalIgnoreCase);
             foreach (var emitter in scene.Emitters.Where(item => item.Enabled))
             {
-                ConfigureEmitter(scene, engine, emitter);
+                ConfigureEmitter(scene, engine, emitter, projectDirectory, sampleCache, sampleSources);
             }
             foreach (var receiver in scene.ReceiverRigs.Where(item => item.Enabled))
             {
@@ -1209,8 +1223,15 @@ public static unsafe class NativeSceneRenderer
         Check(Native.pg_engine_set_room(engine, &descriptor), engine, "set room");
     }
 
-    private static void ConfigureEmitter(SceneDocument scene, nint engine, Emitter emitter)
+    private static void ConfigureEmitter(
+        SceneDocument scene, nint engine, Emitter emitter, string? projectDirectory,
+        Dictionary<string, DecodedSampleAudio> sampleCache, List<SampleSourceIdentity>? sampleSources)
     {
+        if (emitter.SignalGraph.Nodes.FirstOrDefault(item => item.Kind == SignalNodeKind.Sample) is { } sampleNode)
+        {
+            ConfigureSampleEmitter(scene, engine, emitter, sampleNode, projectDirectory, sampleCache, sampleSources);
+            return;
+        }
         var oscillator = emitter.SignalGraph.Nodes.FirstOrDefault(item => item.Kind is SignalNodeKind.Oscillator or SignalNodeKind.Noise or SignalNodeKind.Turbulence)
             ?? throw new NotSupportedException($"Emitter '{emitter.Name}' does not contain a primitive source supported by the alpha engine.");
         var path = scene.MotionPaths.FirstOrDefault(item => item.Id == emitter.MotionPathId)
@@ -1258,6 +1279,85 @@ public static unsafe class NativeSceneRenderer
         {
             Marshal.FreeCoTaskMem(namePointer);
         }
+    }
+
+    private static void ConfigureSampleEmitter(
+        SceneDocument scene, nint engine, Emitter emitter, SignalNode node, string? projectDirectory,
+        Dictionary<string, DecodedSampleAudio> sampleCache, List<SampleSourceIdentity>? sampleSources)
+    {
+        if (string.IsNullOrWhiteSpace(projectDirectory))
+            throw new InvalidOperationException("Save this project before playing its imported samples.");
+        var playback = node.SamplePlayback ?? throw new InvalidDataException("Sample source is missing playback settings.");
+        var asset = scene.Assets.Single(item => string.Equals(item.Sha256, playback.AssetSha256, StringComparison.OrdinalIgnoreCase));
+        if (!sampleCache.TryGetValue(asset.Sha256, out var audio))
+        {
+            audio = SampleAudioReader.ReadVerified(projectDirectory, asset);
+            if (sampleCache.Values.Sum(item => (long)item.Samples.Length) + audio.Samples.Length > SampleAudioReader.MaximumDecodedSamples)
+                throw new InvalidDataException("The active scene exceeds the 64 MiB source-audio cache limit. Shorten or disable some sample sources.");
+            sampleCache.Add(asset.Sha256, audio);
+        }
+        var isBed = emitter.ChannelMapping == SourceChannelMapping.NonSpatialStereoBed;
+        float[] samples;
+        var channels = 1;
+        switch (emitter.ChannelMapping)
+        {
+            case SourceChannelMapping.MonoPoint when audio.Channels == 1:
+                samples = audio.Samples;
+                break;
+            case SourceChannelMapping.NonSpatialStereoBed when audio.Channels == 2:
+                samples = audio.Samples;
+                channels = 2;
+                break;
+            case SourceChannelMapping.ExplicitMonoFoldDown when audio.Channels == 2:
+                samples = new float[audio.Frames];
+                for (var index = 0; index < samples.Length; index++)
+                    samples[index] = (float)(0.5 * audio.Samples[index * 2] + 0.5 * audio.Samples[index * 2 + 1]);
+                break;
+            case SourceChannelMapping.LinkedDualEmitters when audio.Channels == 2 && playback.ChannelIndex is 0 or 1:
+                samples = new float[audio.Frames];
+                for (var index = 0; index < samples.Length; index++)
+                    samples[index] = audio.Samples[index * 2 + playback.ChannelIndex];
+                break;
+            default:
+                throw new InvalidDataException($"'{emitter.Name}' has an explicit channel mapping incompatible with its source audio.");
+        }
+        var path = scene.MotionPaths.FirstOrDefault(item => item.Id == emitter.MotionPathId);
+        if (!isBed && path is null) throw new InvalidDataException("Spatial sample sources require a motion path.");
+        var frames = path?.Keyframes.Select(item => new NativeMotionKeyframe
+        {
+            TimeSeconds = item.TimeSeconds,
+            PositionMetres = ToNative(item.PositionMetres)
+        }).ToArray() ?? [];
+        var namePointer = Marshal.StringToCoTaskMemUTF8(emitter.Name);
+        try
+        {
+            fixed (float* samplePointer = samples)
+            fixed (NativeMotionKeyframe* framePointer = frames)
+            {
+                var descriptor = new NativeSampleEmitter
+                {
+                    Size = (uint)sizeof(NativeSampleEmitter), Version = AbiVersion,
+                    NameUtf8 = namePointer, InterleavedSamples = samplePointer,
+                    FrameCount = (ulong)audio.Frames, SampleRate = (uint)audio.SampleRate, Channels = (uint)channels,
+                    GainLinear = emitter.GainLinear, MinDistanceMetres = emitter.MinDistanceMetres,
+                    StartTimeSeconds = playback.StartTimeSeconds, OffsetSeconds = playback.OffsetSeconds,
+                    Loop = playback.Loop ? 1U : 0U, NonSpatial = isBed ? 1U : 0U,
+                    MotionPathKind = path is null ? 0 : MapPath(path.Kind), Keyframes = framePointer,
+                    KeyframeCount = (uint)frames.Length, Enabled = 1
+                };
+                Check(Native.pg_engine_add_sample_emitter(engine, &descriptor, out _), engine, "add sample emitter");
+            }
+        }
+        finally { Marshal.FreeCoTaskMem(namePointer); }
+        sampleSources?.Add(new(
+            emitter.Id, asset.Sha256, asset.FileName, asset.SizeBytes, asset.Provenance, asset.License,
+            audio.SampleRate, audio.Channels, audio.Frames, audio.DurationSeconds, audio.Container,
+            audio.DecoderVersion, SampleAudioReader.ExpectedBinarySha256, emitter.ChannelMapping,
+            playback.ChannelIndex, playback.StartTimeSeconds, playback.OffsetSeconds, playback.Loop,
+            isBed
+                ? "32-tap Blackman-windowed sinc; declared source-rate antialiasing; stereo bed bypasses acoustics"
+                : "32-tap Blackman-windowed sinc; conservative scene path-speed Doppler cutoff bounded at 20x compression; time-varying wind approximate; material and air gains use a 1kHz reference",
+            "none"));
     }
 
     private static int MapWaveform(WaveformKind waveform) => waveform switch
@@ -1494,6 +1594,7 @@ public static unsafe class NativeSceneRenderer
             if (!NativeLibrary.TryGetExport(candidate, "pg_get_abi_version", out var abiExport) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_engine_add_sample_emitter", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_triangles", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_material_regions", out _) ||
@@ -1556,6 +1657,7 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeMotionKeyframe { public double TimeSeconds; public NativeVector PositionMetres; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeAdditivePartial { public double FrequencyRatio, Amplitude, PhaseRadians; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeSignalEmitter { public uint Size, Version; public nint NameUtf8; public int Waveform; public double FrequencyHz, Amplitude, PhaseRadians, PulseWidth, GainLinear, MinDistanceMetres, AttackSeconds, ReleaseSeconds, NonlinearDrive; public NativeAdditivePartial* AdditivePartials; public uint AdditivePartialCount; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, NoiseSeed, Enabled, Reserved; }
+    [StructLayout(LayoutKind.Sequential)] private struct NativeSampleEmitter { public uint Size, Version; public nint NameUtf8; public float* InterleavedSamples; public ulong FrameCount; public uint SampleRate, Channels; public double GainLinear, MinDistanceMetres, StartTimeSeconds, OffsetSeconds; public uint Loop, NonSpatial; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, Enabled; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiver { public uint Size, Version; public nint NameUtf8; public int Kind; public NativeVector CentreMetres; public double YawDegrees, SpacingMetres, HeadRadiusMetres, MicrophoneAngleDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Enabled, Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverCapsule { public uint Size, Version; public NativeVector RelativePositionMetres, RelativeRotationDegrees; public int PolarPattern; public double SensitivityDb, SelfNoiseDbSpl; public uint Reserved; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeReceiverMotion { public uint Size, Version, ReceiverIndex; public int MotionPathKind; public NativeMotionKeyframe* Keyframes; public uint KeyframeCount, Reserved; }
@@ -1580,6 +1682,7 @@ public static unsafe class NativeSceneRenderer
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_copy_mesh_material_regions(nint engine, uint meshIndex, NativeMeshMaterialRegion* regions, uint regionCapacity, out uint regionCount);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_query_reflection_paths(nint engine, NativeReflectionPathQuery* query, NativeReflectionPath* paths, uint pathCapacity, out uint pathCount);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_signal_emitter(nint engine, NativeSignalEmitter* emitter, out uint index);
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_sample_emitter(nint engine, NativeSampleEmitter* emitter, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_add_receiver(nint engine, NativeReceiver* receiver, out uint index);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_capsules(nint engine, uint receiverIndex, NativeReceiverCapsule* leftCapsule, NativeReceiverCapsule* rightCapsule);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_set_receiver_motion(nint engine, NativeReceiverMotion* motion);

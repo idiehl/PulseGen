@@ -58,12 +58,9 @@ public static class SceneValidator
             }
 
             ValidateSignalGraph(emitter, issues);
-            if (emitter.ChannelMapping == SourceChannelMapping.LinkedDualEmitters &&
-                (emitter.LinkedRightEmitterId is null || !scene.Emitters.Any(candidate => candidate.Id == emitter.LinkedRightEmitterId)))
-            {
-                issues.Add(new($"emitters/{emitter.Id}/linkedRightEmitterId", "Linked dual-emitter mapping requires a valid right emitter."));
-            }
+            ValidateSamplePlayback(scene, emitter, issues);
         }
+        ValidateSampleCacheBudget(scene, issues);
 
         foreach (var path in scene.MotionPaths)
         {
@@ -403,6 +400,155 @@ public static class SceneValidator
         if (!emitter.SignalGraph.Nodes.Any(node => node.Kind == SignalNodeKind.Output))
         {
             issues.Add(new($"emitters/{emitter.Id}/signalGraph", "A signal graph requires an output node."));
+        }
+    }
+
+    private static void ValidateSamplePlayback(SceneDocument scene, Emitter emitter, List<ValidationIssue> issues)
+    {
+        var emitterPath = $"emitters/{emitter.Id}";
+        var graph = emitter.SignalGraph;
+        var samples = graph.Nodes.Where(node => node.Kind == SignalNodeKind.Sample).ToArray();
+        foreach (var node in graph.Nodes.Where(node => node.Kind != SignalNodeKind.Sample &&
+                     (node.SamplePlayback is not null || node.Waveform == WaveformKind.Sample)))
+        {
+            issues.Add(new($"{emitterPath}/signalGraph/nodes/{node.Id}/samplePlayback",
+                "Sample playback belongs on a Sample node, not a primitive or processing node."));
+        }
+
+        if (!Enum.IsDefined(emitter.ChannelMapping))
+        {
+            issues.Add(new($"{emitterPath}/channelMapping", "Unknown source channel mapping."));
+        }
+        if (samples.Length == 0)
+        {
+            if (emitter.ChannelMapping != SourceChannelMapping.MonoPoint || emitter.LinkedRightEmitterId is not null)
+            {
+                issues.Add(new($"{emitterPath}/channelMapping", "Primitive sources use mono point mapping without a linked sample emitter."));
+            }
+            return;
+        }
+
+        var outputs = graph.Nodes.Where(node => node.Kind == SignalNodeKind.Output).ToArray();
+        if (samples.Length != 1 || outputs.Length != 1 || graph.Nodes.Count != 2 || graph.Connections.Count != 1 ||
+            graph.Connections[0].FromNodeId != samples[0].Id || graph.Connections[0].ToNodeId != outputs[0].Id ||
+            graph.Connections[0].FromPort != "out" || graph.Connections[0].ToPort != "in")
+        {
+            issues.Add(new($"{emitterPath}/signalGraph",
+                "A sampled source requires one Sample node connected directly from out to the Output node's in port; mixed or disconnected graphs are not supported."));
+        }
+
+        foreach (var node in samples)
+        {
+            var path = $"{emitterPath}/signalGraph/nodes/{node.Id}/samplePlayback";
+            if (node.Waveform is not null and not WaveformKind.Sample)
+            {
+                issues.Add(new($"{emitterPath}/signalGraph/nodes/{node.Id}/waveform", "A Sample node cannot declare a primitive waveform."));
+            }
+            if (node.SamplePlayback is not { } playback)
+            {
+                issues.Add(new(path, "A Sample node requires typed sample playback settings."));
+                continue;
+            }
+            if (!double.IsFinite(playback.StartTimeSeconds) || playback.StartTimeSeconds < 0)
+            {
+                issues.Add(new($"{path}/startTimeSeconds", "Sample start time must be finite and non-negative."));
+            }
+            if (!double.IsFinite(playback.OffsetSeconds) || playback.OffsetSeconds < 0)
+            {
+                issues.Add(new($"{path}/offsetSeconds", "Sample offset must be finite and non-negative."));
+            }
+            if (playback.ChannelIndex is < 0 or > 1 ||
+                (emitter.ChannelMapping != SourceChannelMapping.LinkedDualEmitters && playback.ChannelIndex != 0))
+            {
+                issues.Add(new($"{path}/channelIndex", "Channel selection is 0 except for a linked stereo pair, which explicitly selects channels 0 and 1."));
+            }
+
+            var asset = scene.Assets.FirstOrDefault(candidate =>
+                string.Equals(candidate.Sha256, playback.AssetSha256, StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrWhiteSpace(playback.AssetSha256) || playback.AssetSha256.Length != 64 ||
+                !playback.AssetSha256.All(Uri.IsHexDigit) || asset is null || asset.Kind != AssetKind.Audio)
+            {
+                issues.Add(new($"{path}/assetSha256", "Sample playback must reference a declared Audio asset by its SHA-256 identity."));
+            }
+            else
+            {
+                if (asset.SampleRate is null or < 8000 or > 192000 || asset.Channels is not (1 or 2) ||
+                    asset.DurationSeconds is not { } duration || !double.IsFinite(duration) || duration <= 0)
+                {
+                    issues.Add(new($"{path}/assetSha256", "The audio asset must declare its actual sample rate in 8000..192000 Hz, positive duration, and one or two channels."));
+                }
+                else if (duration * asset.SampleRate.Value * asset.Channels.Value > 16_777_216 + 0.5)
+                {
+                    issues.Add(new($"{path}/assetSha256", "Sample playback is limited to 16,777,216 decoded samples per asset (64 MiB of float audio)."));
+                }
+                if (asset.DurationSeconds is { } assetDuration && playback.OffsetSeconds >= assetDuration)
+                {
+                    issues.Add(new($"{path}/offsetSeconds", "Sample offset must be earlier than the end of the source audio."));
+                }
+                if ((emitter.ChannelMapping == SourceChannelMapping.MonoPoint && asset.Channels != 1) ||
+                    (emitter.ChannelMapping is SourceChannelMapping.LinkedDualEmitters or SourceChannelMapping.NonSpatialStereoBed or SourceChannelMapping.ExplicitMonoFoldDown && asset.Channels != 2))
+                {
+                    issues.Add(new($"{emitterPath}/channelMapping", "Mono point mapping requires mono audio; stereo audio requires an explicit stereo bed, linked pair, or mono fold-down mapping."));
+                }
+            }
+        }
+
+        if (emitter.ChannelMapping == SourceChannelMapping.LinkedDualEmitters)
+        {
+            var partner = scene.Emitters.FirstOrDefault(candidate => candidate.Id == emitter.LinkedRightEmitterId);
+            if (partner is null || partner.Id == emitter.Id || partner.ChannelMapping != SourceChannelMapping.LinkedDualEmitters ||
+                partner.LinkedRightEmitterId != emitter.Id)
+            {
+                issues.Add(new($"{emitterPath}/linkedRightEmitterId", "Linked stereo playback requires a distinct counterpart with a reciprocal emitter link and linked-pair mapping."));
+                return;
+            }
+            if (emitter.MotionPathId is null || partner.MotionPathId is null || emitter.MotionPathId == partner.MotionPathId)
+            {
+                issues.Add(new($"{emitterPath}/motionPathId", "Each linked stereo emitter requires its own editable motion path."));
+            }
+            var partnerSamples = partner.SignalGraph.Nodes.Where(node => node.Kind == SignalNodeKind.Sample).ToArray();
+            if (samples.Length != 1 || samples[0].SamplePlayback is not { } left ||
+                partnerSamples.Length != 1 || partnerSamples[0].SamplePlayback is not { } right ||
+                !string.Equals(left.AssetSha256, right.AssetSha256, StringComparison.OrdinalIgnoreCase) ||
+                left.StartTimeSeconds != right.StartTimeSeconds || left.OffsetSeconds != right.OffsetSeconds || left.Loop != right.Loop ||
+                left.ChannelIndex is < 0 or > 1 || right.ChannelIndex != 1 - left.ChannelIndex)
+            {
+                issues.Add(new($"{emitterPath}/linkedRightEmitterId", "Linked stereo emitters must select opposite channels of the same audio asset with matching start time, source offset, and looping."));
+            }
+        }
+        else if (emitter.LinkedRightEmitterId is not null)
+        {
+            issues.Add(new($"{emitterPath}/linkedRightEmitterId", "Only linked stereo emitters may declare a counterpart."));
+        }
+    }
+
+    private static void ValidateSampleCacheBudget(SceneDocument scene, List<ValidationIssue> issues)
+    {
+        var referencedHashes = scene.Emitters.Where(emitter => emitter.Enabled)
+            .SelectMany(emitter => emitter.SignalGraph.Nodes)
+            .Where(node => node.Kind == SignalNodeKind.Sample && node.SamplePlayback is not null)
+            .Select(node => node.SamplePlayback!.AssetSha256)
+            .Where(hash => !string.IsNullOrWhiteSpace(hash))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var countedHashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        double decodedSamples = 0;
+        foreach (var asset in scene.Assets)
+        {
+            if (!referencedHashes.Contains(asset.Sha256) || !countedHashes.Add(asset.Sha256) ||
+                asset.Kind != AssetKind.Audio || asset.Channels is not (1 or 2) ||
+                asset.SampleRate is null or < 8000 or > 192000 ||
+                asset.DurationSeconds is not { } duration || !double.IsFinite(duration) || duration <= 0)
+            {
+                continue;
+            }
+            // Duration metadata describes an integral number of source frames; round away
+            // representation error before counting interleaved samples in the decoder cache.
+            decodedSamples += Math.Round(duration * asset.SampleRate.Value) * asset.Channels.Value;
+            if (decodedSamples > 16_777_216)
+            {
+                issues.Add(new("emitters/sampleCache", "Enabled sample sources exceed the shared 64 MiB decoded-audio cache. Disable some sources or use shorter recordings; linked channels sharing one asset count once."));
+                return;
+            }
         }
     }
 

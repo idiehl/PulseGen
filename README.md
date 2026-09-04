@@ -15,6 +15,28 @@ commands and reads bounded telemetry.
   preview through checksum-pinned miniaudio 0.11.25.
 - Sine, triangle, band-limited saw/square/pulse, deterministic white/pink/brown
   noise, impulses, additive banks, and procedural turbulence sources.
+- Audio-file sources from mono/stereo WAV, AIFF, FLAC, MP3, Ogg Vorbis, and
+  Opus. The editor stages inspection outside the project, then copies the original
+  bytes into its SHA-256 asset store only after channel mapping is accepted.
+  Mono recordings become point sources; stereo recordings require independent
+  linked left/right emitters, a non-spatial stereo background, or an explicit
+  `(L + R) / 2` mono mix. Each linked channel has its own path, gain, and mute
+  control; start time, file offset, and looping are edited together. File offset
+  skips the beginning on the first pass; looping repeats the whole recording.
+  Sources hold their last path position after motion ends while playback continues.
+  The reader preserves levels without normalization, rejects incomplete or
+  non-finite audio, verifies source size/hash/metadata at playback, and supports
+  8–192 kHz source rates with a 64 MiB active unique decoded-source budget.
+  Native copies and 32-tap Blackman-windowed sinc sampling keep decoding and file
+  access outside the audio callback. Motion determines retarded source time;
+  conservative path-speed low-pass filtering controls Doppler aliasing, bounded
+  at 20x compression near sonic speeds. Rapidly varying wind remains approximate.
+  **Current acoustic limitation:** sampled spatial sources use a 1 kHz reference
+  for scalar air/material gains; full broadband surface coloration remains future
+  work. Stereo backgrounds bypass source/receiver acoustics. Render receipt v9
+  records source identity, decoded dimensions, channel mapping, timing, decoder,
+  and resampling assumptions. The take importer accepts existing v8 and new v9
+  receipts. Source PCM must stay within ±64 to protect float acoustic state.
 - Retarded-time propagation, distance loss, temperature/humidity-dependent
   sound speed, pressure-aware air absorption, altitude layers, and transformed
   bounded wind/turbulence zones. Preview samples the field once per propagation
@@ -231,7 +253,7 @@ claim an installed, automatically updating, or publicly supported Windows
 release. Verify either the extracted directory or the final ZIP independently:
 
 ```powershell
-./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.17-win-x64.zip
+./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.18-win-x64.zip
 ```
 
 On first launch, a plain-language start guide appears after protected crash

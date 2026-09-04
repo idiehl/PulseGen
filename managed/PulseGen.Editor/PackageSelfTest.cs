@@ -134,6 +134,40 @@ internal static class PackageSelfTest
             return Task.FromResult($"{summary.FilesWritten} stereo takes · {summary.FramesRendered} frames · 48 kHz float");
         });
 
+        await CheckAsync("sample-source-render", async () =>
+        {
+            if (flyby is null) throw new InvalidOperationException("The flyby starter is required.");
+            var projectDirectory = Path.Combine(options.OutputDirectory, "sample-source.pulseproj");
+            await ProjectStore.SaveAsync(flyby, projectDirectory);
+            var sourcePath = Path.Combine(options.OutputDirectory, "source-left-only.wav");
+            var samples = new float[2400];
+            for (var frame = 0; frame < samples.Length / 2; frame++) samples[frame * 2] = 0.25f;
+            FloatWaveFile.WriteAtomic(sourcePath, new FloatWaveBuffer(48000, 2, samples));
+            var importedAsset = await ProjectStore.ImportAssetAsync(projectDirectory, sourcePath, AssetKind.Audio, "audio/wav");
+            var decoded = SampleAudioReader.Read(sourcePath);
+            var asset = importedAsset with { Channels = decoded.Channels, SampleRate = decoded.SampleRate, DurationSeconds = decoded.DurationSeconds };
+            var imported = SampleSourceAuthoring.Add(flyby, asset, new(SourceChannelMapping.NonSpatialStereoBed, true));
+            var sampleScene = imported.Scene with { Timeline = imported.Scene.Timeline with { DurationSeconds = decoded.DurationSeconds } };
+            await ProjectStore.SaveAsync(sampleScene, projectDirectory);
+            var loaded = await ProjectStore.LoadAsync(projectDirectory);
+            var output = Path.Combine(projectDirectory, "renders");
+            var summary = NativeSceneRenderer.Render(loaded, output, projectDirectory: projectDirectory);
+            var takes = Directory.GetFiles(output, "*.wav");
+            if (summary.FilesWritten != 2 || summary.FramesRendered != 1200 || takes.Length != 2)
+                throw new InvalidDataException("Sample-source render did not produce the expected isolated takes.");
+            foreach (var take in takes)
+            {
+                var audio = FloatWaveFile.Read(take);
+                for (var frame = 32; frame < 1168; frame++)
+                    if (Math.Abs(audio.InterleavedSamples[frame * 2] - 0.25f) > 1e-5 || audio.InterleavedSamples[frame * 2 + 1] != 0)
+                        throw new InvalidDataException("Stereo background changed channel order, gain, or isolation.");
+            }
+            var captured = await CaptureTakeImporter.ImportAsync(loaded, projectDirectory, summary.RenderReceiptPath);
+            if (captured.ImportedTakeCount != 2)
+                throw new InvalidDataException("Sample-source receipt could not be imported into editable receiver takes.");
+            return "Copied recording reopened, rendered, and imported into both editable receiver takes; left-only channel preserved";
+        });
+
         var passed = checks.All(check => check.Passed);
         var receipt = new
         {

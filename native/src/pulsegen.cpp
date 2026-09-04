@@ -31,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.17";
+constexpr std::string_view engine_version = "0.1.0-alpha.18";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -341,6 +341,14 @@ struct emitter_state {
     std::uint64_t noise_seed{ 1U };
     std::vector<additive_partial_state> additive_partials;
     std::vector<keyframe_state> keyframes;
+    std::vector<float> samples;
+    std::uint32_t source_sample_rate{};
+    std::uint32_t source_channels{};
+    double source_start_time{};
+    double source_offset_seconds{};
+    bool source_loop{};
+    bool non_spatial{};
+    double sample_bandwidth_scale{ 1.0 };
     bool enabled{ true };
 };
 
@@ -1417,6 +1425,65 @@ vec3 sample_motion(const receiver_state& receiver, double time_seconds) noexcept
     return sample_motion_path(receiver.motion_path_kind, receiver.keyframes, time_seconds, receiver.centre);
 }
 
+double motion_speed_bound(pg_motion_path_kind kind, const std::vector<keyframe_state>& keys) noexcept
+{
+    double maximum = 0.0;
+    for (std::size_t index = 1U; index < keys.size(); ++index) {
+        const double duration = keys[index].time_seconds - keys[index - 1U].time_seconds;
+        const vec3 p1 = keys[index - 1U].position;
+        const vec3 p2 = keys[index].position;
+        if (kind == PG_PATH_CATMULL_ROM || kind == PG_PATH_CUBIC_BEZIER_APPROXIMATION) {
+            const vec3 p0 = index >= 2U ? keys[index - 2U].position : p1;
+            const vec3 p3 = index + 1U < keys.size() ? keys[index + 1U].position : p2;
+            const vec3 b = (p2 - p0) * 0.5;
+            const vec3 c = p0 - (p1 * 2.5) + (p2 * 2.0) - (p3 * 0.5);
+            const vec3 d = ((p1 * 3.0) - p0 - (p2 * 3.0) + p3) * 0.5;
+            // The quadratic Bezier derivative lies in its control hull.
+            maximum = std::max(maximum, std::max({ length(b), length(b + c), length(b + (c * 2.0) + (d * 3.0)) }) / duration);
+        } else {
+            maximum = std::max(maximum, length(p2 - p1) / duration);
+        }
+    }
+    return maximum;
+}
+
+void prepare_sample_bandwidths(pg_engine& engine) noexcept
+{
+    if (std::none_of(engine.emitters.begin(), engine.emitters.end(), [](const emitter_state& emitter) {
+        return !emitter.samples.empty() && !emitter.non_spatial;
+    })) {
+        return;
+    }
+    double minimum_speed = speed_of_sound(engine.atmosphere);
+    for (const auto& layer : engine.atmosphere.layers) {
+        minimum_speed = std::min(minimum_speed, speed_of_sound(layer.temperature_celsius, layer.relative_humidity_percent));
+    }
+    const auto wind_bound = [](vec3 wind, double turbulence) noexcept {
+        const double speed = length(wind);
+        return speed + (std::sqrt(3.0) * std::max(speed, 1.0) * turbulence * 0.12);
+    };
+    double maximum_wind = wind_bound(engine.atmosphere.wind, engine.atmosphere.turbulence);
+    for (const auto& zone : engine.atmosphere.wind_zones) {
+        maximum_wind += wind_bound(zone.velocity, zone.turbulence);
+    }
+    minimum_speed = std::max(minimum_speed - maximum_wind, minimum_effective_sound_speed);
+    double receiver_speed = 0.0;
+    for (const auto& receiver : engine.receivers) {
+        if (receiver.enabled) {
+            receiver_speed = std::max(receiver_speed, motion_speed_bound(receiver.motion_path_kind, receiver.keyframes));
+        }
+    }
+    for (auto& emitter : engine.emitters) {
+        if (!emitter.samples.empty() && !emitter.non_spatial) {
+            const double source_speed = motion_speed_bound(emitter.motion_path_kind, emitter.keyframes);
+            // Conservative all-path Doppler bandwidth, shared by direct and
+            // reflected routes. Near-sonic denominators are bounded at 5% of c.
+            emitter.sample_bandwidth_scale = std::clamp(
+                (minimum_speed - source_speed) / (minimum_speed + receiver_speed), 0.05, 1.0);
+        }
+    }
+}
+
 double fractional(double value) noexcept
 {
     return value - std::floor(value);
@@ -1462,8 +1529,59 @@ double smooth_hashed_noise(std::uint64_t seed, double position) noexcept
     return std::lerp(hashed_noise(seed, left_index), hashed_noise(seed, left_index + 1), smooth_amount);
 }
 
+double sample_pcm(const emitter_state& emitter, double time, std::uint32_t output_rate, std::uint32_t channel) noexcept
+{
+    if (time < emitter.source_start_time || !std::isfinite(time)) {
+        return 0.0;
+    }
+    const auto frames = static_cast<std::int64_t>(emitter.samples.size() / emitter.source_channels);
+    const double duration = static_cast<double>(frames) / emitter.source_sample_rate;
+    double source_time = time - emitter.source_start_time;
+    if (emitter.source_loop) {
+        // Reducing before multiplication also keeps a long-running loop within
+        // the bounded integer-index domain of the copied PCM buffer.
+        source_time = std::fmod(std::fmod(source_time, duration) + emitter.source_offset_seconds, duration);
+    } else {
+        source_time += emitter.source_offset_seconds;
+        if (source_time >= duration || !std::isfinite(source_time)) {
+            return 0.0;
+        }
+    }
+    const double position = source_time * emitter.source_sample_rate;
+    const auto centre = static_cast<std::int64_t>(std::floor(position));
+    const double fraction = position - static_cast<double>(centre);
+    const double cutoff = std::min(1.0, static_cast<double>(output_rate) * emitter.sample_bandwidth_scale / emitter.source_sample_rate);
+    const auto source_value = [&](std::int64_t frame) noexcept {
+        if (emitter.source_loop) {
+            frame = ((frame % frames) + frames) % frames;
+        } else if (frame < 0 || frame >= frames) {
+            return 0.0;
+        }
+        return static_cast<double>(emitter.samples[static_cast<std::size_t>(frame) * emitter.source_channels + channel]);
+    };
+    // Preserve exactly aligned PCM rather than rounding through trigonometric
+    // kernels. A small tolerance only absorbs double scene-time roundoff.
+    if (cutoff == 1.0 && (fraction < 1.0e-8 || fraction > 1.0 - 1.0e-8)) {
+        return source_value(centre + (fraction > 0.5 ? 1 : 0));
+    }
+    double value = 0.0;
+    double weight_sum = 0.0;
+    for (int tap = -15; tap <= 16; ++tap) {
+        const double distance = static_cast<double>(tap) - fraction;
+        const double phase = std::numbers::pi * distance;
+        const double window = 0.42 + (0.5 * std::cos(phase / 16.0)) + (0.08 * std::cos(phase / 8.0));
+        const double weight = window * (std::abs(distance) < 1.0e-12 ? cutoff : std::sin(phase * cutoff) / phase);
+        value += source_value(centre + tap) * weight;
+        weight_sum += weight;
+    }
+    return value / weight_sum;
+}
+
 double primitive_sample(const emitter_state& emitter, double emission_time, std::uint32_t sample_rate) noexcept
 {
+    if (!emitter.samples.empty()) {
+        return sample_pcm(emitter, emission_time, sample_rate, 0U);
+    }
     const double start_time = emitter.keyframes.empty() ? 0.0 : emitter.keyframes.front().time_seconds;
     const double end_time = emitter.keyframes.empty() ? std::numeric_limits<double>::infinity() : emitter.keyframes.back().time_seconds;
     if (emission_time < start_time || emission_time > end_time) {
@@ -1824,7 +1942,7 @@ void update_mesh_reflection_caches(
             const mesh_geometry_state& mesh = engine.mesh_geometries[mesh_index];
             mesh_reflection_cache& cache = engine.mesh_reflection_caches[(emitter_index * mesh_count) + mesh_index];
             cache.count = 0U;
-            if (!emitter.enabled || !mesh.enabled || !mesh.reflects) {
+            if (!emitter.enabled || emitter.non_spatial || !mesh.enabled || !mesh.reflects) {
                 continue;
             }
             std::array<double, maximum_cached_mesh_reflection_paths> distances{};
@@ -1890,7 +2008,7 @@ void update_mesh_reflection_caches(
         mesh_second_order_reflection_cache& second_order_cache =
             engine.mesh_second_order_reflection_caches[emitter_index];
         second_order_cache.count = 0U;
-        if (!include_second_order || !emitter.enabled) {
+        if (!include_second_order || !emitter.enabled || emitter.non_spatial) {
             continue;
         }
         std::array<mesh_patch_reference, maximum_second_order_candidate_patches> candidates{};
@@ -2774,9 +2892,16 @@ std::pair<float, float> render_frame(
     double diffuse_input_left = 0.0;
     double diffuse_input_right = 0.0;
     double source_lateral = 0.0;
+    double bed_left = 0.0;
+    double bed_right = 0.0;
     for (std::size_t emitter_index = 0U; emitter_index < engine.emitters.size(); ++emitter_index) {
         const emitter_state& emitter = engine.emitters[emitter_index];
         if (!emitter.enabled) {
+            continue;
+        }
+        if (emitter.non_spatial) {
+            bed_left += sample_pcm(emitter, receive_time, sample_rate, 0U) * emitter.gain_linear;
+            bed_right += sample_pcm(emitter, receive_time, sample_rate, 1U) * emitter.gain_linear;
             continue;
         }
 
@@ -3123,6 +3248,8 @@ std::pair<float, float> render_frame(
 
     left_total *= explicit_microphones ? receiver.left_capsule.sensitivity_linear : receiver.sensitivity_linear;
     right_total *= explicit_microphones ? receiver.right_capsule.sensitivity_linear : receiver.sensitivity_linear;
+    left_total += bed_left;
+    right_total += bed_right;
     return {
         static_cast<float>(std::clamp(left_total, -4.0, 4.0)),
         static_cast<float>(std::clamp(right_total, -4.0, 4.0))
@@ -3220,6 +3347,7 @@ void device_notification_callback(const ma_device_notification* notification) no
 
 pg_status initialize_playback_device(pg_engine* engine)
 {
+    prepare_sample_bandwidths(*engine);
     ma_device_config device_config = ma_device_config_init(ma_device_type_playback);
     device_config.sampleRate = engine->device_sample_rate;
     device_config.periodSizeInFrames = engine->device_period_frames;
@@ -4130,7 +4258,7 @@ pg_status PG_CALL pg_engine_query_reflection_paths(
     const std::size_t mesh_count = engine->mesh_geometries.size();
     for (std::size_t emitter_index = 0U; emitter_index < engine->emitters.size(); ++emitter_index) {
         const emitter_state& emitter = engine->emitters[emitter_index];
-        if (!emitter.enabled) {
+        if (!emitter.enabled || emitter.non_spatial) {
             continue;
         }
         for (std::size_t mesh_index = 0U; mesh_index < mesh_count; ++mesh_index) {
@@ -4367,6 +4495,85 @@ pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signa
     return PG_STATUS_OK;
 }
 
+pg_status PG_CALL pg_engine_add_sample_emitter(pg_engine* engine, const pg_sample_emitter_desc* emitter, uint32_t* out_index)
+{
+    if (engine == nullptr || emitter == nullptr) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(emitter)) {
+        return fail(engine, PG_STATUS_ABI_MISMATCH, "Sample emitter structure version or size is incompatible.");
+    }
+    if (require_stopped_device(engine, "Adding a sample emitter") != PG_STATUS_OK) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (engine->emitters.size() >= engine->config.max_emitters) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Emitter capacity exceeded.");
+    }
+    if (emitter->channels < 1U || emitter->channels > 2U || emitter->non_spatial > 1U ||
+        (emitter->channels == 2U) != (emitter->non_spatial != 0U) || emitter->loop > 1U || emitter->enabled > 1U ||
+        emitter->interleaved_samples == nullptr || emitter->frame_count == 0U ||
+        emitter->sample_rate < 8000U || emitter->sample_rate > maximum_supported_sample_rate) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Samples require explicit spatial mono or a non-spatial stereo bed at 8-192 kHz.");
+    }
+    if (emitter->frame_count > PG_MAX_EMITTER_SAMPLES / emitter->channels) {
+        return fail(engine, PG_STATUS_CAPACITY_EXCEEDED, "Copied emitter PCM exceeds the 64 MiB decoded-sample limit.");
+    }
+    const double duration = static_cast<double>(emitter->frame_count) / emitter->sample_rate;
+    if (!std::isfinite(emitter->gain_linear) || emitter->gain_linear < 0.0 || emitter->gain_linear > 64.0 ||
+        !std::isfinite(emitter->min_distance_metres) || emitter->min_distance_metres < 1.0e-6 || emitter->min_distance_metres > 1.0e9 ||
+        !std::isfinite(emitter->start_time_seconds) || emitter->start_time_seconds < 0.0 ||
+        !std::isfinite(emitter->offset_seconds) || emitter->offset_seconds < 0.0 || emitter->offset_seconds >= duration ||
+        emitter->motion_path_kind < PG_PATH_LINEAR || emitter->motion_path_kind > PG_PATH_RECORDED_GESTURE ||
+        emitter->keyframe_count > engine->config.max_keyframes_per_path ||
+        (emitter->keyframe_count > 0U && emitter->keyframes == nullptr) ||
+        (emitter->keyframe_count == 1U) || (!emitter->non_spatial && emitter->keyframe_count < 2U)) {
+        return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Sample gain, timing, source offset, minimum distance, or motion path is invalid.");
+    }
+    try {
+        emitter_state state{};
+        state.name = safe_name(emitter->name_utf8, "Sample");
+        state.frequency_hz = 1000.0;
+        state.gain_linear = emitter->gain_linear;
+        state.min_distance_metres = emitter->min_distance_metres;
+        state.source_sample_rate = emitter->sample_rate;
+        state.source_channels = emitter->channels;
+        state.source_start_time = emitter->start_time_seconds;
+        state.source_offset_seconds = emitter->offset_seconds;
+        state.source_loop = emitter->loop != 0U;
+        state.non_spatial = emitter->non_spatial != 0U;
+        state.enabled = emitter->enabled != 0U;
+        state.motion_path_kind = emitter->motion_path_kind;
+        state.keyframes.reserve(emitter->keyframe_count);
+        for (std::uint32_t index = 0U; index < emitter->keyframe_count; ++index) {
+            const auto& keyframe = emitter->keyframes[index];
+            const vec3 position = from_c(keyframe.position_metres);
+            if (!std::isfinite(keyframe.time_seconds) || keyframe.time_seconds < 0.0 ||
+                !finite(position) || std::max({ std::abs(position.x), std::abs(position.y), std::abs(position.z) }) > 1.0e9 ||
+                (index > 0U && keyframe.time_seconds <= emitter->keyframes[index - 1U].time_seconds)) {
+                return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Sample paths require bounded finite positions and strictly increasing nonnegative times.");
+            }
+            state.keyframes.push_back({ keyframe.time_seconds, position });
+        }
+        if (!std::isfinite(motion_speed_bound(state.motion_path_kind, state.keyframes))) {
+            return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Sample path speed exceeds numerical bounds.");
+        }
+        const auto sample_count = static_cast<std::size_t>(emitter->frame_count) * emitter->channels;
+        state.samples.assign(emitter->interleaved_samples, emitter->interleaved_samples + sample_count);
+        if (!std::all_of(state.samples.begin(), state.samples.end(), [](float value) {
+            return std::isfinite(value) && std::abs(value) <= 64.0F;
+        })) {
+            return fail(engine, PG_STATUS_INVALID_ARGUMENT, "Sample data must contain finite PCM values within -64 to +64 (36 dBFS headroom).");
+        }
+        engine->emitters.push_back(std::move(state));
+        if (out_index != nullptr) {
+            *out_index = static_cast<std::uint32_t>(engine->emitters.size() - 1U);
+        }
+        return PG_STATUS_OK;
+    } catch (const std::exception& exception) {
+        return fail(engine, PG_STATUS_INTERNAL_ERROR, std::string("Unable to copy sample emitter: ") + exception.what());
+    }
+}
+
 pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index)
 {
     if (engine == nullptr || receiver == nullptr) {
@@ -4539,6 +4746,7 @@ pg_status PG_CALL pg_engine_render_receiver_block(
         reset_room_response(engine->receiver_room_responses[receiver_index], sample_rate, engine->room, 2.0);
         reset_diffuse_response(engine->receiver_diffuse_responses[receiver_index], sample_rate);
     }
+    prepare_sample_bandwidths(*engine);
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
         const double receive_time = static_cast<double>(start_frame + frame) / static_cast<double>(sample_rate);
         if (!engine->mesh_geometries.empty() && frame % mesh_reflection_cache_interval_frames == 0U) {
@@ -4585,6 +4793,7 @@ pg_status PG_CALL pg_engine_render_offline(pg_engine* engine, const pg_render_re
 
     try {
         const std::filesystem::path output_directory = path_from_utf8(request->output_directory_utf8);
+        prepare_sample_bandwidths(*engine);
         std::filesystem::create_directories(output_directory);
         const std::string prefix = safe_name(request->file_prefix_utf8, "PulseGen");
         const auto frame_count = static_cast<std::uint64_t>(std::llround(request->duration_seconds * static_cast<double>(request->sample_rate)));

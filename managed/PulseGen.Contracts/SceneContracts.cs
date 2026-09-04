@@ -86,8 +86,19 @@ public sealed record SignalNode
     public required string Name { get; init; }
     public required SignalNodeKind Kind { get; init; }
     public WaveformKind? Waveform { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SamplePlayback? SamplePlayback { get; init; }
     public Dictionary<string, double> NumericParameters { get; init; } = [];
     public Dictionary<string, string> TextParameters { get; init; } = [];
+}
+
+public sealed record SamplePlayback
+{
+    public required string AssetSha256 { get; init; }
+    public int ChannelIndex { get; init; }
+    public double StartTimeSeconds { get; init; }
+    public double OffsetSeconds { get; init; }
+    public bool Loop { get; init; }
 }
 
 public sealed record SignalConnection

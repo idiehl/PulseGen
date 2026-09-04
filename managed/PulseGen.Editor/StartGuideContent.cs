@@ -19,6 +19,7 @@ internal static class StartGuideCatalog
     public static IReadOnlyList<StartGuideFeature> ReadyFeatures { get; } =
     [
         new("Build sounds", "Start with tones, pulses, noise, additive layers, or procedural wind.", "READY"),
+        new("Bring in a recording", "Import WAV, AIFF, FLAC, MP3, Ogg, or Opus; choose moving sources, a stereo background, or an explicit mono mix.", "READY"),
         new("Move sound through space", "Draw a path and let distance, air, wind, and speed change what reaches the listener.", "READY"),
         new("Place listeners and microphones", "Hear a headphone listener and independent stereo microphone pairs at the same time.", "READY"),
         new("Render and finish", "Keep each stereo take separate, edit left and right, then export a final master.", "READY"),

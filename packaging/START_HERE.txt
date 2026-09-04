@@ -17,6 +17,18 @@ START
    stays untouched. Choose Save when you are ready to create your own project.
 5. Use the ? control beside the build number to reopen the guide at any time.
 
+TRY YOUR OWN RECORDING
+
+Save a project, then choose Import sound on the left. WAV, AIFF, FLAC, MP3,
+Ogg Vorbis, and Opus recordings are supported. For stereo files, choose separate
+moving left/right sources, an unchanged stereo background, or an explicit mono
+mix. The import dialog can mute existing sources so you can hear the new one.
+Select a source to set its volume, scene start, file offset, or whole-file loop.
+Linked channels share timing but have independently editable paths and levels.
+Original audio is preserved. Active unique decoded recordings share 64 MiB.
+Recording tone changes from air and surfaces use an approximate response in
+this alpha; full frequency-dependent sample coloration is still being built.
+
 WHAT IS INCLUDED
 
 - The self-contained Windows editor and .NET runtime.
@@ -48,4 +60,5 @@ From PowerShell in the source repository, run:
 
 The verifier checks every packaged file and asks PulseGen to test its native
 engine, codecs, local analysis host, starter projects, and a short two-receiver
-offline render without opening the editor window.
+offline render. It also imports and renders a test recording, checks channel
+isolation, and opens its editable receiver takes without launching the window.

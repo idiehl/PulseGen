@@ -1,0 +1,24 @@
+<Window xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="PulseGen.Editor.SampleImportWindow" Title="Add an audio source" Width="590" Height="490"
+        MinWidth="500" MinHeight="440" WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Background="#0B0F14">
+  <Grid RowDefinitions="*,Auto" Margin="24">
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+      <StackPanel Spacing="15">
+        <TextBlock Text="Bring a recording into your world" Foreground="#ECF7F5" FontSize="21" FontWeight="SemiBold" TextWrapping="Wrap" />
+        <TextBlock x:Name="SourceDetails" Foreground="#91A4BD" TextWrapping="Wrap" />
+        <TextBlock Text="How should its channels behave?" Foreground="#D5E5E3" FontWeight="SemiBold" />
+        <ComboBox x:Name="MappingBox" HorizontalAlignment="Stretch" PlaceholderText="Choose a channel arrangement…" SelectionChanged="OnMappingChanged" />
+        <TextBlock x:Name="MappingDescription" Foreground="#91A4BD" TextWrapping="Wrap" MinHeight="64" />
+        <CheckBox x:Name="MuteOthersCheck" Content="Mute existing sources so I can hear this recording alone" />
+        <TextBlock x:Name="PathDescription" Foreground="#8192A7" TextWrapping="Wrap" />
+        <TextBlock Text="This alpha keeps up to 64 MiB of active decoded recordings in memory; linked channels share the same source budget." Foreground="#8192A7" TextWrapping="Wrap" FontSize="11" />
+        <TextBlock Text="The original recording stays unchanged. Playback starts at zero; select the source afterward to change its start, file offset, volume, or loop. Longer recordings extend the scene."
+                   Foreground="#8192A7" TextWrapping="Wrap" FontSize="11" />
+      </StackPanel>
+    </ScrollViewer>
+    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="10" Margin="0,18,0,0">
+      <Button Content="Cancel" Click="OnCancelClicked" />
+      <Button x:Name="AddButton" Content="Add source" Click="OnAddClicked" IsEnabled="False" Background="#266A64" Foreground="White" />
+    </StackPanel>
+  </Grid>
+</Window>

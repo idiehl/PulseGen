@@ -620,6 +620,277 @@ std::size_t first_active_frame(const std::vector<float>& samples, float threshol
     return samples.size() / 2U;
 }
 
+pg_engine* create_sample_scene(bool reflective_room = false, double sensitivity_db = 0.0)
+{
+    pg_engine* engine = create_engine();
+    pg_room_desc room{};
+    room.size = sizeof(room);
+    room.version = PG_ABI_VERSION;
+    room.dimensions_metres = { 20.0, 8.0, 12.0 };
+    room.wall_reflection_low = room.wall_reflection_mid = room.wall_reflection_high = 0.8;
+    room.enabled = reflective_room ? 1U : 0U;
+    REQUIRE(pg_engine_set_room(engine, &room) == PG_STATUS_OK);
+    pg_atmosphere_desc atmosphere{};
+    atmosphere.size = sizeof(atmosphere);
+    atmosphere.version = PG_ABI_VERSION;
+    atmosphere.temperature_celsius = 20.0;
+    atmosphere.pressure_kilopascals = 101.325;
+    REQUIRE(pg_engine_set_atmosphere(engine, &atmosphere) == PG_STATUS_OK);
+    pg_receiver_rig_desc receiver{};
+    receiver.size = sizeof(receiver);
+    receiver.version = PG_ABI_VERSION;
+    receiver.kind = PG_RECEIVER_STEREO_MICROPHONE;
+    receiver.spacing_metres = 0.18;
+    receiver.head_radius_metres = 0.09;
+    receiver.polar_pattern = PG_POLAR_CARDIOID;
+    receiver.sensitivity_db = sensitivity_db;
+    receiver.enabled = 1U;
+    REQUIRE(pg_engine_add_receiver(engine, &receiver, nullptr) == PG_STATUS_OK);
+    pg_microphone_capsule_desc capsule{};
+    capsule.size = sizeof(capsule);
+    capsule.version = PG_ABI_VERSION;
+    capsule.polar_pattern = PG_POLAR_OMNI;
+    capsule.sensitivity_db = sensitivity_db;
+    REQUIRE(pg_engine_set_receiver_capsules(engine, 0U, &capsule, &capsule) == PG_STATUS_OK);
+    return engine;
+}
+
+pg_sample_emitter_desc sample_descriptor(const std::vector<float>& samples, bool bed)
+{
+    pg_sample_emitter_desc result{};
+    result.size = sizeof(result);
+    result.version = PG_ABI_VERSION;
+    result.interleaved_samples = samples.data();
+    result.frame_count = samples.size() / (bed ? 2U : 1U);
+    result.sample_rate = 48000U;
+    result.channels = bed ? 2U : 1U;
+    result.non_spatial = bed ? 1U : 0U;
+    result.gain_linear = 1.0;
+    result.min_distance_metres = 1.0;
+    result.enabled = 1U;
+    return result;
+}
+
+std::vector<float> sample_block(pg_engine* engine, std::uint64_t start, std::uint32_t frames, std::uint32_t rate = 48000U)
+{
+    std::vector<float> output(static_cast<std::size_t>(frames) * 2U);
+    REQUIRE(pg_engine_render_receiver_block(engine, 0U, start, frames, rate, output.data(), output.size()) == PG_STATUS_OK);
+    return output;
+}
+
+void verify_sample_emitters()
+{
+    // Copy ownership and bed routing: receiver sensitivity, room reverb and
+    // capsule orientation must not alter a deliberately non-spatial channel.
+    std::vector<float> original{ 0.25F, 0.0F, -0.5F, 0.0F, 0.0F, 0.75F, 0.125F, -0.25F };
+    auto source = original;
+    auto desc = sample_descriptor(source, true);
+    pg_engine* engine = create_sample_scene(true, -24.0);
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    std::fill(source.begin(), source.end(), 0.0F);
+    auto output = sample_block(engine, 0U, 16U);
+    REQUIRE(std::equal(original.begin(), original.end(), output.begin()));
+    REQUIRE(std::all_of(output.begin() + 8, output.end(), [](float value) { return value == 0.0F; }));
+    pg_engine_destroy(engine);
+
+    engine = create_sample_scene();
+    desc = sample_descriptor(original, true);
+    desc.start_time_seconds = 4.0 / 48000.0;
+    desc.offset_seconds = 2.0 / 48000.0;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    output = sample_block(engine, 0U, 12U);
+    REQUIRE(std::all_of(output.begin(), output.begin() + 8, [](float value) { return value == 0.0F; }));
+    REQUIRE(std::equal(original.begin() + 4, original.end(), output.begin() + 8));
+    REQUIRE(std::all_of(output.begin() + 12, output.end(), [](float value) { return value == 0.0F; }));
+    pg_engine_destroy(engine);
+    engine = create_sample_scene();
+    desc.loop = 1U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    output = sample_block(engine, 0U, 20U);
+    for (std::size_t frame = 4U; frame < 20U; ++frame) {
+        REQUIRE(output[frame * 2U] == original[((frame - 2U) % 4U) * 2U]);
+        REQUIRE(output[frame * 2U + 1U] == original[((frame - 2U) % 4U) * 2U + 1U]);
+    }
+    pg_engine_destroy(engine);
+
+    // Downsampling rejects an input above output Nyquist while retaining a
+    // lower tone, without sharing any content between left and right.
+    source.resize(96000U * 2U);
+    for (std::size_t frame = 0U; frame < source.size() / 2U; ++frame) {
+        source[frame * 2U] = static_cast<float>(0.5 * std::sin(2.0 * std::numbers::pi * 1000.0 * frame / 96000.0));
+        source[frame * 2U + 1U] = static_cast<float>(0.5 * std::sin(2.0 * std::numbers::pi * 35000.0 * frame / 96000.0));
+    }
+    engine = create_sample_scene();
+    desc = sample_descriptor(source, true);
+    desc.sample_rate = 96000U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    output = sample_block(engine, 4800U, 4800U);
+    REQUIRE(std::abs(channel_rms(output, 0U) - std::sqrt(0.125)) < 0.001);
+    REQUIRE(channel_rms(output, 1U) < 0.001);
+    pg_engine_destroy(engine);
+
+    source.resize(44100U * 2U);
+    for (std::size_t frame = 0U; frame < source.size() / 2U; ++frame) {
+        source[frame * 2U] = static_cast<float>(0.5 * std::sin(2.0 * std::numbers::pi * 440.0 * frame / 44100.0));
+        source[frame * 2U + 1U] = 0.0F;
+    }
+    engine = create_sample_scene();
+    desc = sample_descriptor(source, true);
+    desc.sample_rate = 44100U;
+    desc.offset_seconds = 0.37 / 44100.0;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    output = sample_block(engine, 4800U, 4096U);
+    for (std::size_t frame = 0U; frame < output.size() / 2U; ++frame) {
+        const double expected_sample = 0.5 * std::sin(2.0 * std::numbers::pi * 440.0 *
+            (static_cast<double>(4800U + frame) / 48000.0 + desc.offset_seconds));
+        REQUIRE(std::abs(output[frame * 2U] - expected_sample) < 1.0e-4);
+        REQUIRE(output[frame * 2U + 1U] == 0.0F);
+    }
+    pg_engine_destroy(engine);
+
+    // A sampled tone follows the same retarded emission clock as the analytic
+    // oscillator. Its lifetime is independent of a shorter, clamped path.
+    source.resize(48000U * 2U);
+    for (std::size_t frame = 0U; frame < source.size(); ++frame) {
+        source[frame] = static_cast<float>(0.5 * std::sin(2.0 * std::numbers::pi * 1000.0 * frame / 48000.0));
+    }
+    const std::array<pg_motion_keyframe, 2> moving_keys{
+        pg_motion_keyframe{ 0.0, { 0.0, 0.0, 60.0 } },
+        pg_motion_keyframe{ 2.0, { 0.0, 0.0, 20.0 } }
+    };
+    desc = sample_descriptor(source, false);
+    desc.keyframes = moving_keys.data();
+    desc.keyframe_count = 2U;
+    engine = create_sample_scene();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    const auto sampled_tone = sample_block(engine, 24000U, 24000U);
+    const double measured = estimate_channel_frequency(sampled_tone, 0U, 48000U);
+    const double expected = pg_calculate_observed_frequency(1000.0, 343.42, 20.0, 0.0);
+    REQUIRE(std::abs(measured - expected) < 2.1);
+    auto* oscillator_engine = create_sample_scene();
+    pg_sine_emitter_desc oscillator{};
+    oscillator.size = sizeof(oscillator);
+    oscillator.version = PG_ABI_VERSION;
+    oscillator.frequency_hz = 1000.0;
+    oscillator.amplitude = 0.5;
+    oscillator.gain_linear = oscillator.min_distance_metres = 1.0;
+    oscillator.keyframes = moving_keys.data();
+    oscillator.keyframe_count = 2U;
+    oscillator.enabled = 1U;
+    REQUIRE(pg_engine_add_sine_emitter(oscillator_engine, &oscillator, nullptr) == PG_STATUS_OK);
+    const auto analytic_tone = sample_block(oscillator_engine, 24000U, 24000U);
+    double maximum_difference = 0.0;
+    for (std::size_t index = 0U; index < sampled_tone.size(); ++index) {
+        maximum_difference = std::max(maximum_difference, std::abs(static_cast<double>(sampled_tone[index] - analytic_tone[index])));
+    }
+    REQUIRE(maximum_difference < 1.0e-5);
+    pg_engine_destroy(oscillator_engine);
+    const std::array<pg_motion_keyframe, 2> receiver_keys{
+        pg_motion_keyframe{ 0.0, { 0.0, 0.0, 0.0 } },
+        pg_motion_keyframe{ 2.0, { 0.0, 0.0, 40.0 } }
+    };
+    pg_receiver_motion_desc receiver_motion{};
+    receiver_motion.size = sizeof(receiver_motion);
+    receiver_motion.version = PG_ABI_VERSION;
+    receiver_motion.keyframes = receiver_keys.data();
+    receiver_motion.keyframe_count = 2U;
+    REQUIRE(pg_engine_set_receiver_motion(engine, &receiver_motion) == PG_STATUS_OK);
+    const auto moving_receiver_tone = sample_block(engine, 24000U, 12000U);
+    const double expected_relative_frequency = pg_calculate_observed_frequency(1000.0, 343.42, 20.0, 20.0);
+    REQUIRE(std::abs(estimate_channel_frequency(moving_receiver_tone, 0U, 48000U) - expected_relative_frequency) < 4.1);
+    pg_engine_destroy(engine);
+
+    const std::array<pg_motion_keyframe, 2> short_keys{
+        pg_motion_keyframe{ 0.0, { 0.0, 0.0, 1.0 } },
+        pg_motion_keyframe{ 0.001, { 0.0, 0.0, 1.0 } }
+    };
+    desc.keyframes = short_keys.data();
+    engine = create_sample_scene();
+    auto* split_engine = create_sample_scene();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    REQUIRE(pg_engine_add_sample_emitter(split_engine, &desc, nullptr) == PG_STATUS_OK);
+    const auto whole = sample_block(engine, 0U, 4096U);
+    auto split = sample_block(split_engine, 0U, 1024U);
+    const auto remainder = sample_block(split_engine, 1024U, 3072U);
+    split.insert(split.end(), remainder.begin(), remainder.end());
+    REQUIRE(whole == split);
+    REQUIRE(channel_rms(remainder, 0U) > 0.2);
+    pg_engine_destroy(engine);
+    pg_engine_destroy(split_engine);
+
+    // Impulse direct and plane-reflected arrivals each use their own retarded
+    // sample position, including the fractional sample part of flight time.
+    source.assign(128U, 0.0F);
+    source[0] = 0.5F;
+    desc = sample_descriptor(source, false);
+    desc.keyframes = short_keys.data();
+    desc.keyframe_count = 2U;
+    engine = create_sample_scene();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_OK);
+    const auto direct = sample_block(engine, 0U, 4096U);
+    pg_acoustic_material_desc material{};
+    material.size = sizeof(material);
+    material.version = PG_ABI_VERSION;
+    for (std::size_t band = 0U; band < PG_ACOUSTIC_BAND_COUNT; ++band) {
+        material.octave_band_centres_hz[band] = 125.0 * std::pow(2.0, static_cast<double>(band));
+    }
+    REQUIRE(pg_engine_add_acoustic_material(engine, &material, nullptr) == PG_STATUS_OK);
+    pg_geometry_desc plane{};
+    plane.size = sizeof(plane);
+    plane.version = PG_ABI_VERSION;
+    plane.kind = PG_GEOMETRY_PLANE;
+    plane.centre_metres = { 0.0, 0.0, -10.0 };
+    plane.dimensions_metres = { 100.0, 100.0, 1.0 };
+    plane.reflects = plane.enabled = 1U;
+    REQUIRE(pg_engine_add_geometry(engine, &plane, nullptr) == PG_STATUS_OK);
+    auto reflection = sample_block(engine, 0U, 4096U);
+    for (std::size_t index = 0U; index < reflection.size(); ++index) {
+        reflection[index] -= direct[index];
+    }
+    const auto direct_arrival = static_cast<std::size_t>(std::llround(48000.0 / 343.42));
+    const auto echo_arrival = static_cast<std::size_t>(std::llround(21.0 * 48000.0 / 343.42));
+    REQUIRE(first_active_frame(direct) <= direct_arrival + 1U && direct_arrival <= first_active_frame(direct) + 1U);
+    REQUIRE(first_active_frame(reflection) <= echo_arrival + 1U && echo_arrival <= first_active_frame(reflection) + 1U);
+    pg_engine_destroy(engine);
+
+    // Failure leaves no partially registered emitter; overflow is rejected
+    // before attempting to traverse the supplied sample pointer.
+    engine = create_sample_scene();
+    auto invalid = desc;
+    invalid.size = 0U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_ABI_MISMATCH);
+    invalid = desc;
+    invalid.frame_count = std::numeric_limits<std::uint64_t>::max();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
+    invalid = desc;
+    invalid.offset_seconds = static_cast<double>(desc.frame_count) / desc.sample_rate;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    invalid = desc;
+    invalid.non_spatial = 1U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    invalid = desc;
+    invalid.gain_linear = std::numeric_limits<double>::infinity();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    invalid = desc;
+    invalid.min_distance_metres = std::numeric_limits<double>::denorm_min();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    invalid = desc;
+    invalid.start_time_seconds = -1.0;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    invalid = desc;
+    invalid.sample_rate = 7999U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &invalid, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    source[0] = std::numeric_limits<float>::quiet_NaN();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    source[0] = std::numeric_limits<float>::max();
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    source[0] = 0.5F;
+    std::uint32_t index = 99U;
+    REQUIRE(pg_engine_add_sample_emitter(engine, &desc, &index) == PG_STATUS_OK);
+    REQUIRE(index == 0U);
+    pg_engine_destroy(engine);
+}
+
 } // namespace
 
 int main(int argument_count, char** arguments)
@@ -627,6 +898,11 @@ int main(int argument_count, char** arguments)
     try {
     static_assert(PG_ABI_VERSION == 5U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
+    verify_sample_emitters();
+    if (argument_count == 2 && std::string_view(arguments[1]) == "--sample-source-tests") {
+        std::cout << "PULSEGEN_NATIVE_SAMPLES_OK\n";
+        return 0;
+    }
     REQUIRE(std::abs(pg_calculate_speed_of_sound(20.0) - 343.42) < 1.0e-9);
 
     const double approaching = pg_calculate_observed_frequency(440.0, 343.42, 20.0, 0.0);
@@ -1512,6 +1788,9 @@ int main(int argument_count, char** arguments)
         device_config.period_frames = 512U;
         device_config.reflection_order = 1U;
         REQUIRE(pg_engine_start_device(audio_engine, &device_config) == PG_STATUS_OK);
+        const std::vector<float> silent_source(128U * 2U);
+        const auto silent_source_desc = sample_descriptor(silent_source, true);
+        REQUIRE(pg_engine_add_sample_emitter(audio_engine, &silent_source_desc, nullptr) == PG_STATUS_INVALID_ARGUMENT);
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         pg_device_status status{};
         status.size = sizeof(status);

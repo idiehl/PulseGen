@@ -28,6 +28,7 @@ extern "C" {
 #define PG_MAX_REFLECTION_PATH_POINTS 4u
 #define PG_MAX_ATMOSPHERE_LAYERS 64u
 #define PG_MAX_WIND_ZONES 64u
+#define PG_MAX_EMITTER_SAMPLES 16777216u
 
 typedef struct pg_engine pg_engine;
 
@@ -348,6 +349,40 @@ typedef struct pg_signal_emitter_desc {
     uint32_t reserved;
 } pg_signal_emitter_desc;
 
+/*
+ * Copied, bounded PCM source. Mono is a spatial point emitter; two channels
+ * require non_spatial=1 and retain independent L/R output after receiver effects.
+ * Start is scene time; offset is a position inside the source. Looping wraps the
+ * entire source. Source playback does not end when the motion path ends.
+ * Input rate is 8-192 kHz; gain is 0-64; minimum distance is 1e-6-1e9 metres.
+ * Decoded samples must be finite in [-64,64] (36 dBFS headroom), and total at
+ * most PG_MAX_EMITTER_SAMPLES. This prevents overflow in float echo state.
+ * Samples use 32-tap Blackman-windowed sinc interpolation with rate-dependent
+ * low-pass filtering. Spatial cutoff uses conservative path-speed bounds for
+ * Doppler, bounded at 20x compression near sonic speeds; rapidly varying wind
+ * remains approximate. Sampled spatial sources use a 1 kHz reference for
+ * scalar material/air gains; broadband material filtering is not implemented.
+ */
+typedef struct pg_sample_emitter_desc {
+    uint32_t size;
+    uint32_t version;
+    const char* name_utf8;
+    const float* interleaved_samples;
+    uint64_t frame_count;
+    uint32_t sample_rate;
+    uint32_t channels;
+    double gain_linear;
+    double min_distance_metres;
+    double start_time_seconds;
+    double offset_seconds;
+    uint32_t loop;
+    uint32_t non_spatial;
+    pg_motion_path_kind motion_path_kind;
+    const pg_motion_keyframe* keyframes;
+    uint32_t keyframe_count;
+    uint32_t enabled;
+} pg_sample_emitter_desc;
+
 typedef struct pg_receiver_rig_desc {
     uint32_t size;
     uint32_t version;
@@ -505,6 +540,7 @@ PG_API pg_status PG_CALL pg_engine_query_reflection_paths(
     uint32_t* out_path_count);
 PG_API pg_status PG_CALL pg_engine_add_sine_emitter(pg_engine* engine, const pg_sine_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signal_emitter_desc* emitter, uint32_t* out_index);
+PG_API pg_status PG_CALL pg_engine_add_sample_emitter(pg_engine* engine, const pg_sample_emitter_desc* emitter, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_add_receiver(pg_engine* engine, const pg_receiver_rig_desc* receiver, uint32_t* out_index);
 PG_API pg_status PG_CALL pg_engine_set_receiver_capsules(
     pg_engine* engine,

@@ -85,9 +85,27 @@
       "properties": {
         "id": { "$ref": "#/$defs/guid" }, "name": { "type": "string" }, "kind": { "type": "string" },
         "waveform": { "type": ["string", "null"] },
+        "samplePlayback": { "oneOf": [{ "$ref": "#/$defs/samplePlayback" }, { "type": "null" }] },
         "numericParameters": { "type": "object", "additionalProperties": { "type": "number" } },
         "textParameters": { "type": "object", "additionalProperties": { "type": "string" } }
-      }
+      },
+      "allOf": [{
+        "if": { "properties": { "kind": { "const": "Sample" } }, "required": ["kind"] },
+        "then": { "required": ["samplePlayback"], "properties": { "samplePlayback": { "$ref": "#/$defs/samplePlayback" }, "waveform": { "enum": ["Sample", null] } } },
+        "else": { "properties": { "samplePlayback": { "type": "null" } } }
+      }]
+    },
+    "samplePlayback": {
+      "type": "object", "additionalProperties": false,
+      "required": ["assetSha256"],
+      "properties": {
+        "assetSha256": { "type": "string", "pattern": "^[A-Fa-f0-9]{64}$" },
+        "channelIndex": { "type": "integer", "minimum": 0, "maximum": 1, "default": 0 },
+        "startTimeSeconds": { "type": "number", "minimum": 0, "default": 0 },
+        "offsetSeconds": { "type": "number", "minimum": 0, "default": 0 },
+        "loop": { "type": "boolean", "default": false }
+      },
+      "description": "Source timing is independent of motion-path duration. Audio metadata and explicit stereo mapping, reciprocal pair links, and connected sample graph shape are verified by SceneValidator."
     },
     "signalConnection": {
       "type": "object", "additionalProperties": false,

@@ -42,7 +42,6 @@ internal enum ReceiverAuditionMode
 
 internal static class CaptureTakeImporter
 {
-    private const int ReceiptVersion = 8;
     private const string ReceiptMediaType = "application/vnd.pulsegen.render-receipt+json";
 
     public static async Task<CaptureImportResult> ImportAsync(
@@ -206,7 +205,7 @@ internal static class CaptureTakeImporter
         await using var stream = new FileStream(receiptPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, FileOptions.Asynchronous | FileOptions.SequentialScan);
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         var root = document.RootElement;
-        if (root.GetProperty("receiptVersion").GetInt32() != ReceiptVersion ||
+        if (root.GetProperty("receiptVersion").GetInt32() is not (8 or 9) ||
             root.GetProperty("projectId").GetGuid() != scene.ProjectId)
         {
             throw new InvalidDataException("The render receipt version or project identity does not match this project.");
