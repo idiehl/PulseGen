@@ -37,7 +37,8 @@ public static unsafe class SampleAudioReader
     {
         ArgumentNullException.ThrowIfNull(asset);
         cancellationToken.ThrowIfCancellationRequested();
-        if (asset.Kind != AssetKind.Audio)
+        if (asset.Kind is not (AssetKind.Audio or AssetKind.Render) ||
+            asset.MediaType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) != true || asset.MediaType.Length <= 6)
             throw new InvalidDataException("Sample playback requires an audio asset.");
         using var source = OpenSource(ProjectStore.ResolveAssetPath(projectDirectory, asset.Sha256));
         if (asset.SizeBytes != source.Length)

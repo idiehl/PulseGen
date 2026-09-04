@@ -266,6 +266,93 @@ public sealed class StudioAudioExportTests
         }
     }
 
+    [Theory]
+    [InlineData(AssetKind.Audio, false)]
+    [InlineData(AssetKind.Render, false)]
+    [InlineData(AssetKind.Audio, true)]
+    public async Task IdenticalStudioMasterReusesAudioIdentityAndPreservesOriginalAttribution(AssetKind originalKind, bool roundedDuration)
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var prepared = await PrepareExistingMasterAsync(root, asset => asset with
+            {
+                Kind = originalKind,
+                DurationSeconds = asset.DurationSeconds + (roundedDuration ? 0.25 / 48000 : 0)
+            });
+            var imported = await StudioExportProjectImporter.ImportAsync(
+                prepared.Scene, prepared.Project, prepared.Request, prepared.Exported);
+            var reopened = await ProjectStore.LoadAsync(prepared.Project);
+            var stored = Assert.Single(reopened.Assets, asset => asset.Sha256 == prepared.Existing.Sha256);
+            Assert.Equal(2, reopened.Assets.Count);
+            Assert.Equal(prepared.Existing, stored);
+            Assert.Equal(stored, imported.AudioAsset);
+            Assert.Equal(originalKind, imported.AudioAsset.Kind);
+            Assert.Equal("Original field recording", imported.AudioAsset.Provenance);
+            Assert.Equal("CC-BY-4.0; original recorder", imported.AudioAsset.License);
+            Assert.Equal("source.wav", imported.AudioAsset.FileName);
+            Assert.Equal(prepared.Exported.Sha256,
+                await ProjectStore.ComputeSha256Async(ProjectStore.ResolveAssetPath(prepared.Project, stored.Sha256)));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("size")]
+    [InlineData("rate")]
+    [InlineData("channels")]
+    [InlineData("duration")]
+    [InlineData("media")]
+    [InlineData("kind")]
+    public async Task IdenticalMasterRejectsContradictoryStoredMetadataWithoutChangingManifest(string mismatch)
+    {
+        var root = TemporaryDirectory();
+        try
+        {
+            var prepared = await PrepareExistingMasterAsync(root, asset => mismatch switch
+            {
+                "size" => asset with { SizeBytes = asset.SizeBytes + 1 },
+                "rate" => asset with { SampleRate = 96000 },
+                "channels" => asset with { Channels = 1 },
+                "duration" => asset with { DurationSeconds = asset.DurationSeconds + 0.01 },
+                "media" => asset with { MediaType = "audio/aiff" },
+                "kind" => asset with { Kind = AssetKind.Mesh },
+                _ => throw new ArgumentOutOfRangeException(nameof(mismatch))
+            });
+            var manifestBefore = await ProjectStore.ComputeSha256Async(ProjectStore.ResolveManifestPath(prepared.Project));
+            var error = await Assert.ThrowsAsync<InvalidDataException>(() => StudioExportProjectImporter.ImportAsync(
+                prepared.Scene, prepared.Project, prepared.Request, prepared.Exported));
+            Assert.Contains("incompatible metadata", error.Message);
+            Assert.Equal(manifestBefore, await ProjectStore.ComputeSha256Async(ProjectStore.ResolveManifestPath(prepared.Project)));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private static async Task<(SceneDocument Scene, string Project, StudioExportRequest Request, StudioExportResult Exported, AssetRef Existing)>
+        PrepareExistingMasterAsync(string root, Func<AssetRef, AssetRef> adjustAsset)
+    {
+        var project = Path.Combine(root, "shared-master.pulseproj");
+        var scene = SampleScenes.CreateFlyby();
+        await ProjectStore.SaveAsync(scene, project);
+        var buffer = TestBuffer();
+        var seedRequest = Request(Path.Combine(root, "source.wav"), StudioExportContainer.Wave, StudioSampleEncoding.Float32, DitherMode.None);
+        var seedExport = StudioMasterExporter.Export(seedRequest, buffer);
+        var existing = await ProjectStore.ImportAssetAsync(project, seedExport.OutputPath, AssetKind.Audio, "audio/wav",
+            "Original field recording", "CC-BY-4.0; original recorder");
+        existing = adjustAsset(existing with { SampleRate = buffer.SampleRate, Channels = buffer.Channels, DurationSeconds = (double)buffer.Frames / buffer.SampleRate });
+        scene.Assets.Add(existing);
+        await ProjectStore.SaveAsync(scene, project);
+        var request = Request(Path.Combine(root, "master.wav"), StudioExportContainer.Wave, StudioSampleEncoding.Float32, DitherMode.None) with
+        {
+            ProjectId = scene.ProjectId,
+            ProjectName = scene.Name,
+            SceneRevisionSha256 = ProjectStore.ComputeSceneRevisionSha256(scene)
+        };
+        var exported = StudioMasterExporter.Export(request, buffer);
+        Assert.Equal(existing.Sha256, exported.Sha256);
+        return (scene, project, request, exported, existing);
+    }
+
     [Fact]
     public async Task ChangedExternalMasterIsRejectedWithoutManifestMutation()
     {

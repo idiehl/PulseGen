@@ -93,6 +93,43 @@ public sealed class SampleSourceAuthoringTests
     }
 
     [Fact]
+    public void ReimportingRenderAudioPreservesItsIdentityRoleAndRefreshesDecodedMetadata()
+    {
+        var scene = SampleScenes.CreateFlyby();
+        scene.Assets.Add(Asset(1) with
+        {
+            Kind = AssetKind.Render, License = "CC-BY-4.0", Provenance = "Rendered by Example",
+            Channels = null, SampleRate = null, DurationSeconds = null
+        });
+        var imported = SampleSourceAuthoring.Add(scene, Asset(1), new(SourceChannelMapping.MonoPoint, false));
+        var asset = Assert.Single(imported.Scene.Assets);
+        Assert.Equal(AssetKind.Render, asset.Kind);
+        Assert.Equal("CC-BY-4.0", asset.License);
+        Assert.Equal("Rendered by Example", asset.Provenance);
+        Assert.Equal(1, asset.Channels);
+        Assert.Equal(48000, asset.SampleRate);
+        Assert.Equal(2, asset.DurationSeconds);
+        Assert.Empty(SceneValidator.Validate(imported.Scene));
+    }
+
+    [Fact]
+    public void ReceiptAndMeshIdentitiesCannotBeReusedAsSampleAudio()
+    {
+        foreach (var asset in new[]
+        {
+            Asset(1) with { Kind = AssetKind.Render, MediaType = "application/vnd.pulsegen.render-receipt+json" },
+            Asset(1) with { Kind = AssetKind.Mesh }
+        })
+        {
+            var scene = SampleScenes.CreateFlyby();
+            scene.Assets.Add(asset);
+            Assert.Throws<InvalidDataException>(() => SampleSourceAuthoring.Add(scene, Asset(1), new(SourceChannelMapping.MonoPoint, false)));
+            Assert.Equal(asset, Assert.Single(scene.Assets));
+            Assert.Single(scene.Emitters);
+        }
+    }
+
+    [Fact]
     public async Task CancellingPreparedImportLeavesTheProjectAndOriginalUntouched()
     {
         var root = Path.Combine(Path.GetTempPath(), "pulsegen-sample-stage-" + Guid.NewGuid().ToString("N"));

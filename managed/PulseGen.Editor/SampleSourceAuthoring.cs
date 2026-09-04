@@ -25,10 +25,17 @@ internal static class SampleSourceAuthoring
         var existingIndex = assets.FindIndex(item => string.Equals(item.Sha256, asset.Sha256, StringComparison.OrdinalIgnoreCase));
         if (existingIndex >= 0)
         {
-            if (assets[existingIndex].Kind != AssetKind.Audio)
+            if (assets[existingIndex].Kind is not (AssetKind.Audio or AssetKind.Render) ||
+                assets[existingIndex].MediaType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) != true ||
+                assets[existingIndex].MediaType.Length <= 6)
                 throw new InvalidDataException("This content is already declared as a different asset type.");
             var existing = assets[existingIndex];
-            assets[existingIndex] = asset with { License = existing.License ?? asset.License, Provenance = existing.Provenance ?? asset.Provenance };
+            assets[existingIndex] = asset with
+            {
+                Kind = existing.Kind,
+                License = existing.License ?? asset.License,
+                Provenance = existing.Provenance ?? asset.Provenance
+            };
         }
         else assets.Add(asset);
 

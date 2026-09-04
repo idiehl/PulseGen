@@ -466,9 +466,9 @@ public static class SceneValidator
             var asset = scene.Assets.FirstOrDefault(candidate =>
                 string.Equals(candidate.Sha256, playback.AssetSha256, StringComparison.OrdinalIgnoreCase));
             if (string.IsNullOrWhiteSpace(playback.AssetSha256) || playback.AssetSha256.Length != 64 ||
-                !playback.AssetSha256.All(Uri.IsHexDigit) || asset is null || asset.Kind != AssetKind.Audio)
+                !playback.AssetSha256.All(Uri.IsHexDigit) || asset is null || !IsAudioContentAsset(asset))
             {
-                issues.Add(new($"{path}/assetSha256", "Sample playback must reference a declared Audio asset by its SHA-256 identity."));
+                issues.Add(new($"{path}/assetSha256", "Sample playback must reference a declared Audio or Render asset with an audio media type by its SHA-256 identity."));
             }
             else
             {
@@ -535,7 +535,7 @@ public static class SceneValidator
         foreach (var asset in scene.Assets)
         {
             if (!referencedHashes.Contains(asset.Sha256) || !countedHashes.Add(asset.Sha256) ||
-                asset.Kind != AssetKind.Audio || asset.Channels is not (1 or 2) ||
+                !IsAudioContentAsset(asset) || asset.Channels is not (1 or 2) ||
                 asset.SampleRate is null or < 8000 or > 192000 ||
                 asset.DurationSeconds is not { } duration || !double.IsFinite(duration) || duration <= 0)
             {
@@ -660,7 +660,7 @@ public static class SceneValidator
             var source = RequireTakeAsset(take.SourceAssetHash, "sourceAssetHash", path, assetsByHash, issues);
             var left = RequireTakeAsset(take.LeftAssetHash, "leftAssetHash", path, assetsByHash, issues);
             var right = RequireTakeAsset(take.RightAssetHash, "rightAssetHash", path, assetsByHash, issues);
-            var receipt = RequireTakeAsset(take.RenderReceiptHash, "renderReceiptHash", path, assetsByHash, issues);
+            var receipt = RequireTakeAsset(take.RenderReceiptHash, "renderReceiptHash", path, assetsByHash, issues, requireReceipt: true);
             if (source is not null && source.Channels != 2)
             {
                 issues.Add(new($"{path}/sourceAssetHash", "The untouched receiver source must declare two audio channels."));
@@ -700,15 +700,23 @@ public static class SceneValidator
         string field,
         string takePath,
         IReadOnlyDictionary<string, AssetRef> assetsByHash,
-        List<ValidationIssue> issues)
+        List<ValidationIssue> issues,
+        bool requireReceipt = false)
     {
-        if (string.IsNullOrWhiteSpace(hash) || !assetsByHash.TryGetValue(hash, out var asset) || asset.Kind != AssetKind.Render)
+        if (string.IsNullOrWhiteSpace(hash) || !assetsByHash.TryGetValue(hash, out var asset) ||
+            (requireReceipt ? asset.Kind != AssetKind.Render : !IsAudioContentAsset(asset)))
         {
-            issues.Add(new($"{takePath}/{field}", "Receiver take must reference a declared immutable Render asset."));
+            issues.Add(new($"{takePath}/{field}", requireReceipt
+                ? "Receiver take receipt must reference a declared immutable Render asset."
+                : "Receiver take audio must reference a declared immutable Audio or Render asset with an audio media type."));
             return null;
         }
         return asset;
     }
+
+    private static bool IsAudioContentAsset(AssetRef asset) =>
+        asset.Kind is AssetKind.Audio or AssetKind.Render &&
+        asset.MediaType?.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) == true && asset.MediaType.Length > 6;
 
     private static void ValidateGeometry(
         AcousticGeometry geometry,

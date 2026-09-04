@@ -185,12 +185,30 @@ internal static class CaptureTakeImporter
         var existing = assets.FirstOrDefault(asset => string.Equals(asset.Sha256, candidate.Sha256, StringComparison.OrdinalIgnoreCase));
         if (existing is not null)
         {
-            if (existing.Kind != candidate.Kind || !string.Equals(existing.MediaType, candidate.MediaType, StringComparison.OrdinalIgnoreCase))
+            var sharedAudio = existing.Kind is AssetKind.Audio or AssetKind.Render &&
+                candidate.Kind is AssetKind.Audio or AssetKind.Render &&
+                existing.MediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
+            if ((existing.Kind != candidate.Kind && !sharedAudio) ||
+                !string.Equals(existing.MediaType, candidate.MediaType, StringComparison.OrdinalIgnoreCase) ||
+                existing.SizeBytes != candidate.SizeBytes ||
+                (existing.SampleRate is { } rate && candidate.SampleRate is { } candidateRate && rate != candidateRate) ||
+                (existing.Channels is { } channels && candidate.Channels is { } candidateChannels && channels != candidateChannels) ||
+                (existing.DurationSeconds is { } duration && candidate.DurationSeconds is { } candidateDuration &&
+                    Math.Abs(duration - candidateDuration) > 0.5 / Math.Max(candidate.SampleRate ?? 1, 1)))
             {
                 throw new InvalidDataException("A rendered artifact collides with an existing asset that has incompatible metadata.");
             }
+            // Content identity is independent of its role in a scene. Keep the original
+            // attribution; each take retains its own render-receipt link separately.
+            var merged = existing with
+            {
+                SampleRate = candidate.SampleRate ?? existing.SampleRate,
+                Channels = candidate.Channels ?? existing.Channels,
+                DurationSeconds = candidate.DurationSeconds ?? existing.DurationSeconds
+            };
+            assets[assets.IndexOf(existing)] = merged;
             reused++;
-            return existing;
+            return merged;
         }
         assets.Add(candidate);
         added++;

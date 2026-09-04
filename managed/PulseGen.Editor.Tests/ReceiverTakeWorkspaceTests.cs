@@ -9,6 +9,44 @@ namespace PulseGen.Editor.Tests;
 public sealed class ReceiverTakeWorkspaceTests
 {
     [Fact]
+    public async Task UnchangedStereoBackgroundReusesSourceAudioWithoutLosingAttribution()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"pulsegen-shared-source-{Guid.NewGuid():N}");
+        var project = Path.Combine(root, "shared.pulseproj");
+        try
+        {
+            var scene = SampleScenes.CreateFlyby();
+            await ProjectStore.SaveAsync(scene, project);
+            var source = Path.Combine(root, "original.wav");
+            var samples = new float[2400];
+            for (var frame = 0; frame < 1200; frame++) samples[frame * 2] = 0.25f;
+            FloatWaveFile.WriteAtomic(source, new FloatWaveBuffer(48000, 2, samples));
+            var audio = await ProjectStore.ImportAssetAsync(project, source, AssetKind.Audio, "audio/wav");
+            audio = audio with { SampleRate = 48000, Channels = 2, DurationSeconds = 0.025,
+                License = "CC-BY-4.0", Provenance = "Original recording attribution" };
+            scene = SampleSourceAuthoring.Add(scene, audio, new(SourceChannelMapping.NonSpatialStereoBed, true)).Scene;
+            scene = scene with { Timeline = scene.Timeline with { DurationSeconds = 0.025 } };
+            await ProjectStore.SaveAsync(scene, project);
+            var render = NativeSceneRenderer.Render(scene, Path.Combine(root, "renders"), projectDirectory: project);
+            var captured = await CaptureTakeImporter.ImportAsync(scene, project, render.RenderReceiptPath);
+            Assert.Equal(2, captured.ImportedTakeCount);
+            Assert.All(captured.Scene.CaptureTakes, take => Assert.Equal(audio.Sha256, take.SourceAssetHash));
+            var reused = Assert.Single(captured.Scene.Assets, item => item.Sha256 == audio.Sha256);
+            Assert.Equal(AssetKind.Audio, reused.Kind);
+            Assert.Equal(audio.License, reused.License);
+            Assert.Equal(audio.Provenance, reused.Provenance);
+            Assert.Equal(samples, SampleAudioReader.ReadVerified(project, reused).Samples);
+            // The same immutable audio remains valid if a render was its first role.
+            Assert.Equal(samples, SampleAudioReader.ReadVerified(project, reused with { Kind = AssetKind.Render }).Samples);
+            Assert.Equal(2, (await ReceiverTakeCatalog.LoadAsync(captured.Scene, project)).Count);
+            var rerender = NativeSceneRenderer.Render(captured.Scene, Path.Combine(root, "rerender"), projectDirectory: project);
+            Assert.Equal(render.PeakLeft, rerender.PeakLeft);
+            Assert.Equal(0, rerender.PeakRight);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
     public async Task NativeReceiptImportsThroughTheRealReceiverTakeBoundary()
     {
         var root = Path.Combine(Path.GetTempPath(), $"pulsegen-native-takes-{Guid.NewGuid():N}");

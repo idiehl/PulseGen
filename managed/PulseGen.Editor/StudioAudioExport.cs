@@ -835,8 +835,8 @@ internal static class StudioExportProjectImporter
             DurationSeconds = (double)exported.Frames / exported.SampleRate
         };
         var assets = scene.Assets.ToList();
-        AddCompatible(assets, receiptAsset);
-        AddCompatible(assets, audioAsset);
+        receiptAsset = AddCompatible(assets, receiptAsset);
+        audioAsset = AddCompatible(assets, audioAsset);
         var updated = scene with { Assets = assets, UpdatedAtUtc = DateTimeOffset.UtcNow };
         SceneValidator.EnsureValid(updated);
         await ProjectStore.SaveAsync(updated, projectDirectory, cancellationToken);
@@ -913,25 +913,39 @@ internal static class StudioExportProjectImporter
         actual.ValueKind == JsonValueKind.Number &&
         BitConverter.DoubleToInt64Bits(actual.GetDouble()) == BitConverter.DoubleToInt64Bits(expected);
 
-    private static void AddCompatible(List<AssetRef> assets, AssetRef imported)
+    private static AssetRef AddCompatible(List<AssetRef> assets, AssetRef imported)
     {
         var index = assets.FindIndex(asset => string.Equals(asset.Sha256, imported.Sha256, StringComparison.OrdinalIgnoreCase));
         if (index < 0)
         {
             assets.Add(imported);
-            return;
+            return imported;
         }
         var existing = assets[index];
-        if (existing.Kind != imported.Kind || !string.Equals(existing.MediaType, imported.MediaType, StringComparison.OrdinalIgnoreCase))
+        var reusableAudio = existing.Kind is AssetKind.Audio or AssetKind.Render &&
+            imported.Kind is AssetKind.Audio or AssetKind.Render &&
+            existing.MediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) &&
+            imported.MediaType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase);
+        var durationTolerance = imported.SampleRate is > 0 ? 0.5 / imported.SampleRate.Value : 0;
+        if ((existing.Kind != imported.Kind && !reusableAudio) ||
+            !string.Equals(existing.MediaType, imported.MediaType, StringComparison.OrdinalIgnoreCase) ||
+            existing.SizeBytes != imported.SizeBytes ||
+            (existing.SampleRate is { } rate && imported.SampleRate is { } importedRate && rate != importedRate) ||
+            (existing.Channels is { } channels && imported.Channels is { } importedChannels && channels != importedChannels) ||
+            (existing.DurationSeconds is { } duration && imported.DurationSeconds is { } importedDuration &&
+                (!double.IsFinite(duration) || !double.IsFinite(importedDuration) || Math.Abs(duration - importedDuration) > durationTolerance)))
         {
             throw new InvalidDataException("The studio export collides with an existing asset that has incompatible metadata.");
         }
-        assets[index] = existing with
+        var compatible = existing with
         {
-            SampleRate = imported.SampleRate ?? existing.SampleRate,
-            Channels = imported.Channels ?? existing.Channels,
-            DurationSeconds = imported.DurationSeconds ?? existing.DurationSeconds,
-            Provenance = imported.Provenance ?? existing.Provenance
+            SampleRate = existing.SampleRate ?? imported.SampleRate,
+            Channels = existing.Channels ?? imported.Channels,
+            DurationSeconds = existing.DurationSeconds ?? imported.DurationSeconds,
+            Provenance = existing.Provenance ?? imported.Provenance,
+            License = existing.License ?? imported.License
         };
+        assets[index] = compatible;
+        return compatible;
     }
 }

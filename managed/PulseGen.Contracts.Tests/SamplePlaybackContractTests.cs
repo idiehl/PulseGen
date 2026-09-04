@@ -79,7 +79,7 @@ public sealed class SamplePlaybackContractTests
         AssertError(scene, "/assetSha256");
 
         scene = CreateScene();
-        scene.Assets[0] = scene.Assets[0] with { Kind = AssetKind.Render };
+        scene.Assets[0] = scene.Assets[0] with { Kind = AssetKind.Mesh };
         AssertError(scene, "/assetSha256");
 
         foreach (var replacement in new[]
@@ -214,11 +214,13 @@ public sealed class SamplePlaybackContractTests
         Assert.Equal(0, definition.GetProperty("properties").GetProperty("channelIndex").GetProperty("default").GetInt32());
     }
 
-    [Fact]
-    public void ActiveSampleCacheAcceptsExactBudgetAndRejectsOneMoreFrame()
+    [Theory]
+    [InlineData(AssetKind.Audio)]
+    [InlineData(AssetKind.Render)]
+    public void ActiveSampleCacheAcceptsExactBudgetAndRejectsOneMoreFrame(AssetKind kind)
     {
         var scene = CreateScene();
-        scene.Assets[0] = scene.Assets[0] with { DurationSeconds = 8_388_608d / 48000 };
+        scene.Assets[0] = scene.Assets[0] with { Kind = kind, DurationSeconds = 8_388_608d / 48000 };
         var secondAsset = scene.Assets[0] with { Sha256 = new string('b', 64) };
         AddAnotherMonoSource(scene, secondAsset);
         Assert.Empty(SceneValidator.Validate(scene));
