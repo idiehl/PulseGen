@@ -139,7 +139,9 @@ internal static class PackageSelfTest
             if (flyby is null) throw new InvalidOperationException("The flyby starter is required.");
             var projectDirectory = Path.Combine(options.OutputDirectory, "sample-source.pulseproj");
             await ProjectStore.SaveAsync(flyby, projectDirectory);
-            var sourcePath = Path.Combine(options.OutputDirectory, "source-left-only.wav");
+            var sourceDirectory = Path.Combine(options.OutputDirectory, "sample-source-input");
+            Directory.CreateDirectory(sourceDirectory);
+            var sourcePath = Path.Combine(sourceDirectory, "source-left-only.wav");
             var samples = new float[2400];
             for (var frame = 0; frame < samples.Length / 2; frame++) samples[frame * 2] = 0.25f;
             FloatWaveFile.WriteAtomic(sourcePath, new FloatWaveBuffer(48000, 2, samples));
