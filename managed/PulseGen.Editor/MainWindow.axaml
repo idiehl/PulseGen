@@ -41,7 +41,7 @@
           <Button Content="?" Width="28" Height="28" Padding="0" Click="OnStartGuideClicked"
                   ToolTip.Tip="Open the plain-language PulseGen start guide."
                   AutomationProperties.Name="Open the PulseGen start guide" />
-          <TextBlock Text="0.1.0-alpha.18" Foreground="#64758B" VerticalAlignment="Center" />
+          <TextBlock Text="0.1.0-alpha.19" Foreground="#64758B" VerticalAlignment="Center" />
         </StackPanel>
       </Grid>
     </Border>

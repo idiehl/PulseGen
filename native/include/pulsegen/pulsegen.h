@@ -29,6 +29,7 @@ extern "C" {
 #define PG_MAX_ATMOSPHERE_LAYERS 64u
 #define PG_MAX_WIND_ZONES 64u
 #define PG_MAX_EMITTER_SAMPLES 16777216u
+#define PG_MAX_ENCODED_AUDIO_BYTES 268435456u
 
 typedef struct pg_engine pg_engine;
 
@@ -383,6 +384,14 @@ typedef struct pg_sample_emitter_desc {
     uint32_t enabled;
 } pg_sample_emitter_desc;
 
+typedef struct pg_decoded_audio_info {
+    uint32_t size;
+    uint32_t version;
+    uint64_t frame_count;
+    uint32_t sample_rate;
+    uint32_t channels;
+} pg_decoded_audio_info;
+
 typedef struct pg_receiver_rig_desc {
     uint32_t size;
     uint32_t version;
@@ -506,6 +515,28 @@ typedef struct pg_device_status {
 PG_API uint32_t PG_CALL pg_get_abi_version(void);
 PG_API const char* PG_CALL pg_get_engine_version(void);
 PG_API const char* PG_CALL pg_get_last_error(const pg_engine* engine);
+
+/*
+ * Control-thread-only MP3 decoding through the pinned miniaudio/dr_mp3 backend.
+ * Encoded data remains caller-owned for the call. A null destination and zero
+ * capacity scans the full decoded stream into bounded scratch space and returns
+ * exact emitted frames (including encoder delay/padding trimming when tagged).
+ * A non-null destination repeats that scan before checking capacity, then reads
+ * the exact stream into interleaved float PCM at its original rate/channels.
+ * No normalization, channel mixing, or sample-rate conversion is performed.
+ * Caller must discard destination contents after failure/cancellation. Input is
+ * limited to 256 MiB, output to 64 MiB, and finite PCM to [-64,+64]. Cancellation
+ * is checked between 4096-frame batches. The decoder may conceal damaged MPEG
+ * packets; callers must validate packet coverage and declared Xing/VBRI counts
+ * before this API when strict truncated/corrupt-file rejection is required.
+ */
+PG_API pg_status PG_CALL pg_decode_mp3_memory(
+    const void* encoded_data,
+    uint64_t encoded_size_bytes,
+    pg_decoded_audio_info* info,
+    float* destination,
+    uint64_t capacity_samples,
+    const volatile uint32_t* cancellation_flag);
 
 PG_API pg_status PG_CALL pg_engine_create(const pg_engine_config* config, pg_engine** out_engine);
 PG_API void PG_CALL pg_engine_destroy(pg_engine* engine);

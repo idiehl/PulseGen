@@ -170,6 +170,31 @@ internal static class PackageSelfTest
             return "Copied recording reopened, rendered, and imported into both editable receiver takes; left-only channel preserved";
         });
 
+        await CheckAsync("mp3-exact-length-import", async () =>
+        {
+            var inputDirectory = Path.Combine(options.OutputDirectory, "sample-source-input");
+            Directory.CreateDirectory(inputDirectory);
+            var path = Path.Combine(inputDirectory, "padded-mono.mp3");
+            using (var stream = File.Create(path))
+            {
+                // Authored silent MPEG-1 Layer III packets with variable byte padding.
+                // This reproduces the estimated-length bug without bundling user media.
+                for (var packet = 0; packet < 137; packet++)
+                {
+                    var padded = packet % 3 != 0;
+                    var bytes = new byte[835 + (padded ? 1 : 0)];
+                    bytes[0] = 0xff; bytes[1] = 0xfb; bytes[2] = (byte)(0xd0 | (padded ? 2 : 0)); bytes[3] = 0xc0;
+                    stream.Write(bytes);
+                }
+            }
+            using var prepared = await PreparedAudioImport.CreateAsync(path, CancellationToken.None);
+            var audio = SampleAudioReader.Read(prepared.FilePath);
+            if (audio.Frames != 137 * 1152 || audio.SampleRate != 44100 || audio.Channels != 1 ||
+                !audio.DecoderVersion.Contains("dr_mp3", StringComparison.Ordinal) || audio.DecoderBinarySha256.Length != 64)
+                throw new InvalidDataException("The packaged MP3 importer did not preserve the exact decoded frame count.");
+            return "137 complete padded mono MP3 packets imported as exactly 157824 frames at 44.1 kHz";
+        });
+
         var passed = checks.All(check => check.Passed);
         var receipt = new
         {

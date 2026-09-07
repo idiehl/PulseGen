@@ -37,6 +37,14 @@ commands and reads bounded telemetry.
   records source identity, decoded dimensions, channel mapping, timing, decoder,
   and resampling assumptions. The take importer accepts existing v8 and new v9
   receipts. Source PCM must stay within ±64 to protect float acoustic state.
+  MP3 imports validate complete MPEG frames and declared Xing/Info lengths,
+  then count actual decoded frames with the pinned miniaudio/dr_mp3 decoder.
+  This avoids treating a bitrate-based MP3 duration estimate as an exact count.
+  Complete Xing/LAME gapless timing is preserved; partial frames and inconsistent
+  length metadata remain errors. VBRI-only streams retain physical packet timing.
+  Source receipts identify the decoder and binary hash.
+  Free-bitrate MP3 and streams that change rate or channel count mid-file are
+  explicitly rejected by this bounded importer.
 - Retarded-time propagation, distance loss, temperature/humidity-dependent
   sound speed, pressure-aware air absorption, altitude layers, and transformed
   bounded wind/turbulence zones. Preview samples the field once per propagation
@@ -253,7 +261,7 @@ claim an installed, automatically updating, or publicly supported Windows
 release. Verify either the extracted directory or the final ZIP independently:
 
 ```powershell
-./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.18-win-x64.zip
+./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.19-win-x64.zip
 ```
 
 On first launch, a plain-language start guide appears after protected crash

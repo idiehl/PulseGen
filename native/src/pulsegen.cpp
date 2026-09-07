@@ -31,7 +31,7 @@
 
 namespace {
 
-constexpr std::string_view engine_version = "0.1.0-alpha.18";
+constexpr std::string_view engine_version = "0.1.0-alpha.19";
 constexpr double minimum_effective_sound_speed = 40.0;
 constexpr std::uint32_t maximum_atmosphere_integration_segments = 4096U;
 constexpr std::uint32_t maximum_supported_sample_rate = 192000U;
@@ -4493,6 +4493,124 @@ pg_status PG_CALL pg_engine_add_signal_emitter(pg_engine* engine, const pg_signa
         *out_index = static_cast<std::uint32_t>(engine->emitters.size() - 1U);
     }
     return PG_STATUS_OK;
+}
+
+pg_status PG_CALL pg_decode_mp3_memory(
+    const void* encoded_data,
+    uint64_t encoded_size_bytes,
+    pg_decoded_audio_info* info,
+    float* destination,
+    uint64_t capacity_samples,
+    const volatile uint32_t* cancellation_flag)
+{
+    if (info == nullptr || encoded_data == nullptr || encoded_size_bytes == 0U ||
+        (destination == nullptr && capacity_samples != 0U)) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (!valid_struct(info)) {
+        return PG_STATUS_ABI_MISMATCH;
+    }
+    if (encoded_size_bytes > PG_MAX_ENCODED_AUDIO_BYTES) {
+        return PG_STATUS_CAPACITY_EXCEEDED;
+    }
+    const auto cancelled = [&]() noexcept { return cancellation_flag != nullptr && *cancellation_flag != 0U; };
+    if (cancelled()) {
+        return PG_STATUS_CANCELLED;
+    }
+
+    // This is a control-thread API. The decoder owns only its small working
+    // state; it does not allocate a buffer proportional to a claimed duration.
+    struct decoder_owner {
+        ma_decoder value{};
+        bool initialized{};
+        ~decoder_owner() { if (initialized) { ma_decoder_uninit(&value); } }
+    } decoder;
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 0U, 0U);
+    config.encodingFormat = ma_encoding_format_mp3;
+    const ma_result opened = ma_decoder_init_memory(encoded_data, static_cast<std::size_t>(encoded_size_bytes), &config, &decoder.value);
+    if (opened != MA_SUCCESS) {
+        return opened == MA_OUT_OF_MEMORY ? PG_STATUS_INTERNAL_ERROR : PG_STATUS_INVALID_ARGUMENT;
+    }
+    decoder.initialized = true;
+    const std::uint32_t channels = decoder.value.outputChannels;
+    const std::uint32_t sample_rate = decoder.value.outputSampleRate;
+    if (channels < 1U || channels > 2U || sample_rate < 8000U || sample_rate > maximum_supported_sample_rate ||
+        decoder.value.outputFormat != ma_format_f32) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+
+    constexpr std::uint64_t chunk_frames = 4096U;
+    std::array<float, chunk_frames * 2U> scratch{};
+    const std::uint64_t maximum_frames = PG_MAX_EMITTER_SAMPLES / channels;
+    std::uint64_t total_frames = 0U;
+    for (;;) {
+        if (cancelled()) {
+            return PG_STATUS_CANCELLED;
+        }
+        ma_uint64 read_frames = 0U;
+        const ma_result read_status = ma_decoder_read_pcm_frames(&decoder.value, scratch.data(), chunk_frames, &read_frames);
+        if (read_status != MA_SUCCESS && read_status != MA_AT_END) {
+            return PG_STATUS_INVALID_ARGUMENT;
+        }
+        if (read_frames > chunk_frames || read_frames > maximum_frames - total_frames) {
+            return PG_STATUS_CAPACITY_EXCEEDED;
+        }
+        const auto sample_count = static_cast<std::size_t>(read_frames) * channels;
+        if (!std::all_of(scratch.begin(), scratch.begin() + sample_count, [](float sample) {
+            return std::isfinite(sample) && std::abs(sample) <= 64.0F;
+        })) {
+            return PG_STATUS_INVALID_ARGUMENT;
+        }
+        total_frames += read_frames;
+        if (read_status == MA_AT_END) {
+            break;
+        }
+        if (read_frames == 0U) {
+            return PG_STATUS_INVALID_ARGUMENT;
+        }
+    }
+    if (total_frames == 0U) {
+        return PG_STATUS_INVALID_ARGUMENT;
+    }
+    if (cancelled()) {
+        return PG_STATUS_CANCELLED;
+    }
+    info->frame_count = total_frames;
+    info->channels = channels;
+    info->sample_rate = sample_rate;
+    if (destination == nullptr) {
+        return PG_STATUS_OK;
+    }
+    if (capacity_samples < total_frames * channels) {
+        return PG_STATUS_CAPACITY_EXCEEDED;
+    }
+    if (ma_decoder_seek_to_pcm_frame(&decoder.value, 0U) != MA_SUCCESS) {
+        return PG_STATUS_INTERNAL_ERROR;
+    }
+
+    std::uint64_t written_frames = 0U;
+    while (written_frames < total_frames) {
+        if (cancelled()) {
+            return PG_STATUS_CANCELLED;
+        }
+        const ma_uint64 requested = std::min(chunk_frames, total_frames - written_frames);
+        ma_uint64 read_frames = 0U;
+        float* chunk = destination + static_cast<std::size_t>(written_frames) * channels;
+        const ma_result read_status = ma_decoder_read_pcm_frames(&decoder.value, chunk, requested, &read_frames);
+        if ((read_status != MA_SUCCESS && read_status != MA_AT_END) || read_frames != requested ||
+            !std::all_of(chunk, chunk + static_cast<std::size_t>(read_frames) * channels, [](float sample) {
+                return std::isfinite(sample) && std::abs(sample) <= 64.0F;
+            })) {
+            return PG_STATUS_INVALID_ARGUMENT;
+        }
+        written_frames += read_frames;
+    }
+    if (cancelled()) {
+        return PG_STATUS_CANCELLED;
+    }
+    ma_uint64 extra_frames = 0U;
+    const ma_result tail_status = ma_decoder_read_pcm_frames(&decoder.value, scratch.data(), 1U, &extra_frames);
+    return tail_status == MA_AT_END && extra_frames == 0U ? PG_STATUS_OK : PG_STATUS_INVALID_ARGUMENT;
 }
 
 pg_status PG_CALL pg_engine_add_sample_emitter(pg_engine* engine, const pg_sample_emitter_desc* emitter, uint32_t* out_index)

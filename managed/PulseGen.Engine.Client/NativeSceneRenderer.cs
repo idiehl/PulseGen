@@ -98,6 +98,53 @@ public static unsafe class NativeSceneRenderer
 
     public static string EngineVersion => Marshal.PtrToStringUTF8(Native.pg_get_engine_version()) ?? "unknown";
 
+    private static string? loadedEnginePath;
+    private static readonly Lazy<string> EngineBinarySha256 = new(() =>
+    {
+        _ = EngineVersion;
+        if (loadedEnginePath is null)
+            throw new InvalidOperationException("The MP3 decoder binary could not be identified. Set PULSEGEN_ENGINE_PATH to the matching engine DLL.");
+        using var stream = File.OpenRead(loadedEnginePath);
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
+    });
+
+    internal static DecodedSampleAudio DecodeMp3(byte[] encoded, int audioOffset, int audioByteCount, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cancellationFlag = Marshal.AllocHGlobal(sizeof(int));
+        Marshal.WriteInt32(cancellationFlag, 0);
+        try
+        {
+            using var registration = cancellationToken.Register(() => Marshal.WriteInt32(cancellationFlag, 1));
+            var info = new NativeDecodedAudioInfo { Size = (uint)sizeof(NativeDecodedAudioInfo), Version = AbiVersion };
+            fixed (byte* bytes = &encoded[audioOffset])
+            {
+                var status = Native.pg_decode_mp3_memory(bytes, (ulong)audioByteCount, &info, null, 0, (uint*)cancellationFlag);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (status != 0)
+                    throw new InvalidDataException($"MP3 scan failed (status {status}): invalid audio or the 64 MiB decoded limit was exceeded.");
+                if (info.Channels is < 1 or > 2 || info.SampleRate is < 8000 or > 192000 ||
+                    info.FrameCount == 0 || info.FrameCount > (ulong)SampleAudioReader.MaximumDecodedSamples / info.Channels)
+                    throw new InvalidDataException("MP3 audio exceeds the supported channel, sample-rate, or 64 MiB decoded limits.");
+                var expected = info;
+                var samples = new float[checked((int)(info.FrameCount * info.Channels))];
+                fixed (float* data = samples)
+                {
+                    status = Native.pg_decode_mp3_memory(bytes, (ulong)audioByteCount, &info, data, (ulong)samples.Length, (uint*)cancellationFlag);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (status != 0 || info.FrameCount != expected.FrameCount || info.SampleRate != expected.SampleRate || info.Channels != expected.Channels)
+                    throw new InvalidDataException($"MP3 decoding did not match its complete scan (status {status}). No partial recording was imported.");
+                return new((int)info.SampleRate, (int)info.Channels, samples)
+                {
+                    Container = "MP3", DecoderVersion = $"miniaudio-0.11.25/dr_mp3-0.7.3; PulseGen.Engine-{EngineVersion}; full decoded-frame scan",
+                    DecoderBinarySha256 = EngineBinarySha256.Value
+                };
+            }
+        }
+        finally { Marshal.FreeHGlobal(cancellationFlag); }
+    }
+
     public static IReadOnlyList<ImportedMeshTriangleData> DecodeImportedMeshes(
         SceneDocument scene,
         IReadOnlyCollection<Guid> geometryIds,
@@ -437,7 +484,9 @@ public static unsafe class NativeSceneRenderer
                 new("miniaudio", "0.11.25", "WASAPI device adapter"),
                 new("Assimp", "6.0.5", "bounded memory-only OBJ/glTF/GLB mesh importer"),
                 .. sampleSources.Count == 0 ? Array.Empty<RenderDependency>() :
-                    [new("libsndfile", "1.2.2", "SHA-256 verified source decoding; no normalization")]
+                    [new("libsndfile", "1.2.2", "SHA-256 verified source decoding and metadata; no normalization")],
+                .. sampleSources.Any(source => source.Container == "MP3") ?
+                    new[] { new RenderDependency("dr_mp3", "0.7.3 (miniaudio 0.11.25)", "bounded full-scan MP3 decoding; no normalization") } : []
             ],
             [],
             takeFiles,
@@ -1352,7 +1401,7 @@ public static unsafe class NativeSceneRenderer
         sampleSources?.Add(new(
             emitter.Id, asset.Sha256, asset.FileName, asset.SizeBytes, asset.Provenance, asset.License,
             audio.SampleRate, audio.Channels, audio.Frames, audio.DurationSeconds, audio.Container,
-            audio.DecoderVersion, SampleAudioReader.ExpectedBinarySha256, emitter.ChannelMapping,
+            audio.DecoderVersion, audio.DecoderBinarySha256, emitter.ChannelMapping,
             playback.ChannelIndex, playback.StartTimeSeconds, playback.OffsetSeconds, playback.Loop,
             isBed
                 ? "32-tap Blackman-windowed sinc; declared source-rate antialiasing; stereo bed bypasses acoustics"
@@ -1595,6 +1644,7 @@ public static unsafe class NativeSceneRenderer
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_acoustic_material", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_sample_emitter", out _) ||
+                !NativeLibrary.TryGetExport(candidate, "pg_decode_mp3_memory", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_add_mesh_geometry", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_triangles", out _) ||
                 !NativeLibrary.TryGetExport(candidate, "pg_engine_copy_mesh_material_regions", out _) ||
@@ -1611,6 +1661,7 @@ public static unsafe class NativeSceneRenderer
                 return false;
             }
             handle = candidate;
+            loadedEnginePath = Path.GetFullPath(path);
             candidate = 0;
             return true;
         }
@@ -1667,8 +1718,11 @@ public static unsafe class NativeSceneRenderer
     [StructLayout(LayoutKind.Sequential)] private struct NativeBufferDeviceConfig { public uint Size, Version; public float* InterleavedStereo; public ulong FrameCount; public uint SampleRate, PeriodFrames, ExclusiveMode, Loop; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeDeviceStatus { public uint Size, Version, Running, SampleRate, PeriodFrames, ReceiverIndex; public ulong FramesProcessed, CallbackCount; public uint Recoverable, InterruptionCount, RecoveryCount, Reserved; public ulong CallbackDurationNanosecondsTotal, CallbackDurationNanosecondsMaximum, CallbackDeadlineMissCount; public uint CallbackLoadPartsPerMillionMaximum, CallbackFramesMaximum; }
 
+    [StructLayout(LayoutKind.Sequential)] private struct NativeDecodedAudioInfo { public uint Size, Version; public ulong FrameCount; public uint SampleRate, Channels; }
+
     private static class Native
     {
+        [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_decode_mp3_memory(void* encodedData, ulong encodedSizeBytes, NativeDecodedAudioInfo* info, float* destination, ulong capacitySamples, uint* cancellationFlag);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern nint pg_get_engine_version();
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern int pg_engine_create(NativeEngineConfig* config, out nint engine);
         [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)] internal static extern void pg_engine_destroy(nint engine);

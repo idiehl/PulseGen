@@ -82,7 +82,7 @@ public sealed class PrimitiveAcousticsTests
             Assert.InRange(ratio, 0.498, 0.502);
             Assert.Equal((uint)1, baseline.FilesWritten);
             Assert.Equal((uint)1, surface.FilesWritten);
-            Assert.StartsWith("0.1.0-alpha.18", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
+            Assert.StartsWith("0.1.0-alpha.19", NativeSceneRenderer.EngineVersion, StringComparison.Ordinal);
 
             using var receipt = JsonDocument.Parse(File.ReadAllText(surface.RenderReceiptPath));
             Assert.Equal(9, receipt.RootElement.GetProperty("receiptVersion").GetInt32());

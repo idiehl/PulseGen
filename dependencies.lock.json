@@ -13,9 +13,10 @@
       "version": "0.11.25",
       "commit": "9634bedb5b5a2ca38c1ee7108a9358a4e233f14d",
       "archiveSha256": "d9fc392f394fba13c4d71436fea38a4af384292871d59aa7d728c11fbc4ae978",
-      "status": "active-wasapi-playback-no-decoders",
+      "status": "active-wasapi-playback-and-mp3-decoding",
       "license": "MIT-0-or-Public-Domain",
-      "purpose": "WASAPI device transport"
+      "purpose": "WASAPI device transport and bounded MP3 import using bundled dr_mp3 0.7.3",
+      "bundledDecoderVersions": { "dr_mp3": "0.7.3" }
     },
     "steam-audio": {
       "version": "4.8.1",

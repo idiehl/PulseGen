@@ -891,6 +891,75 @@ void verify_sample_emitters()
     pg_engine_destroy(engine);
 }
 
+// Authored silent MPEG-1 Layer III packets: zero side-information selects empty
+// granules and an empty bit reservoir. No user recording or binary fixture is
+// required to reproduce complete CBR files with non-integral bytes per frame.
+std::vector<std::uint8_t> silent_mp3(std::uint32_t packet_count, bool stereo, bool padding, bool gapless_tag = false)
+{
+    std::vector<std::uint8_t> data;
+    for (std::uint32_t packet = 0U; packet < packet_count; ++packet) {
+        const bool pad = padding && (packet % 3U != 0U);
+        const std::size_t offset = data.size();
+        data.resize(offset + 417U + (pad ? 1U : 0U), 0U);
+        data[offset] = 0xFFU;
+        data[offset + 1U] = 0xFBU;
+        data[offset + 2U] = pad ? 0x92U : 0x90U;
+        data[offset + 3U] = stereo ? 0U : 0xC0U;
+        if (gapless_tag && packet == 0U) {
+            const std::size_t tag = offset + (stereo ? 36U : 21U);
+            data[tag] = 'I'; data[tag + 1U] = 'n'; data[tag + 2U] = 'f'; data[tag + 3U] = 'o';
+            data[tag + 7U] = 1U; // Frame count only; metadata packet is excluded.
+            const auto frames = packet_count - 1U;
+            for (std::size_t byte = 0U; byte < 4U; ++byte) {
+                data[tag + 8U + byte] = static_cast<std::uint8_t>(frames >> ((3U - byte) * 8U));
+            }
+            const std::string encoder = "LAME3.100";
+            std::copy(encoder.begin(), encoder.end(), data.begin() + tag + 12U);
+            constexpr std::uint32_t delay = 576U;
+            constexpr std::uint32_t end_padding = 900U;
+            data[tag + 33U] = static_cast<std::uint8_t>(delay >> 4U);
+            data[tag + 34U] = static_cast<std::uint8_t>((delay << 4U) | (end_padding >> 8U));
+            data[tag + 35U] = static_cast<std::uint8_t>(end_padding);
+        }
+    }
+    return data;
+}
+
+void verify_mp3_decode()
+{
+    static_assert(sizeof(pg_decoded_audio_info) == 24U);
+    for (const bool stereo : { false, true }) {
+        for (const bool gapless : { false, true }) {
+            auto data = silent_mp3(137U, stereo, true, gapless);
+            pg_decoded_audio_info info{ sizeof(pg_decoded_audio_info), PG_ABI_VERSION };
+            REQUIRE(pg_decode_mp3_memory(data.data(), data.size(), &info, nullptr, 0U, nullptr) == PG_STATUS_OK);
+            REQUIRE(info.sample_rate == 44100U);
+            REQUIRE(info.channels == (stereo ? 2U : 1U));
+            REQUIRE(info.frame_count == (gapless ? (136U * 1152U) - 576U - 900U : 137U * 1152U));
+            std::vector<float> samples(static_cast<std::size_t>(info.frame_count) * info.channels, 1.0F);
+            REQUIRE(pg_decode_mp3_memory(data.data(), data.size(), &info, samples.data(), samples.size() - 1U, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
+            REQUIRE(std::all_of(samples.begin(), samples.end(), [](float value) { return value == 1.0F; }));
+            REQUIRE(pg_decode_mp3_memory(data.data(), data.size(), &info, samples.data(), samples.size(), nullptr) == PG_STATUS_OK);
+            REQUIRE(std::all_of(samples.begin(), samples.end(), [](float value) { return value == 0.0F; }));
+            std::fill(samples.begin(), samples.end(), 1.0F);
+            const std::uint32_t cancelled = 1U;
+            REQUIRE(pg_decode_mp3_memory(data.data(), data.size(), &info, samples.data(), samples.size(), &cancelled) == PG_STATUS_CANCELLED);
+            REQUIRE(std::all_of(samples.begin(), samples.end(), [](float value) { return value == 1.0F; }));
+            info.version = PG_ABI_VERSION + 1U;
+            REQUIRE(pg_decode_mp3_memory(data.data(), data.size(), &info, nullptr, 0U, nullptr) == PG_STATUS_ABI_MISMATCH);
+        }
+    }
+    pg_decoded_audio_info info{ sizeof(pg_decoded_audio_info), PG_ABI_VERSION };
+    std::array<std::uint8_t, 128U> invalid{};
+    REQUIRE(pg_decode_mp3_memory(invalid.data(), invalid.size(), &info, nullptr, 0U, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    REQUIRE(pg_decode_mp3_memory(invalid.data(), static_cast<std::uint64_t>(PG_MAX_ENCODED_AUDIO_BYTES) + 1U, &info, nullptr, 0U, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
+    REQUIRE(pg_decode_mp3_memory(nullptr, 0U, &info, nullptr, 0U, nullptr) == PG_STATUS_INVALID_ARGUMENT);
+    // Encoded size stays small while decoded stereo would exceed64MiB. The
+    // preflight must stop at its output budget without allocating a PCM buffer.
+    const auto too_long = silent_mp3(7282U, true, false);
+    REQUIRE(pg_decode_mp3_memory(too_long.data(), too_long.size(), &info, nullptr, 0U, nullptr) == PG_STATUS_CAPACITY_EXCEEDED);
+}
+
 } // namespace
 
 int main(int argument_count, char** arguments)
@@ -898,6 +967,11 @@ int main(int argument_count, char** arguments)
     try {
     static_assert(PG_ABI_VERSION == 5U);
     REQUIRE(pg_get_abi_version() == PG_ABI_VERSION);
+    verify_mp3_decode();
+    if (argument_count == 2 && std::string_view(arguments[1]) == "--mp3-decode-tests") {
+        std::cout << "PULSEGEN_NATIVE_MP3_OK\n";
+        return 0;
+    }
     verify_sample_emitters();
     if (argument_count == 2 && std::string_view(arguments[1]) == "--sample-source-tests") {
         std::cout << "PULSEGEN_NATIVE_SAMPLES_OK\n";

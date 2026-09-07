@@ -16,10 +16,14 @@ explicit user action that installed it.
 ## miniaudio 0.11.25
 
 Copyright David Reid. PulseGen uses the MIT-0 option for the WASAPI playback
-transport. Decoder, encoder, resource-manager, and generation modules are
-disabled in the native build. Source is fetched from immutable commit
+transport and the bundled dr_mp3 0.7.3 decoder, statically compiled into
+PulseGen.Engine.dll. Only MP3 decoding is enabled; WAV/FLAC/Vorbis decoders,
+encoder, resource-manager, and generation modules remain disabled. Source is fetched from immutable commit
 `9634bedb5b5a2ca38c1ee7108a9358a4e233f14d`; the release archive is verified by
-the SHA-256 recorded in `dependencies.lock.json`.
+the SHA-256 recorded in `dependencies.lock.json`. Its upstream `LICENSE` is
+copied to `licenses/miniaudio-MIT-0.txt` in portable packages. Native decoder
+tests, managed MP3 import/packet tests, and the packaged exact-length MP3
+self-test exercise this adapter.
 
 ## Assimp 6.0.5
 

@@ -53,7 +53,9 @@ target_include_directories(PulseGen.Engine
 )
 target_compile_definitions(PulseGen.Engine PRIVATE
     PULSEGEN_ENGINE_BUILD=1
-    MA_NO_DECODING
+    MA_NO_WAV
+    MA_NO_FLAC
+    MA_NO_VORBIS
     MA_NO_ENCODING
     MA_NO_RESOURCE_MANAGER
     MA_NO_GENERATION

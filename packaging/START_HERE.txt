@@ -26,6 +26,8 @@ mix. The import dialog can mute existing sources so you can hear the new one.
 Select a source to set its volume, scene start, file offset, or whole-file loop.
 Linked channels share timing but have independently editable paths and levels.
 Original audio is preserved. Active unique decoded recordings share 64 MiB.
+Alpha.19 fixes valid MP3 files being rejected because their estimated duration
+differs from their actual length. Complete audio frames are checked before import.
 Recording tone changes from air and surfaces use an approximate response in
 this alpha; full frequency-dependent sample coloration is still being built.
 

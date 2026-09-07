@@ -11,6 +11,7 @@ public sealed record DecodedSampleAudio(int SampleRate, int Channels, float[] Sa
     public double DurationSeconds => Frames / (double)SampleRate;
     public string Container { get; init; } = "unknown";
     public string DecoderVersion { get; init; } = "unknown";
+    public string DecoderBinarySha256 { get; init; } = "unknown";
     public int? BitsPerSample { get; init; }
     public string? Title { get; init; }
     public string? Comment { get; init; }
@@ -93,6 +94,24 @@ public static unsafe class SampleAudioReader
                 0x230000 => "MP3",
                 _ => throw new InvalidDataException("Supported sample files are WAV, AIFF, FLAC, MP3, Ogg Vorbis, and Opus.")
             };
+            if (container == "MP3")
+            {
+                // libsndfile 1.2.2 can report an estimated MP3 length and also cap
+                // reads at it. Use a complete bounded decode, not that estimate.
+                source.Position = 0;
+                var encoded = new byte[checked((int)source.Length)];
+                source.ReadExactly(encoded);
+                var scan = Mp3FrameScanner.Validate(encoded, cancellationToken);
+                var decoded = NativeSceneRenderer.DecodeMp3(encoded, scan.AudioOffset, scan.AudioByteCount, cancellationToken);
+                if (decoded.SampleRate != scan.SampleRate || decoded.Channels != scan.Channels ||
+                    (scan.ExpectedPcmFrames is { } expectedFrames && decoded.Frames != expectedFrames))
+                    throw new InvalidDataException("MP3 decoded audio does not match its complete frame scan and gapless metadata.");
+                return decoded with
+                {
+                    Title = Marshal.PtrToStringUTF8(api.GetString(handle, 1)),
+                    Comment = Marshal.PtrToStringUTF8(api.GetString(handle, 5))
+                };
+            }
             if (info.Channels is < 1 or > 2 || info.SampleRate is < 8000 or > 192000 ||
                 info.Frames <= 0 || info.Frames > MaximumDecodedSamples / info.Channels)
                 throw new InvalidDataException("Samples require one or two channels at 8–192 kHz, within the 64 MiB decoded limit.");
@@ -125,6 +144,7 @@ public static unsafe class SampleAudioReader
             {
                 Container = container,
                 DecoderVersion = Marshal.PtrToStringUTF8(api.Version()) ?? "unknown",
+                DecoderBinarySha256 = ExpectedBinarySha256,
                 BitsPerSample = (info.Format & 0xffff) switch { 1 or 5 => 8, 2 => 16, 3 => 24, 4 or 6 => 32, 7 => 64, _ => null },
                 Title = Marshal.PtrToStringUTF8(api.GetString(handle, 1)),
                 Comment = Marshal.PtrToStringUTF8(api.GetString(handle, 5))
