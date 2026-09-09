@@ -3,10 +3,14 @@
         xmlns:local="using:PulseGen.Editor"
         x:Class="PulseGen.Editor.MainWindow"
         Title="PulseGen — Physics-First Audio Workstation"
-        Width="1420" Height="820" MinWidth="1080" MinHeight="680"
+        Width="1480" Height="900" MinWidth="1080" MinHeight="760"
         WindowStartupLocation="CenterScreen"
         Background="#0B0F14">
-  <Grid RowDefinitions="52,*,300" ColumnDefinitions="270,*,326">
+  <Window.Styles>
+    <Style Selector="Button.worldTool"><Setter Property="Padding" Value="10,5" /><Setter Property="FontSize" Value="11" /><Setter Property="Background" Value="#19222D" /></Style>
+    <Style Selector="Button.worldTool.active"><Setter Property="Background" Value="#24524F" /><Setter Property="Foreground" Value="#A1F3E5" /></Style>
+  </Window.Styles>
+  <Grid RowDefinitions="52,*,116,1,210" ColumnDefinitions="240,*,306">
     <Border Grid.Row="0" Grid.ColumnSpan="3" Background="#111721" BorderBrush="#273244" BorderThickness="0,0,0,1">
       <Grid ColumnDefinitions="Auto,20,Auto,*,Auto,16,Auto" Margin="14,0">
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="10">
@@ -19,9 +23,6 @@
           </StackPanel>
         </StackPanel>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
-          <Button x:Name="PlayButton" Content="▶  Preview" Click="OnPlayClicked" />
-          <Button Content="■  Stop" Click="OnStopClicked" />
-          <Button x:Name="GestureButton" Content="●  Gesture" Click="OnGestureClicked" ToolTip.Tip="Draw a motion path directly in the world; raw motion is retained beside simplified automation." />
           <Button Content="↗  Open" Click="OnOpenClicked" ToolTip.Tip="Open a validated .pulseproj directory without discarding the current scene if loading fails." />
           <Button Content="⌑  Save" Click="OnSaveClicked" ToolTip.Tip="Save the current scene atomically as a .pulseproj directory." />
           <Button x:Name="AnalyzeButton" Content="⌁  Analyze" Click="OnAnalyzeClicked" ToolTip.Tip="Decompose the most recently rendered receiver take into partial, transient, and stochastic layers." />
@@ -41,7 +42,7 @@
           <Button Content="?" Width="28" Height="28" Padding="0" Click="OnStartGuideClicked"
                   ToolTip.Tip="Open the plain-language PulseGen start guide."
                   AutomationProperties.Name="Open the PulseGen start guide" />
-          <TextBlock Text="0.1.0-alpha.19" Foreground="#64758B" VerticalAlignment="Center" />
+          <TextBlock Text="0.1.0-alpha.20" Foreground="#64758B" VerticalAlignment="Center" />
         </StackPanel>
       </Grid>
     </Border>
@@ -78,8 +79,8 @@
             <Border Height="1" Background="#2B3748" Margin="0,3" />
             <TextBlock x:Name="AtlasStateText" Classes="sectionTitle" Text="PRIVATE · LOCAL ONLY" />
             <Grid ColumnDefinitions="*,*" ColumnSpacing="6">
-              <Button x:Name="AtlasButton" Content="◇  Atlas sign in" Click="OnAtlasClicked" ToolTip.Tip="Use authorization code + PKCE. The rotating refresh token is stored in Windows Credential Manager." />
-              <Button x:Name="SyncButton" Grid.Column="1" Content="⇧  Sync project" Click="OnSyncClicked" ToolTip.Tip="Explicitly upload the saved manifest and create an immutable Atlas project revision. Conflicts become named branches." />
+              <Button x:Name="AtlasButton" Content="◇ Sign in" Click="OnAtlasClicked" ToolTip.Tip="Sign in to Atlas using authorization code + PKCE. The rotating refresh token is stored in Windows Credential Manager." />
+              <Button x:Name="SyncButton" Grid.Column="1" Content="⇧ Sync" Click="OnSyncClicked" ToolTip.Tip="Explicitly upload the saved manifest and create an immutable Atlas project revision. Conflicts become named branches." />
             </Grid>
             <Button Content="♫  Import sound" Click="OnImportSoundClicked" ToolTip.Tip="Add a mono or stereo recording from WAV, AIFF, FLAC, MP3, Ogg Vorbis, or Opus. Choose explicitly how stereo channels enter the world." />
             <Button x:Name="ImportMeshButton" Content="▱  Import acoustic mesh" Click="OnImportMeshClicked" ToolTip.Tip="Copy an OBJ or self-contained glTF/GLB into this project's SHA-256 asset store and add it as a sound-blocking, echo-producing surface." />
@@ -88,24 +89,51 @@
       </Grid>
     </Border>
 
-    <Grid Grid.Row="1" Grid.Column="1" Background="#090D12">
-      <local:GpuWorldViewport x:Name="GpuViewport" IsHitTestVisible="False" />
-      <local:WorldViewport x:Name="Viewport" />
-      <Border HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#C60E141D" BorderBrush="#314052" BorderThickness="1" CornerRadius="6" Padding="10,7">
-        <StackPanel Orientation="Horizontal" Spacing="12">
-          <TextBlock Text="PERSPECTIVE" Foreground="#AFC0D2" FontSize="10" />
-          <TextBlock Text="Y ↑" Foreground="#66DCCF" FontSize="10" />
-          <TextBlock Text="GRID 1 m" Foreground="#718198" FontSize="10" />
-          <TextBlock Text="RMB ORBIT · MMB PAN · WHEEL ZOOM" Foreground="#718198" FontSize="10" />
-          <Button Content="FIT" Padding="7,2" FontSize="9" Click="OnFitViewportClicked" ToolTip.Tip="Frame the complete sound space. You can also press F while the viewport is focused." />
-          <TextBlock x:Name="ReflectionPathText" Text="ECHO ROUTES —" Foreground="#74CFC8" FontSize="10" ToolTip.Tip="Exact bounded imported-mesh paths selected by the native acoustic solver at the current playhead." />
-          <TextBlock x:Name="ViewportPerformanceText" Text="GPU STARTING" Foreground="#718198" FontSize="10" ToolTip.Tip="Live GPU frame rate and retained triangle count." />
+    <Grid Grid.Row="1" Grid.Column="1" Background="#090D12" RowDefinitions="Auto,*,Auto">
+      <Border Background="#101820" BorderBrush="#293747" BorderThickness="0,0,0,1" Padding="10,8">
+        <StackPanel Spacing="6">
+          <WrapPanel Orientation="Horizontal">
+            <TextBlock Text="SOUND SPACE" Foreground="#99B2C5" FontSize="10" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,12,4" />
+            <ComboBox x:Name="CameraViewBox" Width="137" MinHeight="28" Margin="0,0,6,4" SelectionChanged="OnCameraViewChanged" AutomationProperties.Name="Camera view" ToolTip.Tip="Use top, front, or side for accurate flat views. All views show the same scene." />
+            <Button Classes="worldTool" Content="◎ Focus selection" Click="OnFocusSelectionClicked" Margin="0,0,6,4" ToolTip.Tip="Make the selected object or path point the fixed centre of camera orbit." />
+            <Button Classes="worldTool" Content="Fit all" Click="OnFitViewportClicked" Margin="0,0,6,4" ToolTip.Tip="Frame the complete sound space (F in the world)." />
+            <Button Classes="worldTool" Content="−" Click="OnZoomOutClicked" Margin="0,0,4,4" ToolTip.Tip="Zoom out. The mouse wheel also zooms." AutomationProperties.Name="Zoom out" />
+            <Button Classes="worldTool" Content="+" Click="OnZoomInClicked" Margin="0,0,8,4" ToolTip.Tip="Zoom in around the camera pivot. The mouse wheel also zooms." AutomationProperties.Name="Zoom in" />
+            <TextBlock x:Name="CameraPivotText" Text="Orbit around scene centre" Foreground="#748BA0" FontSize="10" VerticalAlignment="Center" Margin="0,0,0,4" />
+          </WrapPanel>
+          <WrapPanel Orientation="Horizontal">
+            <Button x:Name="WorldSelectButton" Classes="worldTool active" Tag="Select" Content="↖ Select" Click="OnWorldToolClicked" Margin="0,0,4,4" ToolTip.Tip="Select objects and path points without moving them. Never changes playback time." />
+            <Button x:Name="WorldMoveButton" Classes="worldTool" Tag="Move" Content="✥ Move" Click="OnWorldToolClicked" Margin="0,0,4,4" ToolTip.Tip="Drag a point in the chosen plane or along a single axis. Escape cancels the move." />
+            <Button x:Name="WorldOrbitButton" Classes="worldTool" Tag="Orbit" Content="⟳ Orbit" Click="OnWorldToolClicked" Margin="0,0,4,4" ToolTip.Tip="Left-drag to rotate the camera around its fixed focus point. Right-drag also orbits." />
+            <Button x:Name="WorldPanButton" Classes="worldTool" Tag="Pan" Content="↔ Pan" Click="OnWorldToolClicked" Margin="0,0,10,4" ToolTip.Tip="Left-drag to shift the camera and its focus together. Middle-drag also pans." />
+            <Button x:Name="GestureButton" Classes="worldTool" Content="● Record path" Click="OnGestureClicked" Margin="0,0,4,4" ToolTip.Tip="Record a new motion gesture for the selected path. Raw movement is preserved." />
+          </WrapPanel>
+          <WrapPanel Orientation="Horizontal">
+            <TextBlock Text="Move along" Foreground="#8DA3B8" FontSize="11" VerticalAlignment="Center" Margin="0,0,7,0" />
+            <ComboBox x:Name="MoveConstraintBox" Width="157" MinHeight="27" SelectionChanged="OnMoveConstraintChanged" AutomationProperties.Name="Movement plane or axis" />
+            <CheckBox x:Name="WorldSnapCheck" Content="Snap 0.1 m" Margin="10,0" FontSize="11" IsCheckedChanged="OnWorldSnapChanged" ToolTip.Tip="Snap only the coordinates you move to a 10 cm grid. Locked coordinates are preserved." />
+            <TextBlock Text="Y up · grid 2 m" Foreground="#8197AB" FontSize="10" VerticalAlignment="Center" />
+          </WrapPanel>
         </StackPanel>
       </Border>
-      <Border HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="14" Background="#D00D131B" CornerRadius="6" Padding="11,8">
-        <StackPanel>
-          <TextBlock x:Name="PositionText" Text="t  0.000 s" Classes="value" FontSize="12" />
-          <TextBlock Text="Drag the time ruler or use Preview" Foreground="#718198" FontSize="10" />
+      <Grid Grid.Row="1" ClipToBounds="True">
+        <local:GpuWorldViewport x:Name="GpuViewport" IsHitTestVisible="False" />
+        <local:WorldViewport x:Name="Viewport" AutomationProperties.Name="3D sound space. Select, move, orbit, or pan using the tools above." />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="10" Spacing="12" IsHitTestVisible="False">
+          <TextBlock x:Name="ReflectionPathText" Text="ECHO ROUTES —" Foreground="#74CFC8" FontSize="9" />
+          <TextBlock x:Name="ViewportPerformanceText" Text="GPU STARTING" Foreground="#718198" FontSize="9" />
+        </StackPanel>
+      </Grid>
+      <Border Grid.Row="2" Background="#101820" BorderBrush="#293747" BorderThickness="0,1,0,0" Padding="10,7">
+        <StackPanel Spacing="5">
+          <TextBlock x:Name="WorldToolHelpText" Text="Select a point. Camera and point tools never change playback time." Foreground="#93ABBE" FontSize="11" TextWrapping="Wrap" />
+          <WrapPanel Orientation="Horizontal">
+            <TextBlock x:Name="WorldSelectionLabelText" Text="Position (m)" Foreground="#8DA3B8" FontSize="11" VerticalAlignment="Center" Margin="0,0,10,0" />
+            <TextBlock Text="X" Foreground="#EF8990" VerticalAlignment="Center" Margin="0,0,4,0" /><TextBox x:Name="WorldPositionX" Width="76" MinHeight="26" FontSize="11" AutomationProperties.Name="Selected position X in metres" />
+            <TextBlock Text="Y ↑" Foreground="#7AD7AC" VerticalAlignment="Center" Margin="8,0,4,0" /><TextBox x:Name="WorldPositionY" Width="76" MinHeight="26" FontSize="11" AutomationProperties.Name="Selected height Y in metres" />
+            <TextBlock Text="Z" Foreground="#7EA9F0" VerticalAlignment="Center" Margin="8,0,4,0" /><TextBox x:Name="WorldPositionZ" Width="76" MinHeight="26" FontSize="11" AutomationProperties.Name="Selected position Z in metres" />
+            <Button x:Name="ApplyWorldPositionButton" Content="Apply XYZ" Classes="worldTool" Margin="8,0,0,0" Click="OnApplyWorldPositionClicked" ToolTip.Tip="Commit exact position coordinates; playback time stays unchanged." />
+          </WrapPanel>
         </StackPanel>
       </Border>
     </Grid>
@@ -171,7 +199,7 @@
                   <TextBlock Grid.Column="4" Text="Z" Foreground="#8192A7" VerticalAlignment="Center" />
                   <TextBox x:Name="KeyframeZ" Grid.Column="5" Text="4.000" LostFocus="OnKeyframeValueCommitted" />
                 </Grid>
-                <TextBlock Text="Drag a path point in the world for X/Z; use these fields for exact SI coordinates." TextWrapping="Wrap" Foreground="#65778C" FontSize="9" />
+                <TextBlock Text="Use Move and choose a plane or axis above the world. These fields edit the selected path point, not playback time." TextWrapping="Wrap" Foreground="#8197AB" FontSize="10" />
               </StackPanel>
             </Border>
           </StackPanel>
@@ -566,13 +594,35 @@
       </ScrollViewer>
     </Border>
 
-    <Border Grid.Row="2" Grid.ColumnSpan="3" Background="#0E131B" BorderBrush="#273244" BorderThickness="0,1,0,0">
+    <Border Grid.Row="2" Grid.ColumnSpan="3" Background="#121C25" BorderBrush="#35485A" BorderThickness="0,1" Padding="12,6">
+      <Grid RowDefinitions="Auto,*" RowSpacing="4">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <TextBlock Text="PLAYBACK" FontSize="10" FontWeight="SemiBold" Foreground="#9CB3C7" VerticalAlignment="Center" Margin="0,0,8,0" />
+            <Button x:Name="RewindButton" Content="|◀ Start" Click="OnRewindClicked" ToolTip.Tip="Rewind to the beginning and stop (Home)." AutomationProperties.Name="Rewind to start" />
+            <Button Content="−1 s" Click="OnBackOneSecondClicked" ToolTip.Tip="Go back one second and stop." />
+            <Button x:Name="PlayButton" Content="▶ Play" Click="OnPlayClicked" Background="#266A64" ToolTip.Tip="Play or pause from the cursor (Space). At the end, Play starts again." />
+            <Button Content="■ Stop" Click="OnStopClicked" ToolTip.Tip="Stop and keep the cursor here. Start rewinds to zero." />
+            <Button Content="+1 s" Click="OnForwardOneSecondClicked" ToolTip.Tip="Go forward one second and stop." />
+          </StackPanel>
+          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+            <TextBlock Text="Time" Foreground="#91A7BA" VerticalAlignment="Center" />
+            <TextBox x:Name="SeekTimeBox" Text="0.000" Width="86" MinHeight="28" HorizontalContentAlignment="Right" KeyDown="OnSeekTimeKeyDown" AutomationProperties.Name="Playback position in seconds" />
+            <TextBlock x:Name="PositionText" Text="/ 6.000 s" Classes="value" VerticalAlignment="Center" />
+            <Button Content="Go" Click="OnSeekTimeClicked" ToolTip.Tip="Jump to the entered time and stop. Press Enter in the time field to do the same." />
+          </StackPanel>
+        </Grid>
+        <local:SceneTimelineControl x:Name="SceneTimeline" Grid.Row="1" MinHeight="48" />
+      </Grid>
+    </Border>
+    <Border Grid.Row="3" Grid.ColumnSpan="3" Background="#293746" />
+    <Border Grid.Row="4" Grid.ColumnSpan="3" Background="#0E131B" BorderBrush="#273244" BorderThickness="0,1,0,0">
       <Grid RowDefinitions="36,*">
         <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Margin="12,0">
           <Button x:Name="SignalWorkspaceButton" Grid.Column="0" Content="SIGNAL GRAPH" Background="Transparent" Foreground="#71DCCF" Click="OnSignalWorkspaceClicked" />
           <Button x:Name="SpectrumWorkspaceButton" Grid.Column="1" Content="SPECTRUM" Background="Transparent" Foreground="#8191A6" Click="OnSpectrumWorkspaceClicked" />
           <Button x:Name="ReceiverTakesWorkspaceButton" Grid.Column="2" Content="RECEIVER TAKES" Background="Transparent" Foreground="#8191A6" Click="OnReceiverTakesWorkspaceClicked" />
-          <TextBlock Grid.Column="4" x:Name="StatusText" Text="Ready · native renderer awaiting command" Foreground="#7D8DA2" VerticalAlignment="Center" />
+          <TextBlock Grid.Column="3" Grid.ColumnSpan="2" x:Name="StatusText" Text="Ready · select a sound or press Play" Foreground="#8DA2B8" VerticalAlignment="Center" Margin="12,0,0,0" TextTrimming="CharacterEllipsis" />
         </Grid>
         <Grid x:Name="SignalWorkspace" Grid.Row="1" ColumnDefinitions="340,*,330" Margin="10,0,10,10">
           <Border Classes="panel" Padding="12">
@@ -588,24 +638,18 @@
             </Canvas>
           </Border>
           <Border Grid.Column="1" Classes="panel" Margin="8,0" Padding="12">
-            <Grid RowDefinitions="*,22">
-              <Canvas ClipToBounds="True">
-                <Rectangle Canvas.Left="0" Canvas.Top="52" Width="900" Height="1" Fill="#283647" />
-                <Path Data="M0,52 C65,25 125,79 190,52 S315,25 380,52 S505,79 570,52 S695,25 760,52 S840,68 900,52" Stroke="#66DACC" StrokeThickness="2" />
-                <Rectangle x:Name="Playhead" Canvas.Left="0" Width="2" Height="145" Fill="#F2B766" />
-                <Border Canvas.Left="8" Canvas.Top="104" Width="520" Height="25" Background="#193831" CornerRadius="3" Padding="7,4"><TextBlock x:Name="TimelineSourceText" Text="440 Hz flyby · source active" Foreground="#8FE4D3" FontSize="10"/></Border>
-              </Canvas>
-              <Grid Grid.Row="1" ColumnDefinitions="*,*,*,*,*,*,*">
-                <TextBlock x:Name="TimelineTick0" Text="0s" Foreground="#617286"/><TextBlock x:Name="TimelineTick1" Grid.Column="1" Text="1" Foreground="#617286"/><TextBlock x:Name="TimelineTick2" Grid.Column="2" Text="2" Foreground="#617286"/><TextBlock x:Name="TimelineTick3" Grid.Column="3" Text="3" Foreground="#617286"/><TextBlock x:Name="TimelineTick4" Grid.Column="4" Text="4" Foreground="#617286"/><TextBlock x:Name="TimelineTick5" Grid.Column="5" Text="5" Foreground="#617286"/><TextBlock x:Name="TimelineTick6" Grid.Column="6" Text="6s" Foreground="#617286" HorizontalAlignment="Right"/>
-              </Grid>
-            </Grid>
+            <StackPanel Spacing="12">
+              <TextBlock Text="SELECTED SOUND" Classes="sectionTitle" />
+              <TextBlock x:Name="TimelineSourceText" Text="440 Hz flyby · source active" Foreground="#8FE4D3" TextWrapping="Wrap" />
+              <TextBlock Text="Use the playback ruler above to move through time. Select and move path points in the sound space independently." Foreground="#8DA2B8" TextWrapping="Wrap" FontSize="11" />
+            </StackPanel>
           </Border>
           <Border Grid.Column="2" Classes="panel" Padding="12">
             <StackPanel Spacing="9">
               <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="ReceiverOneText" Text="Parametric listener" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#67D9CD"/></Grid>
-              <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="68" Foreground="#4AC7B8"/><ProgressBar Grid.Column="1" Value="57" Foreground="#4AC7B8"/></Grid>
+              <TextBlock Text="Independent left / right capture" Foreground="#78BFB6" FontSize="10" />
               <Grid ColumnDefinitions="*,Auto"><TextBlock x:Name="ReceiverTwoText" Text="ORTF microphone pair" Foreground="#DCE8EE"/><TextBlock Grid.Column="1" Text="L    R" Classes="value" Foreground="#B1A4E2"/></Grid>
-              <Grid ColumnDefinitions="*,*" ColumnSpacing="5"><ProgressBar Value="51" Foreground="#8073B6"/><ProgressBar Grid.Column="1" Value="64" Foreground="#8073B6"/></Grid>
+              <TextBlock Text="Independent left / right capture" Foreground="#AA9DCF" FontSize="10" />
               <TextBlock Text="Each rig renders an isolated stereo take." Foreground="#697B90" FontSize="10" Margin="0,4,0,0" />
             </StackPanel>
           </Border>

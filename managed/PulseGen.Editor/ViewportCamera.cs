@@ -6,6 +6,14 @@ namespace PulseGen.Editor;
 
 internal readonly record struct ViewportRay(Vector3d Origin, Vector3d Direction);
 
+internal enum ViewportViewPreset
+{
+    Perspective,
+    Top,
+    Front,
+    Right
+}
+
 internal readonly record struct ViewportBounds(Vector3d Minimum, Vector3d Maximum)
 {
     public Vector3d Centre => (Minimum + Maximum) * 0.5;
@@ -36,6 +44,7 @@ internal sealed class ViewportCameraController
     private double yawDegrees = 38;
     private double pitchDegrees = 26;
     private double distanceMetres = 35;
+    private ViewportViewPreset viewPreset = ViewportViewPreset.Perspective;
 
     public event EventHandler? Changed;
 
@@ -48,6 +57,29 @@ internal sealed class ViewportCameraController
     internal double DistanceMetres => distanceMetres;
 
     internal ViewportBounds ContentBounds => contentBounds;
+
+    internal ViewportViewPreset ViewPreset => viewPreset;
+
+    public void SetViewPreset(ViewportViewPreset preset)
+    {
+        if (!Enum.IsDefined(preset) || viewPreset == preset)
+        {
+            return;
+        }
+        viewPreset = preset;
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    public void Focus(Vector3d point)
+    {
+        if (!Finite(point))
+        {
+            return;
+        }
+        // Moving the pivot must not unexpectedly change the user's zoom or orientation.
+        target = point;
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
 
     public void SetScene(SceneDocument scene, bool fit)
     {
@@ -86,9 +118,20 @@ internal sealed class ViewportCameraController
 
     public void Orbit(double deltaX, double deltaY)
     {
-        if (!double.IsFinite(deltaX) || !double.IsFinite(deltaY))
+        if (!double.IsFinite(deltaX) || !double.IsFinite(deltaY) || (deltaX == 0 && deltaY == 0))
         {
             return;
+        }
+        if (viewPreset != ViewportViewPreset.Perspective)
+        {
+            // Begin the orbit from the selected axis view, keeping the same fixed pivot.
+            (yawDegrees, pitchDegrees) = viewPreset switch
+            {
+                ViewportViewPreset.Top => (0, MaximumPitchDegrees),
+                ViewportViewPreset.Right => (90, 0),
+                _ => (0, 0)
+            };
+            viewPreset = ViewportViewPreset.Perspective;
         }
         yawDegrees = WrapDegrees(yawDegrees - (deltaX * OrbitDegreesPerPixel));
         pitchDegrees = Math.Clamp(
@@ -104,9 +147,11 @@ internal sealed class ViewportCameraController
         {
             return;
         }
-        var (_, forward, right, up) = CameraBasis();
-        var metresPerPixel = 2 * distanceMetres * Math.Tan(FieldOfViewRadians * 0.5) / viewportSize.Height;
-        target += (right * (-deltaX * metresPerPixel)) + (up * (deltaY * metresPerPixel));
+        var (_, _, right, up) = CameraBasis();
+        var viewHeight = 2 * distanceMetres * Math.Tan(FieldOfViewRadians * 0.5);
+        var metresPerPixelX = viewHeight * AspectRatio(viewportSize) / viewportSize.Width;
+        var metresPerPixelY = viewHeight / viewportSize.Height;
+        target += (right * (-deltaX * metresPerPixelX)) + (up * (deltaY * metresPerPixelY));
         Changed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -126,20 +171,24 @@ internal sealed class ViewportCameraController
 
     public Matrix4x4 ViewProjection(Size viewportSize)
     {
-        var aspectRatio = ValidSize(viewportSize)
-            ? Math.Clamp((float)(viewportSize.Width / viewportSize.Height), 0.1F, 10F)
-            : 1F;
-        var (eye, _, _, _) = CameraBasis();
+        var aspectRatio = (float)AspectRatio(viewportSize);
+        var (eye, _, _, up) = CameraBasis();
         var eyeVector = ToVector3(eye);
         var targetVector = ToVector3(target);
         var radius = Math.Max(MinimumRadiusMetres, contentBounds.Radius);
-        var view = Matrix4x4.CreateLookAt(eyeVector, targetVector, Vector3.UnitY);
-        var projection = Matrix4x4.CreatePerspectiveFieldOfView(
-            (float)FieldOfViewRadians,
-            aspectRatio,
-            Math.Max(0.01F, (float)(radius * 0.005)),
-            Math.Max(100F, (float)(distanceMetres + (radius * 8))));
-        return view * projection;
+        var view = Matrix4x4.CreateLookAt(eyeVector, targetVector, ToVector3(up));
+        var nearPlane = Math.Max(0.01F, (float)(radius * 0.005));
+        var farPlane = Math.Max(100F, (float)(distanceMetres + (radius * 8)));
+        var viewHeight = (float)(2 * distanceMetres * Math.Tan(FieldOfViewRadians * 0.5));
+        var projection = viewPreset == ViewportViewPreset.Perspective
+            ? Matrix4x4.CreatePerspectiveFieldOfView((float)FieldOfViewRadians, aspectRatio, nearPlane, farPlane)
+            : Matrix4x4.CreateOrthographic(viewHeight * aspectRatio, viewHeight, nearPlane, farPlane);
+        // System.Numerics uses [0, 1] clip depth; the viewport shaders use OpenGL [-1, 1].
+        // Without this remap an orthographic view also draws geometry behind the eye.
+        var openGlDepth = Matrix4x4.Identity;
+        openGlDepth.M33 = 2;
+        openGlDepth.M43 = -1;
+        return view * projection * openGlDepth;
     }
 
     public Point Project(Vector3d position, Size viewportSize)
@@ -172,7 +221,14 @@ internal sealed class ViewportCameraController
         var normalizedX = ((2 * point.X) / viewportSize.Width) - 1;
         var normalizedY = 1 - ((2 * point.Y) / viewportSize.Height);
         var tangent = Math.Tan(FieldOfViewRadians * 0.5);
-        var aspectRatio = viewportSize.Width / viewportSize.Height;
+        var aspectRatio = AspectRatio(viewportSize);
+        if (viewPreset != ViewportViewPreset.Perspective)
+        {
+            var halfHeight = distanceMetres * tangent;
+            return new(
+                eye + (right * (normalizedX * aspectRatio * halfHeight)) + (up * (normalizedY * halfHeight)),
+                forward);
+        }
         var direction = Normalize(
             forward +
             (right * (normalizedX * aspectRatio * tangent)) +
@@ -182,20 +238,59 @@ internal sealed class ViewportCameraController
 
     public Vector3d ProjectToHorizontalPlane(Point point, Size viewportSize, double yMetres)
     {
-        var ray = Ray(point, viewportSize);
-        if (Math.Abs(ray.Direction.Y) > 1.0e-9)
+        return TryProjectToPlane(point, viewportSize, new(0, yMetres, 0), new(0, 1, 0), out var hit)
+            ? hit
+            : new(target.X, yMetres, target.Z);
+    }
+
+    public bool TryProjectToPlane(
+        Point point,
+        Size viewportSize,
+        Vector3d origin,
+        Vector3d normal,
+        out Vector3d hit)
+    {
+        hit = default;
+        if (!ValidSize(viewportSize) || !double.IsFinite(point.X) || !double.IsFinite(point.Y) ||
+            !Finite(origin) || !Finite(normal) || !double.IsFinite(normal.Length) || normal.Length < 1.0e-12)
         {
-            var distance = (yMetres - ray.Origin.Y) / ray.Direction.Y;
-            if (distance >= 0 && double.IsFinite(distance))
-            {
-                return ray.Origin + (ray.Direction * distance);
-            }
+            return false;
         }
-        return new(target.X, yMetres, target.Z);
+        var unitNormal = Normalize(normal);
+        var ray = Ray(point, viewportSize);
+        var denominator = Dot(ray.Direction, unitNormal);
+        // Near-edge-on editing is numerically unstable and can throw an object far away.
+        // Callers keep the previous point and offer a different view/plane instead.
+        if (Math.Abs(denominator) < 1.0e-4)
+        {
+            return false;
+        }
+        var distance = Dot(origin - ray.Origin, unitNormal) / denominator;
+        if (!double.IsFinite(distance) || distance < 0)
+        {
+            return false;
+        }
+        var intersection = ray.Origin + (ray.Direction * distance);
+        if (!Finite(intersection))
+        {
+            return false;
+        }
+        hit = intersection;
+        return true;
     }
 
     private (Vector3d Eye, Vector3d Forward, Vector3d Right, Vector3d Up) CameraBasis()
     {
+        if (viewPreset != ViewportViewPreset.Perspective)
+        {
+            var (axisForward, axisRight, axisUp) = viewPreset switch
+            {
+                ViewportViewPreset.Top => (new Vector3d(0, -1, 0), new Vector3d(1, 0, 0), new Vector3d(0, 0, -1)),
+                ViewportViewPreset.Right => (new Vector3d(-1, 0, 0), new Vector3d(0, 0, -1), new Vector3d(0, 1, 0)),
+                _ => (new Vector3d(0, 0, -1), new Vector3d(1, 0, 0), new Vector3d(0, 1, 0))
+            };
+            return (target - (axisForward * distanceMetres), axisForward, axisRight, axisUp);
+        }
         var yaw = yawDegrees * Math.PI / 180;
         var pitch = pitchDegrees * Math.PI / 180;
         var cosinePitch = Math.Cos(pitch);
@@ -213,6 +308,10 @@ internal sealed class ViewportCameraController
     private static bool ValidSize(Size size) =>
         double.IsFinite(size.Width) && double.IsFinite(size.Height) && size.Width > 0 && size.Height > 0;
 
+    private static double AspectRatio(Size size) => ValidSize(size)
+        ? Math.Clamp(size.Width / size.Height, 0.1, 10)
+        : 1;
+
     private static bool Finite(Vector3d value) =>
         double.IsFinite(value.X) && double.IsFinite(value.Y) && double.IsFinite(value.Z);
 
@@ -228,6 +327,9 @@ internal sealed class ViewportCameraController
         (left.Y * right.Z) - (left.Z * right.Y),
         (left.Z * right.X) - (left.X * right.Z),
         (left.X * right.Y) - (left.Y * right.X));
+
+    private static double Dot(Vector3d left, Vector3d right) =>
+        (left.X * right.X) + (left.Y * right.Y) + (left.Z * right.Z);
 
     private static Vector3d Normalize(Vector3d value)
     {

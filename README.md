@@ -90,7 +90,7 @@ commands and reads bounded telemetry.
   Library views; hierarchical scene selection; validated add/edit/remove flows
   for rooms, acoustic surfaces, atmosphere layers, bounded wind zones, binaural
   listeners, and independent microphone pairs; numerical SI editing;
-  synchronized world highlighting and safe X/Z manipulation; receiver motion-path
+  synchronized world highlighting and constrained XYZ manipulation; receiver motion-path
   assignment; rollback of physically invalid edits; guarded acoustic-mesh and
   SOFA asset pickers; raw gesture retention; audible preview; atomic save;
   isolated-take rendering; and analysis import. Imported measured SOFA selections
@@ -110,9 +110,19 @@ commands and reads bounded telemetry.
   the playhead or selecting another receiver issues only a bounded route query;
   the editor snapshots and rebuilds the native acoustic scene only after a scene,
   project-root, or atmosphere-resolution change. The GPU surface and
-  editing overlay now share one perspective camera: right-drag orbits, middle-drag
-  pans, the wheel zooms, and
-  Fit/F reframes the authored sound space. Exact ray/triangle hits select the
+  editing overlay share a camera with perspective and true orthographic Top,
+  Front and Side views. Select is safe by default; Move edits positions, while
+  Orbit and Pan accept left drags anywhere in the canvas, including blank space.
+  Right-drag also orbits, middle-drag pans, the wheel or +/- zooms, and Fit/F
+  reframes the sound space. Focus selection sets a fixed orbit pivot. Movement
+  can lock to X, Y, Z or a coordinate plane, with optional 0.1 m snapping,
+  exact XYZ entry, a ground pin, colored axes and a live position label. Escape,
+  capture loss and tool changes cancel uncommitted moves. World editing never
+  seeks time: a separate persistent playback strip provides Start/rewind,
+  one-second jumps, Play/Pause, Stop, exact-time entry and a draggable ruler.
+  Space toggles playback outside text controls; Home rewinds, and a focused
+  ruler supports arrows, Shift+arrows and End. Play at the end restarts at zero.
+  Exact ray/triangle hits select the
   rendered terrain or imported surface beneath the pointer while leaving source,
   receiver, path-point, and surface-drag gestures intact. A live viewport badge
   reports measured frame rate, triangle count, and imported-mesh count. Procedural and verified-OBJ acceptance
@@ -261,7 +271,7 @@ claim an installed, automatically updating, or publicly supported Windows
 release. Verify either the extracted directory or the final ZIP independently:
 
 ```powershell
-./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.19-win-x64.zip
+./scripts/verify-package.ps1 -PackagePath ./out/packages/PulseGen-0.1.0-alpha.20-win-x64.zip
 ```
 
 On first launch, a plain-language start guide appears after protected crash

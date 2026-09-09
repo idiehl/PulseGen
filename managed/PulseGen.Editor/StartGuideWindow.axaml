@@ -130,7 +130,7 @@
                 <TextBlock Grid.Row="3" Text="4" Foreground="#64D8CB" FontWeight="Bold" />
                 <TextBlock Grid.Row="3" Grid.Column="1" Text="Put a listener or stereo microphone pair where you want to hear it." Foreground="#D8E3E7" TextWrapping="Wrap" />
                 <TextBlock Grid.Row="4" Text="5" Foreground="#64D8CB" FontWeight="Bold" />
-                <TextBlock Grid.Row="4" Grid.Column="1" Text="Preview quickly, then Render to calculate clean stereo takes." Foreground="#D8E3E7" TextWrapping="Wrap" />
+                <TextBlock Grid.Row="4" Grid.Column="1" Text="Use Play and Start in the playback strip. Drag its ruler to seek; Render creates stereo takes." Foreground="#D8E3E7" TextWrapping="Wrap" />
               </Grid>
             </StackPanel>
           </Border>

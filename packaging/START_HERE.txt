@@ -31,6 +31,22 @@ differs from their actual length. Complete audio frames are checked before impor
 Recording tone changes from air and surfaces use an approximate response in
 this alpha; full frequency-dependent sample coloration is still being built.
 
+MOVING THROUGH SPACE AND TIME (ALPHA.20)
+
+- Playback has its own strip below the world. Start rewinds to zero; Play/Pause
+  resumes here; Stop holds the current position. Drag the ruler or enter seconds
+  and choose Go. Space plays/pauses outside text controls; Home rewinds.
+- Select picks a point without moving it. Move lets you drag it in the chosen
+  plane or along X, Y or Z. Changing a point never moves the playback cursor.
+- Choose Top, Front or Side for a flat, accurate view. The matching movement
+  plane is selected automatically. Y is height; all coordinates are in metres.
+- The selected point has a ground pin, colored axes and live coordinates.
+  Enter exact XYZ below the world, or enable Snap 0.1 m. Escape cancels a drag.
+- Focus selection sets the camera pivot. Orbit rotates around that fixed point;
+  Pan shifts the view. These tools use ordinary left-drag, even in blank space.
+  Right-drag also orbits; middle-drag pans; the wheel or +/- zooms. Fit all/F
+  frames the complete sound space. None of these camera tools edits your sound.
+
 WHAT IS INCLUDED
 
 - The self-contained Windows editor and .NET runtime.

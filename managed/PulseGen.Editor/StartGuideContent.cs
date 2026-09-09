@@ -20,7 +20,7 @@ internal static class StartGuideCatalog
     [
         new("Build sounds", "Start with tones, pulses, noise, additive layers, or procedural wind.", "READY"),
         new("Bring in a recording", "Import WAV, AIFF, FLAC, MP3, Ogg, or Opus; choose moving sources, a stereo background, or an explicit mono mix.", "READY"),
-        new("Move sound through space", "Draw a path and let distance, air, wind, and speed change what reaches the listener.", "READY"),
+        new("Move sound through space", "Select a point, choose Move, then edit in Top, Front, Side, or 3D. Focus selection sets the centre for Orbit.", "READY"),
         new("Place listeners and microphones", "Hear a headphone listener and independent stereo microphone pairs at the same time.", "READY"),
         new("Render and finish", "Keep each stereo take separate, edit left and right, then export a final master.", "READY"),
         new("Take a rendered take apart", "Separate rendered stereo into tracked tones, sharp events, and the remaining texture or noise.", "READY")

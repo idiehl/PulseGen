@@ -71,8 +71,9 @@ public sealed partial class MainWindow : Window
         AutomaticDecompression = System.Net.DecompressionMethods.All
     })
     { Timeout = Timeout.InfiniteTimeSpan };
-    private readonly WorkspaceIndex workspaceIndex = WorkspaceIndex.CreateDefault();
-    private readonly EditorPreferencesStore preferencesStore = EditorPreferencesStore.CreateDefault();
+    private readonly WorkspaceIndex workspaceIndex;
+    private readonly EditorPreferencesStore preferencesStore;
+    private readonly bool isolatedUiReview;
     private EditorPreferences editorPreferences = new();
     private AtlasOidcClient? atlasIdentity;
     private AtlasLibraryClient? atlasLibrary;
@@ -109,12 +110,16 @@ public sealed partial class MainWindow : Window
     private int reflectionMonitorSessionVersion = -1;
     private bool startGuideOpen;
 
-    public MainWindow()
+    public MainWindow() : this(null) { }
+
+    internal MainWindow(string? reviewWorkspaceDirectory)
     {
+        isolatedUiReview = reviewWorkspaceDirectory is not null;
+        workspaceIndex = isolatedUiReview ? new WorkspaceIndex(Path.Combine(reviewWorkspaceDirectory!, "workspace-index.sqlite3")) : WorkspaceIndex.CreateDefault();
+        preferencesStore = isolatedUiReview ? new EditorPreferencesStore(Path.Combine(reviewWorkspaceDirectory!, "editor-preferences.json")) : EditorPreferencesStore.CreateDefault();
         InitializeComponent();
         Viewport.Camera = viewportCamera;
         GpuViewport.Camera = viewportCamera;
-        Viewport.PlayheadChanged += (_, time) => UpdatePlayhead(time);
         Viewport.PathPointSelected += (_, index) => SelectKeyframe(index);
         Viewport.SceneObjectSelected += selection => SelectSceneObject(selection, refreshTree: true);
         Viewport.GeometryPickRequested += point => GpuViewport.Pick(point)?.GeometryId;
@@ -122,7 +127,7 @@ public sealed partial class MainWindow : Window
         Viewport.SceneEditRejected += message =>
         {
             StatusText.Text = message;
-            GestureButton.Content = "●  Gesture";
+            GestureButton.Content = "● Record path";
             PopulateInspector(currentSelection);
         };
         Viewport.SceneEdited += (_, message) => MarkSceneEdited(message);
@@ -135,6 +140,7 @@ public sealed partial class MainWindow : Window
         autosaveTimer.Stop();
         reflectionDiagnosticTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(180), DispatcherPriority.Background, OnReflectionDiagnosticTick);
         reflectionDiagnosticTimer.Stop();
+        InitializeWorkspaceInteraction();
         recoveryService = EditorRecoveryService.CreateForCurrentProcess(workspaceIndex);
         Opened += OnEditorOpened;
         WaveformBox.ItemsSource = new[] { "Sine", "Triangle", "Saw", "Square", "Pulse", "WhiteNoise", "PinkNoise", "BrownNoise", "Impulse", "Additive", "Turbulence" };
@@ -183,13 +189,14 @@ public sealed partial class MainWindow : Window
         sceneDirty = false;
         viewportCamera.SetScene(scene, fit: true);
         Viewport.Scene = scene;
+        SceneTimeline.Scene = scene;
         GpuViewport.SetScene(scene, projectDirectory);
         Viewport.TimeSeconds = 0;
         activeRenderProfileId = scene.RenderProfiles.First().Id;
         currentSelection = SceneSelection.Emitter(scene.Emitters[0].Id);
         Viewport.Selection = currentSelection;
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
-        Title = $"PulseGen — {scene.Name}";
+        Title = $"PulseGen — {scene.Name}" + (isolatedUiReview ? " · UI REVIEW" : "");
         SceneNameText.Text = $"{scene.Name} · scene v{scene.SchemaVersion}";
         EmitterCountText.Text = $"{scene.Emitters.Count} source{(scene.Emitters.Count == 1 ? string.Empty : "s")}";
         DurationSummaryText.Text = $"{scene.Timeline.DurationSeconds:0.000} s";
@@ -219,12 +226,6 @@ public sealed partial class MainWindow : Window
         RefreshAnalysisTakeChoices();
         RefreshSpectralWorkspace();
         RefreshReceiverTakeWorkspace();
-        var tickLabels = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
-        for (var index = 0; index < tickLabels.Length; index++)
-        {
-            var tick = scene.Timeline.DurationSeconds * index / (tickLabels.Length - 1);
-            tickLabels[index].Text = index is 0 or 6 ? $"{tick:0.##}s" : $"{tick:0.##}";
-        }
         UpdatePlayhead(0);
         SelectKeyframe(0);
         PopulateInspector(currentSelection);
@@ -962,8 +963,8 @@ public sealed partial class MainWindow : Window
         Viewport.Selection = currentSelection;
         Viewport.ActiveMotionPathId = SceneSelectionResolver.MotionPath(scene, currentSelection)?.Id;
         StatusText.Text = message;
-        GestureButton.Content = "●  Gesture";
-        ScheduleReflectionDiagnostics();
+        GestureButton.Content = "● Record path";
+        UpdatePlayhead(Viewport.TimeSeconds);
     }
 
     private static string FormatNumber(double value) => value.ToString("0.###", CultureInfo.InvariantCulture);
@@ -1776,7 +1777,16 @@ public sealed partial class MainWindow : Window
 
     private void OnPlayClicked(object? sender, RoutedEventArgs e)
     {
+        if (previewTimer.IsEnabled && previewAdvancesScene)
+        {
+            UpdatePlayhead((DateTimeOffset.UtcNow - previewStarted).TotalSeconds);
+            StopPreviewTransport();
+            StatusText.Text = "Paused · Play resumes here; Start rewinds";
+            return;
+        }
         StopPreviewTransport();
+        DisarmWorldGesture();
+        UpdatePlayhead(SceneTransportNavigation.PlayStart(Viewport.TimeSeconds, scene.Timeline.DurationSeconds));
         var profile = GetActiveRenderProfile();
         previewStarted = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(Viewport.TimeSeconds);
         previewDurationSeconds = scene.Timeline.DurationSeconds;
@@ -1784,7 +1794,7 @@ public sealed partial class MainWindow : Window
         previewCompletionStatus = "Preview complete · scene state preserved";
         previewInterruptedStatus = "Visual-only preview · the WASAPI device stopped or was rerouted";
         previewTimer.Start();
-        PlayButton.Content = "▶  Playing";
+        PlayButton.Content = "Ⅱ Pause";
         try
         {
             audioPreview = NativeSceneRenderer.StartPreview(
@@ -1811,7 +1821,7 @@ public sealed partial class MainWindow : Window
     private void OnStopClicked(object? sender, RoutedEventArgs e)
     {
         StopPreviewTransport();
-        StatusText.Text = "Stopped · scene state preserved";
+        StatusText.Text = "Stopped here · use Start to rewind to the beginning";
     }
 
     private void OnGestureClicked(object? sender, RoutedEventArgs e)
@@ -1820,12 +1830,15 @@ public sealed partial class MainWindow : Window
         if (SceneSelectionResolver.MotionPath(scene, currentSelection) is null)
         {
             Viewport.IsGestureRecording = false;
-            GestureButton.Content = "●  Gesture";
+            GestureButton.Content = "● Record path";
             StatusText.Text = "Gesture capture requires a selected source, receiver, or motion path that already owns a path";
             return;
         }
-        Viewport.IsGestureRecording = !Viewport.IsGestureRecording;
-        GestureButton.Content = Viewport.IsGestureRecording ? "●  Draw in world…" : "●  Gesture";
+        var armGesture = !Viewport.IsGestureRecording;
+        if (armGesture) SetWorldTool(WorldInteractionMode.Select);
+        Viewport.IsGestureRecording = armGesture;
+        GestureButton.Content = Viewport.IsGestureRecording ? "● Cancel recording" : "● Record path";
+        GestureButton.Classes.Set("active", armGesture);
         StatusText.Text = Viewport.IsGestureRecording
             ? "Gesture capture armed · drag across the 3D world; raw samples will be retained"
             : "Gesture capture cancelled";
@@ -2283,7 +2296,7 @@ public sealed partial class MainWindow : Window
                 {
                     StatusText.Text = $"Disconnected locally · remote revocation could not be confirmed: {exception.Message}";
                 }
-                AtlasButton.Content = "◇  Atlas sign in";
+                AtlasButton.Content = "◇ Sign in";
                 AtlasStateText.Text = "PRIVATE · LOCAL ONLY";
                 return;
             }
@@ -2295,7 +2308,7 @@ public sealed partial class MainWindow : Window
                 _ = await atlasIdentity.SignInAsync();
             }
             var summary = await atlasLibrary!.GetSummaryAsync();
-            AtlasButton.Content = "◇  Disconnect";
+            AtlasButton.Content = "◇ Sign out";
             AtlasStateText.Text = $"ATLAS · {summary.Projects} PROJECTS · {summary.Assets} ASSETS";
             StatusText.Text = "Atlas connected · source audio remains local until you explicitly sync it";
         }
@@ -2330,7 +2343,7 @@ public sealed partial class MainWindow : Window
 
         syncCancellation = new CancellationTokenSource();
         var cancellationToken = syncCancellation.Token;
-        SyncButton.Content = "■  Cancel sync";
+        SyncButton.Content = "■ Cancel";
         AtlasButton.IsEnabled = false;
         long? journalId = null;
         try
@@ -2497,7 +2510,7 @@ public sealed partial class MainWindow : Window
         {
             syncCancellation.Dispose();
             syncCancellation = null;
-            SyncButton.Content = "⇧  Sync project";
+            SyncButton.Content = "⇧ Sync";
             AtlasButton.IsEnabled = true;
         }
     }
@@ -3995,7 +4008,7 @@ public sealed partial class MainWindow : Window
         audioPreview = null;
         spectralAuditionPlaying = false;
         receiverTakeAuditionPlaying = false;
-        PlayButton.Content = "▶  Preview";
+        PlayButton.Content = "▶ Play";
         SpectralAuditionButton.Content = "▶  Hear";
         ReceiverTakeHearButton.Content = "▶ Stereo";
         ReceiverTakeHearLeftButton.Content = "▶ Left";
@@ -4118,7 +4131,7 @@ public sealed partial class MainWindow : Window
                 AutosaveStateText.Text = "AUTOSAVE READY";
                 AutosaveStateText.Foreground = Avalonia.Media.Brushes.LightSeaGreen;
                 StatusText.Text = "Ready · protected local autosave is active";
-                showStartGuide = editorPreferences.ShowStartGuideOnLaunch;
+                showStartGuide = editorPreferences.ShowStartGuideOnLaunch && !isolatedUiReview;
             }
             autosaveTimer.Start();
         }
@@ -4349,8 +4362,11 @@ public sealed partial class MainWindow : Window
     private void UpdatePlayhead(double timeSeconds)
     {
         var duration = scene.Timeline.DurationSeconds;
-        var time = Math.Clamp(timeSeconds, 0, duration);
+        var time = SceneTransportNavigation.Clamp(timeSeconds, duration);
         Viewport.TimeSeconds = time;
+        SceneTimeline.Scene = scene;
+        SceneTimeline.TimeSeconds = time;
+        if (!SeekTimeBox.IsFocused) SeekTimeBox.Text = time.ToString("0.000", CultureInfo.InvariantCulture);
         var path = SceneSelectionResolver.MotionPath(scene, currentSelection);
         var emitter = SceneSelectionResolver.Emitter(scene, currentSelection);
         var receiver = currentSelection.Kind == SceneSelectionKind.Receiver
@@ -4362,13 +4378,11 @@ public sealed partial class MainWindow : Window
         var velocity = path is not null
             ? SceneKinematics.VelocityAt(path, time)
             : Vector3d.Zero;
-        PositionText.Text = $"t  {time:0.000} s";
+        PositionText.Text = $"/ {duration:0.000} s";
         PositionX.Text = $"{position.X,8:0.000} m";
         PositionY.Text = $"{position.Y,8:0.000} m";
         PositionZ.Text = $"{position.Z,8:0.000} m";
         VelocityText.Text = $"{velocity.Length:0.00} m/s";
-        var timelineWidth = (Playhead.Parent as Control)?.Bounds.Width ?? 0;
-        Canvas.SetLeft(Playhead, Math.Max(0, timelineWidth * (time / duration)));
         ScheduleReflectionDiagnostics();
     }
 

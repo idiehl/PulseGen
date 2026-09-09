@@ -14,7 +14,9 @@ public sealed class App : Application
         {
             var benchmark = ViewportBenchmarkOptions.TryParse(desktop.Args ?? []);
             desktop.MainWindow = benchmark is null
-                ? new MainWindow()
+                ? (desktop.Args?.Contains("--ui-review", StringComparer.Ordinal) == true
+                    ? new MainWindow(Path.Combine(Path.GetTempPath(), "PulseGen-UI-review", Guid.NewGuid().ToString("N")))
+                    : new MainWindow())
                 : new ViewportBenchmarkWindow(benchmark, desktop);
         }
 

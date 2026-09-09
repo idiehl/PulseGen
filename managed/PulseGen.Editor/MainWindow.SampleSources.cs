@@ -58,7 +58,7 @@ public sealed partial class MainWindow
             scene = imported.Scene;
             currentSelection = SceneSelection.Emitter(imported.SelectedEmitterId);
             RefreshSourceSceneSummary();
-            MarkSceneEdited($"Added {asset.FileName} · {SampleSourceAuthoring.MappingName(scene.Emitters.Single(item => item.Id == imported.SelectedEmitterId))} · choose Preview to listen");
+            MarkSceneEdited($"Added {asset.FileName} · {SampleSourceAuthoring.MappingName(scene.Emitters.Single(item => item.Id == imported.SelectedEmitterId))} · choose Play to listen");
             RefreshSceneTree();
             PopulateInspector(currentSelection);
         }
@@ -74,12 +74,8 @@ public sealed partial class MainWindow
     {
         EmitterCountText.Text = $"{scene.Emitters.Count} sources";
         DurationSummaryText.Text = $"{scene.Timeline.DurationSeconds:0.000} s";
-        var ticks = new[] { TimelineTick0, TimelineTick1, TimelineTick2, TimelineTick3, TimelineTick4, TimelineTick5, TimelineTick6 };
-        for (var i = 0; i < ticks.Length; i++)
-        {
-            var seconds = scene.Timeline.DurationSeconds * i / (ticks.Length - 1);
-            ticks[i].Text = i is 0 or 6 ? $"{seconds:0.##}s" : $"{seconds:0.##}";
-        }
+        SceneTimeline.Scene = scene;
+        UpdatePlayhead(Viewport.TimeSeconds);
     }
 
     private void RefreshSampleSourceInspector(Emitter emitter)
