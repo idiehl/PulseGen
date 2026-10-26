@@ -7,6 +7,8 @@ param(
     [switch]$NoBuild,
     [switch]$AllowDirty,
     [switch]$SkipVerification,
+    [switch]$PublicDistribution,
+    [string]$OutputDirectory = 'out/packages',
     [ValidatePattern('^[A-Fa-f0-9]{40}$')]
     [string]$SigningCertificateThumbprint,
     [uri]$TimestampUrl = 'http://timestamp.digicert.com'
@@ -14,7 +16,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
-$packagesRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'out\packages'))
+$packagesRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot $OutputDirectory))
 $stagingRoot = [IO.Path]::GetFullPath((Join-Path $repositoryRoot 'out\package-staging'))
 $activeStaging = $null
 $activeArchive = $null
@@ -36,6 +38,8 @@ function Remove-GeneratedPath {
         Remove-Item -LiteralPath $resolved -Recurse -Force
     }
 }
+
+$packagesRoot = Assert-ChildPath -Path $packagesRoot -Parent (Join-Path $repositoryRoot 'out')
 
 function Get-SignTool {
     $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
@@ -147,7 +151,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $repositoryRoot '.runtime\modelhost\python311\LICENSE.txt') -Destination (Join-Path $licenseRoot 'CPython-PSF.txt')
     Copy-Item -LiteralPath (Join-Path $repositoryRoot '.runtime\modelhost\python311\Lib\site-packages\numpy-2.0.2.dist-info\LICENSE.txt') -Destination (Join-Path $licenseRoot 'NumPy-and-bundled-libraries.txt')
 
-    $signatureState = 'unsigned-private-alpha'
+    if ($PublicDistribution) {
+        & (Join-Path $PSScriptRoot 'add-publication-notices.ps1') -StagingPath $staging
+        if ($LASTEXITCODE -ne 0) { throw 'Public distribution notice assembly failed.' }
+    }
+
+    $signatureState = if ($PublicDistribution) { 'unsigned-experimental-alpha' } else { 'unsigned-private-alpha' }
     if (-not [string]::IsNullOrWhiteSpace($SigningCertificateThumbprint)) {
         $signTool = Get-SignTool
         if ([string]::IsNullOrWhiteSpace($signTool)) { throw 'signtool.exe is unavailable; install the Windows SDK signing tools.' }
@@ -175,7 +184,7 @@ try {
         schemaVersion = 1
         product = 'PulseGen'
         version = $version
-        channel = 'private-alpha'
+        channel = if ($PublicDistribution) { 'experimental-alpha' } else { 'private-alpha' }
         packageType = 'portable-self-contained'
         runtimeIdentifier = $RuntimeIdentifier
         entryPoint = 'PulseGen.exe'
@@ -186,6 +195,15 @@ try {
         modelWeightsBundled = $false
         dependencyInventory = 'managed-dependencies.json'
         files = $payloadFiles
+    }
+    if ($PublicDistribution) {
+        $publicationNotices = Get-Content -LiteralPath (Join-Path $staging 'licenses/public/notices-index.json') -Raw | ConvertFrom-Json
+        $manifest.publicDistribution = [ordered]@{
+            notices = 'licenses/public/notices-index.json'
+            sourceIndex = 'licenses/public/sources-index.json'
+            companionSourceArchive = $publicationNotices.companionSourceArchive
+            companionSourceArchiveSha256 = $publicationNotices.companionSourceArchiveSha256
+        }
     }
     $manifestPath = Join-Path $staging 'package-manifest.json'
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))

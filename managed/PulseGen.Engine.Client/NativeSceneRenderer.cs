@@ -484,7 +484,8 @@ public static unsafe class NativeSceneRenderer
                 new("miniaudio", "0.11.25", "WASAPI device adapter"),
                 new("Assimp", "6.0.5", "bounded memory-only OBJ/glTF/GLB mesh importer"),
                 .. sampleSources.Count == 0 ? Array.Empty<RenderDependency>() :
-                    [new("libsndfile", "1.2.2", "SHA-256 verified source decoding and metadata; no normalization")],
+                    [new("libsndfile", SndFileRuntimeLoader.Current.Version,
+                        $"source decoding and metadata; sha256={SndFileRuntimeLoader.Current.BinarySha256}; userReplacement={SndFileRuntimeLoader.Current.IsUserReplacement}; no normalization")],
                 .. sampleSources.Any(source => source.Container == "MP3") ?
                     new[] { new RenderDependency("dr_mp3", "0.7.3 (miniaudio 0.11.25)", "bounded full-scan MP3 decoding; no normalization") } : []
             ],

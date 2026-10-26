@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using PulseGen.Contracts;
+using PulseGen.Engine.Client;
 
 namespace PulseGen.Editor;
 
@@ -28,7 +29,7 @@ internal sealed record CodecReadResult(
 internal static unsafe class SndFileCodecAdapter
 {
     internal const string Version = "1.2.2";
-    internal const string ExpectedBinarySha256 = "4e3bd2de8e1485110eaebef8e1239471f73d608773831c323bf528e05645655e";
+    internal const string ExpectedBinarySha256 = SampleAudioReader.ExpectedBinarySha256;
 
     private const string LibraryName = "sndfile";
     private const int WriteMode = 0x20;
@@ -60,7 +61,7 @@ internal static unsafe class SndFileCodecAdapter
         NativeLibrary.SetDllImportResolver(typeof(SndFileCodecAdapter).Assembly, ResolveLibrary);
     }
 
-    public static string RuntimeVersion => Marshal.PtrToStringUTF8(Native.sf_version_string()) ?? "unknown";
+    public static string RuntimeVersion => SndFileRuntimeLoader.Current.Version;
 
     public static CodecWriteSummary Write(
         string path,
@@ -99,7 +100,7 @@ internal static unsafe class SndFileCodecAdapter
         {
             ConfigureEncoder(handle, request, source.SampleRate);
             SetRequiredString(handle, StringTitle, request.ProjectName);
-            SetRequiredString(handle, StringSoftware, $"PulseGen {request.EngineVersion}; libsndfile {Version}");
+            SetRequiredString(handle, StringSoftware, $"PulseGen {request.EngineVersion}; {RuntimeVersion}");
             SetRequiredString(handle, StringComment, $"sceneRevisionSha256={request.SceneRevisionSha256}; takes={string.Join(',', request.TakeIds.Select(id => id.ToString("D")))}; normalization=none");
             SetRequiredString(handle, StringDate, request.CreatedAtUtc.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture));
 
@@ -127,7 +128,7 @@ internal static unsafe class SndFileCodecAdapter
             OggStreamCanonicalizer.Canonicalize(path, DeterministicStreamSerial(request.DitherSeed));
         }
 
-        var settings = SettingsFor(request.Container, request.Encoding);
+        var settings = $"{SettingsFor(request.Container, request.Encoding)}; runtimeSha256={SndFileRuntimeLoader.Current.BinarySha256}; userReplacement={SndFileRuntimeLoader.Current.IsUserReplacement}";
         return new(
             converted.SampleRate,
             converted.Frames,
@@ -363,7 +364,7 @@ internal static unsafe class SndFileCodecAdapter
     {
         if (Native.sf_command(handle, command, data, size) == 0)
         {
-            throw new NotSupportedException($"The pinned codec runtime rejected the requested {name}.");
+            throw new NotSupportedException($"The selected codec runtime rejected the requested {name}.");
         }
     }
 
@@ -422,32 +423,8 @@ internal static unsafe class SndFileCodecAdapter
             {
                 return loadedLibrary;
             }
-            var candidates = new List<string>();
-            var overridePath = Environment.GetEnvironmentVariable("PULSEGEN_SNDFILE_PATH");
-            if (!string.IsNullOrWhiteSpace(overridePath))
-            {
-                candidates.Add(Path.GetFullPath(overridePath));
-            }
-            candidates.Add(Path.Combine(AppContext.BaseDirectory, "sndfile.dll"));
-            var assemblyDirectory = Path.GetDirectoryName(assembly.Location);
-            if (!string.IsNullOrWhiteSpace(assemblyDirectory))
-            {
-                candidates.Add(Path.Combine(assemblyDirectory, "sndfile.dll"));
-            }
-            foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                if (!File.Exists(candidate))
-                {
-                    continue;
-                }
-                if (!VerifyRuntimeFile(candidate))
-                {
-                    throw new InvalidDataException($"Refusing to load an unverified codec runtime: {candidate}");
-                }
-                loadedLibrary = NativeLibrary.Load(candidate);
-                return loadedLibrary;
-            }
-            throw new DllNotFoundException("The checksum-pinned sndfile.dll is unavailable. Run scripts/bootstrap-codecs.ps1 and rebuild PulseGen.");
+            loadedLibrary = SndFileRuntimeLoader.Current.Handle;
+            return loadedLibrary;
         }
     }
 

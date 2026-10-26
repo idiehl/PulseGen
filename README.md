@@ -1,5 +1,34 @@
 # PulseGen
 
+Create a sound, place it in a three-dimensional world, and hear what happens as
+it moves past a listener or a pair of microphones. PulseGen combines sound
+creation, moving sources, echoes, and stereo recording in one Windows desktop
+workspace.
+
+## Try alpha.20
+
+[Download the Windows x64 portable alpha](https://github.com/idiehl/PulseGen/releases/tag/v0.1.0-alpha.20)
+or browse the [Atlas Universalis Project Lab](https://atlasuniversalis.com/ProjectLab).
+Extract the complete ZIP, open `PulseGen.exe`, and choose **Explore flyby** or
+**Explore echoes** in the start guide. The package includes the .NET and local
+Python runtimes; no separate installation or account is required to try the
+local tools. Headphones are recommended.
+
+Alpha.20 can create tones and noise, import recordings, move sounds and listeners
+through editable paths, simulate rooms and surfaces, capture separate stereo
+takes, edit the two channels independently, analyze tonal and noise layers, and
+export finished audio. Its World view provides fixed-pivot orbiting, Top/Front/Side
+views, exact coordinates, movement constraints, and a separate playback strip
+with a visible Start/rewind control.
+
+This is experimental, unsigned Windows 11 x64 software. Measured SOFA head
+profiles, Demucs/AudioSep separation, and dynamic acoustic meshes remain gated.
+Projects and analysis stay local unless you explicitly use Atlas sync. See the
+[release notes](packaging/releases/0.1.0-alpha.20.md) for capabilities, limitations,
+and download verification.
+
+## Architecture and verified scope
+
 PulseGen is a physics-first, stereo sound-simulation workstation. The first
 vertical slice renders a moving primitive emitter through a bounded acoustic world
 into independently addressable binaural and stereo microphone receiver pairs.
@@ -246,8 +275,29 @@ geometric acoustics, not full wave or diffraction simulation.
 
 Bootstrap downloads the official libsndfile 1.2.2 Windows codec package into
 the ignored `.runtime` directory, verifies the archive, DLL, and license with
-the hashes in `dependencies.lock.json`, and never accepts a different DLL at
-runtime. The application links to it dynamically.
+the hashes in `dependencies.lock.json`, and verifies the default runtime before
+loading it. The application links to it dynamically. An intentional compatible
+replacement can be selected by setting `PULSEGEN_SNDFILE_PATH` to its full path
+before starting the app. Import/export receipts record the loaded version and
+hash; a missing or incompatible replacement fails instead of silently falling
+back. See the packaged LGPL relinking notice for details.
+
+## Public experimental Windows package
+
+After building and verifying the intended committed source, create an isolated
+public distribution with the full dependency notices and companion codec sources:
+
+```powershell
+./scripts/package-windows.ps1 -NoBuild -PublicDistribution -OutputDirectory out/publication/packages
+```
+
+The application ZIP and SHA-256 sidecar are written below
+`out/publication/packages`; the companion source ZIP and its hash are below
+`out/publication/sources`. Existing development packages remain in
+`out/packages`. Public download availability does not change the experimental,
+unsigned status of this alpha or imply production support. See
+[distribution packaging](packaging/public-notices/README.md) for the notice and
+source inventory.
 
 ## Private-alpha Windows package
 

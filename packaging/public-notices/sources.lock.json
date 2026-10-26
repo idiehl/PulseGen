@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "artifacts": [
+    {
+      "id": "libsndfile",
+      "version": "1.2.2",
+      "file": "libsndfile-1.2.2.tar.xz",
+      "url": "https://github.com/libsndfile/libsndfile/releases/download/1.2.2/libsndfile-1.2.2.tar.xz",
+      "sha256": "3799ca9924d3125038880367bf1468e53a1b7e3686a934f098b7e1d286cdb80e",
+      "license": "LGPL-2.1-or-later; internal ALAC Apache-2.0 and GSM/BSD notices",
+      "identityEvidence": "Official source release corresponding to the checksum-pinned libsndfile 1.2.2 Windows DLL."
+    },
+    {
+      "id": "mpg123",
+      "version": "1.31.3",
+      "file": "mpg123-1.31.3.tar.bz2",
+      "url": "https://www.mpg123.de/download/mpg123-1.31.3.tar.bz2",
+      "sha256": "1ca77d3a69a5ff845b7a0536f783fee554e1041139a6b978f6afe14f5814ad1a",
+      "sha512": "5dd550e06f5d0d432cac1b7e546215e56378b44588c1a98031498473211e08bc4228de45be41f7ba764f7f6c0eb752a6501235bcc3712c9a8d8852ae3c607d98",
+      "license": "LGPL-2.1-or-later",
+      "identityEvidence": "The bundled DLL embeds vcpkg mpg123 source identity 5dd550e06f-d919e8ea46.clean. Its source archive SHA-512 exactly matches the vcpkg 2023.08.09 mpg123 1.31.3 recipe."
+    },
+    {
+      "id": "lame",
+      "version": "3.100",
+      "file": "lame-3.100.tar.gz",
+      "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
+      "downloadUrl": "https://deb.debian.org/debian/pool/main/l/lame/lame_3.100.orig.tar.gz",
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "sha512": "0844b9eadb4aacf8000444621451277de365041cc1d97b7f7a589da0b7a23899310afd4e4d81114b9912aa97832621d20588034715573d417b2923948c08634b",
+      "license": "LGPL-2.0-or-later",
+      "identityEvidence": "Bundled DLL reports LAME3.100. Debian mirrors the unchanged upstream archive: its complete SHA-512 matches the official vcpkg 2023.08.09 mp3lame recipe."
+    },
+    {
+      "id": "flac",
+      "version": "1.4.2",
+      "file": "flac-1.4.2.tar.xz",
+      "url": "https://downloads.xiph.org/releases/flac/flac-1.4.2.tar.xz",
+      "sha256": "e322d58a1f48d23d9dd38f432672865f6f79e73a6f9cc5a5f57fcaa83eb5a8e4",
+      "license": "BSD-3-Clause library; source archive also contains separately licensed tools and documentation",
+      "identityEvidence": "The pinned DLL reports libFLAC 1.4.2."
+    },
+    {
+      "id": "ogg",
+      "version": "1.3.5",
+      "file": "libogg-1.3.5.tar.xz",
+      "url": "https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.xz",
+      "sha256": "c4d91be36fc8e54deae7575241e03f4211eb102afb3fc0775fbbc1b740016705",
+      "license": "BSD-3-Clause",
+      "identityEvidence": "libogg is present within the DLL; it exposes no version query. This is the source release selected by the contemporaneous vcpkg 2023.08.09 libogg recipe, not a claim of independently recovered binary build metadata."
+    },
+    {
+      "id": "vorbis",
+      "version": "1.3.7",
+      "file": "libvorbis-1.3.7.tar.xz",
+      "url": "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.xz",
+      "sha256": "b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b",
+      "license": "BSD-3-Clause",
+      "identityEvidence": "The bundled DLL contains Xiph.Org libVorbis 1.3.7 and reports Vorbis I 20200704."
+    },
+    {
+      "id": "opus",
+      "version": "1.4",
+      "file": "opus-1.4.tar.gz",
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.4.tar.gz",
+      "sha256": "c9b32b4253be5ae63d1ff16eea06b94b5f0f2951b7a02aceef58e3a3ce49c51f",
+      "license": "BSD-3-Clause and upstream patent grants",
+      "identityEvidence": "The bundled DLL reports libopus 1.4."
+    },
+    {
+      "id": "vcpkg-build-recipes",
+      "version": "2023.08.09",
+      "file": "vcpkg-2023.08.09.zip",
+      "url": "https://github.com/microsoft/vcpkg/archive/refs/tags/2023.08.09.zip",
+      "sha256": "87f7184eb39776ccc28de53d79c7b8710952d074882ee6cdcb2bae02e63756d7",
+      "license": "MIT; individual ports preserve their upstream licenses",
+      "identityEvidence": "Reference build recipes, patches and checksums from the vcpkg release immediately preceding libsndfile 1.2.2. This is not a claim that the upstream binary was reproduced bit-for-bit or that its original toolchain was independently recovered."
+    }
+  ]
+}

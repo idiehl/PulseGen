@@ -52,15 +52,29 @@ stored beside the runtime as `COPYING-libsndfile-LGPL-2.1.txt`. Packaged builds
 must include that file, identify the DLL as replaceable, and preserve access to
 the corresponding upstream source.
 
+The bundled default remains checksum-pinned. A recipient may deliberately set
+`PULSEGEN_SNDFILE_PATH` to a compatible replacement Windows x64 libsndfile 1.x
+DLL before launch. Both importing and exporting use that selected library;
+missing APIs or an incompatible version produce an error. Provenance records
+the actual loaded version and hash. The public package includes the scoped
+LGPL replacement/debugging rights in `licenses/public/LGPL_RELINKING.txt`.
+
 The pinned DLL identifies its bundled encoders as libFLAC 1.4.2, LAME 3.100,
 libopus 1.4, and Xiph.Org libVorbis I 20200704. FLAC, Ogg, Vorbis, and Opus use
 Xiph/BSD-style licenses; LAME uses LGPL. Their copyright notices and applicable
-license texts must accompany a distributable PulseGen package. This development
-milestone produces an unsigned portable engineering package and copies the
+license texts must accompany a distributable PulseGen package. The official DLL
+also includes the LGPL mpg123 1.31.3 decoder and BSD libogg; the public source
+index documents the recovered identity evidence and remaining upstream-build
+provenance limits. Public distribution packaging provides the codec license
+texts, authors, a checksum-indexed companion source archive, .NET third-party
+notices, resolved managed-package notices, and native contributed-library notices.
+See `packaging/public-notices/README.md` and `sources.lock.json` for inputs.
+
+Development packaging produces an unsigned portable engineering package and copies the
 verified libsndfile, Assimp, miniaudio, CPython, and NumPy license records beside
 the application. It also records the fully resolved managed NuGet inventory.
-Public installer-level notice review and code signing remain packaging-hardening
-gates rather than being implied complete.
+Code signing, a supported installer, and installer-level review remain future
+packaging work; the public portable alpha does not claim those are complete.
 
 ## CPython 3.11.9 and NumPy 2.0.2
 

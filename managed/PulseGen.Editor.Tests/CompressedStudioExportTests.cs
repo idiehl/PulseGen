@@ -70,6 +70,8 @@ public sealed class CompressedStudioExportTests
             Assert.Equal(lossy, result.Lossy);
             Assert.Equal("libsndfile", result.EncoderName);
             Assert.Contains("1.2.2", result.EncoderVersion, StringComparison.Ordinal);
+            Assert.Contains($"runtimeSha256={SndFileCodecAdapter.ExpectedBinarySha256}", result.EncoderSettings, StringComparison.Ordinal);
+            Assert.Contains("userReplacement=False", result.EncoderSettings, StringComparison.Ordinal);
             Assert.Null(result.SampleRateConversion);
             Assert.Equal(bits, result.BitsPerSample);
             AssertChannelIdentity(source, reopened.Buffer);

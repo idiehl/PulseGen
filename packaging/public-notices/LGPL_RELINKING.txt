@@ -1,0 +1,18 @@
+LGPL COMPONENT MODIFICATION AND DEBUGGING
+
+PulseGen distributes libsndfile, LAME and mpg123 under their upstream LGPL
+licenses. Their license texts, copyright notices, source locations and source
+archive hashes accompany this distribution. A companion third-party source
+archive is available alongside the Windows download in the same release.
+
+Recipients may modify or replace those LGPL components and reverse engineer
+the combined application for debugging modifications to those components, as
+provided by their LGPL licenses. No PulseGen distribution term restricts these
+activities. This permission does not select a general open-source license for
+PulseGen's own code or change the licenses of any other component.
+
+The normal codec load verifies the supplied sndfile.dll by SHA-256. The explicit
+custom-codec workflow permits use of a compatible modified library while making
+that change visible. Such a library may alter output, reliability, security or
+render reproducibility; its identity must be recorded separately from the
+original checksum-pinned build.

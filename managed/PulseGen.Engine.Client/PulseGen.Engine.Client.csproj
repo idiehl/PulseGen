@@ -5,6 +5,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\PulseGen.Contracts\PulseGen.Contracts.csproj" />
+    <InternalsVisibleTo Include="PulseGen" />
+    <InternalsVisibleTo Include="PulseGen.Engine.Client.Tests" />
   </ItemGroup>
   <PropertyGroup>
     <PulseGenSampleCodecPath>$(MSBuildProjectDirectory)\..\..\.runtime\codecs\libsndfile-1.2.2\sndfile.dll</PulseGenSampleCodecPath>

@@ -2,7 +2,11 @@ name: pulsegen-ci
 
 on:
   push:
+    branches: ['**']
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   verify:
@@ -16,6 +20,10 @@ jobs:
         with:
           python-version: '3.11'
       - uses: lukka/get-cmake@latest
+      - name: Configure MSVC x64 compiler environment
+        uses: ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c # v1.13.0
+        with:
+          arch: x64
       - name: Prepare isolated ModelHost test boundary
         shell: pwsh
         run: |

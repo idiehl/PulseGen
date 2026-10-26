@@ -144,7 +144,7 @@ public static unsafe class SampleAudioReader
             {
                 Container = container,
                 DecoderVersion = Marshal.PtrToStringUTF8(api.Version()) ?? "unknown",
-                DecoderBinarySha256 = ExpectedBinarySha256,
+                DecoderBinarySha256 = SndFileRuntimeLoader.Current.BinarySha256,
                 BitsPerSample = (info.Format & 0xffff) switch { 1 or 5 => 8, 2 => 16, 3 => 24, 4 or 6 => 32, 7 => 64, _ => null },
                 Title = Marshal.PtrToStringUTF8(api.GetString(handle, 1)),
                 Comment = Marshal.PtrToStringUTF8(api.GetString(handle, 5))
@@ -204,13 +204,7 @@ public static unsafe class SampleAudioReader
 
     private static CodecApi LoadCodec()
     {
-        var overridePath = Environment.GetEnvironmentVariable("PULSEGEN_SNDFILE_PATH");
-        var path = !string.IsNullOrWhiteSpace(overridePath) ? Path.GetFullPath(overridePath) : Path.Combine(AppContext.BaseDirectory, "sndfile.dll");
-        if (!File.Exists(path)) throw new DllNotFoundException("The pinned sample decoder is missing. Run scripts/bootstrap-codecs.ps1 and rebuild PulseGen.");
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(stream)), ExpectedBinarySha256, StringComparison.Ordinal))
-            throw new InvalidDataException("Refusing to load a sample decoder that does not match the pinned SHA-256.");
-        return new CodecApi(NativeLibrary.Load(path));
+        return new CodecApi(SndFileRuntimeLoader.Current.Handle);
     }
 
     [StructLayout(LayoutKind.Sequential)]
