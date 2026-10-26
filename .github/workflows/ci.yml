@@ -24,6 +24,12 @@ jobs:
         uses: ilammy/msvc-dev-cmd@a102174a2b586eec2ea151a69e6fd14404a8ce7c # v1.13.0
         with:
           arch: x64
+      - name: Preserve the managed solution platform default
+        shell: pwsh
+        run: |
+          # vcvars exports Platform=x64, but the managed solution defines Any CPU.
+          # Keep its compiler paths and architecture variables for CMake only.
+          "Platform=" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Prepare isolated ModelHost test boundary
         shell: pwsh
         run: |
@@ -33,18 +39,22 @@ jobs:
       - name: Bootstrap checksum-pinned codec runtime
         shell: pwsh
         run: ./scripts/bootstrap-codecs.ps1
-      - name: Restore managed projects
-        run: dotnet restore PulseGen.sln
-      - name: Build managed projects
-        run: dotnet build PulseGen.sln -c Release --no-restore
-      - name: Test managed contracts
-        run: dotnet test PulseGen.sln -c Release --no-build
       - name: Configure native engine
         run: cmake --preset windows-release
       - name: Build native engine
         run: cmake --build --preset windows-release
       - name: Test native engine
         run: ctest --preset windows-release
+      - name: Select the native engine for managed integration tests
+        shell: pwsh
+        run: |
+          "PULSEGEN_ENGINE_PATH=$((Resolve-Path out/native/release/native/PulseGen.Engine.dll).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Restore managed projects
+        run: dotnet restore PulseGen.sln
+      - name: Build managed projects
+        run: dotnet build PulseGen.sln -c Release --no-restore
+      - name: Test managed contracts and native integration
+        run: dotnet test PulseGen.sln -c Release --no-build
       - name: Validate model-host manifests
         run: |
           python -m unittest discover -s modelhost/tests -v
